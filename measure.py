@@ -351,49 +351,95 @@ class Halcon1DMeasure:
         dy = row_edges[idx2] - row_edges[idx1]
         intra_distances.append(np.sqrt(dx**2 + dy**2))
 
+    def draw_measure_region(self, img: np.ndarray, 
+                            rect_color: Tuple[int, int, int] = (0, 255, 0),
+                            rect_thickness: int = 2,
+                            axis_color: Tuple[int, int, int] = (255, 0, 0),
+                            axis_thickness: int = 2,
+                            arrow_length: float = 20) -> np.ndarray:
+        """
+        在图像上绘制旋转矩形框和带箭头的主轴线
+        
+        参数:
+            img: 输入图像（BGR格式）
+            rect_color: 矩形边框颜色 (B, G, R)
+            rect_thickness: 矩形边框粗细
+            axis_color: 主轴线颜色 (B, G, R)
+            axis_thickness: 主轴线粗细
+            arrow_length: 箭头长度
+            
+        返回:
+            绘制后的图像
+        """
+        # 创建图像副本以避免修改原图
+        result = img.copy()
+
+        # 计算旋转矩形的四个顶点
+        cos_a = np.cos(self.angle)
+        sin_a = np.sin(self.angle)
+        
+        # 矩形尺寸
+        width = self.length1  # 沿主轴方向
+        height = self.length2  # 垂直主轴方向
+        
+        # 矩形中心
+        cx, cy = self.col, self.row
+        
+        # 计算四个顶点
+        dx = width / 2
+        dy = height / 2
+        
+        # 计算四个顶点的坐标
+        p1 = (int(cx + dx * cos_a - dy * sin_a), int(cy + dx * sin_a + dy * cos_a))
+        p2 = (int(cx - dx * cos_a - dy * sin_a), int(cy - dx * sin_a + dy * cos_a))
+        p3 = (int(cx - dx * cos_a + dy * sin_a), int(cy - dx * sin_a - dy * cos_a))
+        p4 = (int(cx + dx * cos_a + dy * sin_a), int(cy + dx * sin_a - dy * cos_a))
+        
+        # 绘制旋转矩形
+        cv2.line(result, p1, p2, rect_color, rect_thickness)
+        cv2.line(result, p2, p3, rect_color, rect_thickness)
+        cv2.line(result, p3, p4, rect_color, rect_thickness)
+        cv2.line(result, p4, p1, rect_color, rect_thickness)
+        
+        # 计算主轴线的起点和终点
+        axis_length = max(width, height) / 2 + arrow_length
+        start_point = (int(cx - axis_length * cos_a), int(cy - axis_length * sin_a))
+        end_point = (int(cx + axis_length * cos_a), int(cy + axis_length * sin_a))
+        
+        # 绘制主轴线
+        cv2.line(result, start_point, end_point, axis_color, axis_thickness)
+        
+        # 绘制箭头
+        arrow_angle = np.pi / 6  # 箭头角度
+        arrow_len = arrow_length
+        
+        # 计算箭头的两个侧边
+        arrow_p1 = (
+            int(end_point[0] - arrow_len * np.cos(self.angle - arrow_angle)),
+            int(end_point[1] - arrow_len * np.sin(self.angle - arrow_angle))
+        )
+        arrow_p2 = (
+            int(end_point[0] - arrow_len * np.cos(self.angle + arrow_angle)),
+            int(end_point[1] - arrow_len * np.sin(self.angle + arrow_angle))
+        )
+        
+        # 绘制箭头
+        cv2.line(result, end_point, arrow_p1, axis_color, axis_thickness)
+        cv2.line(result, end_point, arrow_p2, axis_color, axis_thickness)
+        
+        return result
+
 
 # 使用示例
-if __name__ == "__main__":
-    # 读取图像
-    img = cv2.imread('fuse.png', cv2.IMREAD_GRAYSCALE)
-    h, w = img.shape
+# if __name__ == "__main__":
+#     # 读取图像
+#     img = cv2.imread('fuse.png', cv2.IMREAD_GRAYSCALE)
+#     h, w = img.shape
     
-    # 创建测量对象
-    measure = Halcon1DMeasure(
-        row=300, col=300, angle=np.pi/2,
-        length1=80, length2=10,
-        img_width=w, img_height=h,
-        interpolation='bilinear'
-    )
-    
-    # 执行测量
-    (row1, col1, amp1, row2, col2, amp2, 
-     center_row, center_col, intra_dist, inter_dist) = \
-        measure.measure_pairs(img, sigma=1.0, threshold=30.0, 
-                              transition='negative', select='all')
-    
-    # 打印结果
-    print(f"Detected {len(row1)} edge pairs:")
-    for i in range(len(row1)):
-        print(f"Pair {i+1}:")
-        print(f"  Edge 1: ({col1[i]:.2f}, {row1[i]:.2f}), Amplitude: {amp1[i]:.2f}")
-        print(f"  Edge 2: ({col2[i]:.2f}, {row2[i]:.2f}), Amplitude: {amp2[i]:.2f}")
-        print(f"  Center: ({center_col[i]:.2f}, {center_row[i]:.2f})")
-        print(f"  Width: {intra_dist[i]:.2f} pixels")
-    
-    # 可视化
-    vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    for i in range(len(row1)):
-        # 绘制第一条边
-        cv2.line(vis, (int(col1[i]-10), int(row1[i])), 
-                 (int(col1[i]+10), int(row1[i])), (0, 255, 255), 2)
-        # 绘制第二条边
-        cv2.line(vis, (int(col2[i]-10), int(row2[i])), 
-                 (int(col2[i]+10), int(row2[i])), (255, 0, 255), 2)
-        # 显示宽度
-        cv2.putText(vis, f'{intra_dist[i]:.1f}px', 
-                    (int(center_col[i]), int(center_row[i]-15)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-    
-    cv2.imshow('Result', vis)
-    cv2.waitKey(0)
+#     # 创建测量对象
+#     measure = Halcon1DMeasure(
+#         row=300, col=300, angle=np.pi/2,
+#         length1=80, length2=10,
+#         img_width=w, img_height=h,
+#         interpolation='bilinear'
+#     )
