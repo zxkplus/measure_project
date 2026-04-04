@@ -260,7 +260,7 @@ class Halcon1DMeasure:
         
         # Debug 6: 在原图上标记检测到的边缘点
         if debug:
-            self._debug_original_with_edges(img, row_edges, col_edges, amplitudes,
+            self._debug_original_with_edges(img, row_edges, col_edges, refined_amplitudes,
                                            transition, window_name='Debug_6_Original_with_Edges')
         
         # Step 10: 根据select筛选
