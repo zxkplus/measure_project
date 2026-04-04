@@ -807,6 +807,148 @@ class Halcon1DMeasure:
             cv2.destroyAllWindows()
         return vis_img
 
+    def display_results(self, img: np.ndarray, 
+                   row_edges: List[float], col_edges: List[float], amplitudes: List[float],
+                   row1: List[float] = None, col1: List[float] = None, amp1: List[float] = None,
+                   row2: List[float] = None, col2: List[float] = None, amp2: List[float] = None,
+                   centers_row: List[float] = None, centers_col: List[float] = None,
+                   intra_dist: List[float] = None, inter_dist: List[float] = None,
+                   window_name: str = 'Measurement Results', wait_time: int = 0):
+        """
+        在原图上显示测量结果
+        
+        参数:
+            img: 原始图像
+            row_edges, col_edges, amplitudes: 单个边缘检测结果（来自measure_pos）
+            row1, col1, amp1: 第一条边缘的坐标和幅度（来自measure_pairs）
+            row2, col2, amp2: 第二条边缘的坐标和幅度（来自measure_pairs）
+            centers_row, centers_col: 边对中心的坐标（来自measure_pairs）
+            intra_dist: 边对内距离（来自measure_pairs）
+            inter_dist: 边对之间距离（来自measure_pairs）
+            window_name: 窗口名称
+            wait_time: 等待时间（毫秒），0表示无限等待，-1表示不显示窗口
+        """
+        # 转换为彩色图像
+        if len(img.shape) == 2:
+            vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        else:
+            vis = img.copy()
+        
+        # 绘制ROI矩形框
+        cos_a = np.cos(self.angle)
+        sin_a = np.sin(self.angle)
+        dx_half = self.length1 / 2
+        dy_half = self.length2 / 2
+        
+        # 计算矩形框的四个角点
+        corners = np.array([
+            [self.col - dx_half * cos_a + dy_half * sin_a,
+            self.row - dx_half * sin_a - dy_half * cos_a],
+            [self.col + dx_half * cos_a + dy_half * sin_a,
+            self.row + dx_half * sin_a - dy_half * cos_a],
+            [self.col + dx_half * cos_a - dy_half * sin_a,
+            self.row + dx_half * sin_a + dy_half * cos_a],
+            [self.col - dx_half * cos_a - dy_half * sin_a,
+            self.row - dx_half * sin_a + dy_half * cos_a]
+        ], dtype=np.int32)
+        
+        # 绘制矩形框（绿色）
+        cv2.polylines(vis, [corners], True, (0, 255, 0), 2)
+        
+        # 如果有边缘对结果，优先显示边缘对
+        if row1 is not None and len(row1) > 0:
+            # 绘制边缘对
+            for i in range(len(row1)):
+                # 第一条边（黄色）
+                cv2.circle(vis, (int(col1[i]), int(row1[i])), 6, (0, 255, 255), -1)
+                cv2.circle(vis, (int(col1[i]), int(row1[i])), 8, (0, 0, 0), 2)
+                
+                # 显示梯度弧度值
+                amp_text = f'{amp1[i]:.2f}rad'
+                cv2.putText(vis, amp_text, (int(col1[i]) + 12, int(row1[i])),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)
+                cv2.putText(vis, amp_text, (int(col1[i]) + 12, int(row1[i])),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+                
+                # 第二条边（洋红）
+                cv2.circle(vis, (int(col2[i]), int(row2[i])), 6, (255, 0, 255), -1)
+                cv2.circle(vis, (int(col2[i]), int(row2[i])), 8, (0, 0, 0), 2)
+                
+                # 显示梯度弧度值
+                amp_text = f'{amp2[i]:.2f}rad'
+                cv2.putText(vis, amp_text, (int(col2[i]) + 12, int(row2[i])),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)
+                cv2.putText(vis, amp_text, (int(col2[i]) + 12, int(row2[i])),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
+                
+                # 绘制连接线（蓝色）
+                cv2.line(vis, (int(col1[i]), int(row1[i])), (int(col2[i]), int(row2[i])), 
+                        (255, 0, 0), 2, cv2.LINE_AA)
+                
+                # 显示对内距离
+                center_x = (col1[i] + col2[i]) / 2
+                center_y = (row1[i] + row2[i]) / 2
+                dist_text = f'{intra_dist[i]:.2f}px'
+                cv2.putText(vis, dist_text, (int(center_x) - 20, int(center_y) - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)
+                cv2.putText(vis, dist_text, (int(center_x) - 20, int(center_y) - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
+            
+            # 绘制边对之间的连接线（显示对间距离）
+            if len(centers_row) > 1:
+                for i in range(len(centers_row) - 1):
+                    # 绘制连接线
+                    cv2.line(vis, (int(centers_col[i]), int(centers_row[i])),
+                            (int(centers_col[i+1]), int(centers_row[i+1])),
+                            (0, 100, 255), 1, cv2.LINE_AA)
+                    
+                    # 显示对间距离
+                    mid_x = (centers_col[i] + centers_col[i+1]) / 2
+                    mid_y = (centers_row[i] + centers_row[i+1]) / 2
+                    dist_text = f'{inter_dist[i]:.2f}px'
+                    cv2.putText(vis, dist_text, (int(mid_x) + 10, int(mid_y)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)
+                    cv2.putText(vis, dist_text, (int(mid_x) + 10, int(mid_y)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 100, 255), 1)
+        
+        # 如果只有单个边缘结果，显示单个边缘
+        elif row_edges is not None and len(row_edges) > 0:
+            for i in range(len(row_edges)):
+                # 根据幅度正负选择颜色
+                if amplitudes[i] > 0:
+                    color = (0, 255, 255)  # 黄色 - 正峰值（暗->亮）
+                else:
+                    color = (255, 0, 255)  # 洋红 - 负峰值（亮->暗）
+                
+                # 绘制圆点
+                cv2.circle(vis, (int(col_edges[i]), int(row_edges[i])), 6, color, -1)
+                cv2.circle(vis, (int(col_edges[i]), int(row_edges[i])), 8, (0, 0, 0), 2)
+                
+                # 显示梯度弧度值
+                amp_text = f'{amplitudes[i]:.2f}rad'
+                cv2.putText(vis, amp_text, (int(col_edges[i]) + 12, int(row_edges[i])),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)
+                cv2.putText(vis, amp_text, (int(col_edges[i]) + 12, int(row_edges[i])),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+        
+        # 添加标题
+        title = 'Measurement Results'
+        cv2.putText(vis, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+        cv2.putText(vis, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+        
+        # 添加ROI信息
+        roi_info = f'ROI: ({self.col:.0f},{self.row:.0f}) {np.degrees(self.angle):.1f}°'
+        cv2.putText(vis, roi_info, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+        cv2.putText(vis, roi_info, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        # 显示结果
+        if wait_time >= 0:
+            cv2.imshow(window_name, vis)
+            cv2.waitKey(wait_time)
+            if wait_time > 0:
+                cv2.destroyAllWindows()
+        
+        return vis
 
 # 测试和可视化函数
 def create_test_image() -> np.ndarray:
