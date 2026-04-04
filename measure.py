@@ -440,7 +440,7 @@ class Halcon1DMeasure:
     
     def _debug_profile(self, profile: np.ndarray, title: str, 
                       color: Tuple[int, int, int] = (0, 255, 0),
-                      zero_line: bool = False, window_name: str = 'Debug_Profile'):
+                      zero_line: bool = False, window_name: str = 'Debug_Profile',wait_time = 1000):
         """
         调试：显示一维信号（轮廓或梯度）的折线图
         
@@ -496,10 +496,12 @@ class Halcon1DMeasure:
         cv2.putText(vis, range_text, (10, img_height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
         
         cv2.imshow(window_name, vis)
+        cv2.waitKey(wait_time)
+        cv2.destroyAllWindows()
     
     def _debug_profile_with_peaks(self, profile: np.ndarray, positions: List[float], 
                                   amplitudes: List[float], title: str,
-                                  window_name: str = 'Debug_Profile_with_Peaks'):
+                                  window_name: str = 'Debug_Profile_with_Peaks',wait_time=1000):
         """
         调试：在梯度图上标记峰值点
         
@@ -578,9 +580,11 @@ class Halcon1DMeasure:
         cv2.putText(vis, stats_text, (10, img_height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
         
         cv2.imshow(window_name, vis)
+        cv2.waitKey(wait_time)
+        cv2.destroyAllWindows()
     
     def _debug_roi_with_peaks(self, roi: np.ndarray, positions: List[float], 
-                             amplitudes: List[float], window_name: str = 'Debug_ROI_with_Peaks'):
+                             amplitudes: List[float], window_name: str = 'Debug_ROI_with_Peaks',wait_time=1000):
         """
         调试：在ROI小图上标记峰值点（沿垂直中心线）
         
@@ -635,10 +639,12 @@ class Halcon1DMeasure:
         cv2.rectangle(vis, (0, 0), (w-1, h-1), (0, 0, 0), 2)
         
         cv2.imshow(window_name, vis)
+        cv2.waitKey(wait_time)
+        cv2.destroyAllWindows()
     
     def _debug_original_with_edges(self, img: np.ndarray, row_edges: List[float], 
                                    col_edges: List[float], amplitudes: List[float],
-                                   transition: str, window_name: str = 'Debug_Original_with_Edges'):
+                                   transition: str, window_name: str = 'Debug_Original_with_Edges',wait_time=1000):
         """
         调试：在原图上标记检测到的边缘点
         
@@ -712,12 +718,14 @@ class Halcon1DMeasure:
         cv2.putText(vis, roi_info, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         cv2.imshow(window_name, vis)
+        cv2.waitKey(wait_time)
+        cv2.destroyAllWindows()
     
     def draw_roi_on_image(self, img: np.ndarray, 
                          rect_color: Tuple[int, int, int] = (0, 255, 0),
                          arrow_color: Tuple[int, int, int] = (255, 0, 0),
                          line_thickness: int = 2,
-                         arrow_length_ratio: float = 0.8) -> np.ndarray:
+                         arrow_length_ratio: float = 0.8,wait_time=-1) -> np.ndarray:
         """
         在图像上绘制ROI矩形框和主方向箭头
         
@@ -793,7 +801,10 @@ class Halcon1DMeasure:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
         cv2.putText(vis_img, angle_text, text_pos,
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-        
+        if wait_time != -1 and wait_time > 0:
+            cv2.imshow("draw_roi_on_image",vis_img)
+            cv2.waitKey(wait_time)
+            cv2.destroyAllWindows()
         return vis_img
 
 
