@@ -273,7 +273,7 @@ class Halcon1DMeasure:
     
     def measure_pairs(self, img: np.ndarray, sigma: float = 1.0,
                       threshold: float = 30.0, transition: str = 'negative',
-                      select: str = 'all'):
+                      select: str = 'all',debug: bool = False):
         """
         执行边缘对检测
         
@@ -286,7 +286,7 @@ class Halcon1DMeasure:
         """
         # 获取所有边缘
         row_edges, col_edges, amplitudes, _ = \
-            self.measure_pos(img, sigma, threshold, 'all', 'all')
+            self.measure_pos(img, sigma, threshold, transition, select,False,debug)
         
         if len(row_edges) < 2:
             return [], [], [], [], [], [], [], [], [],[]
