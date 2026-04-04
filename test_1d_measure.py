@@ -22,6 +22,15 @@ class TestHalcon1DMeasure:
         return img
     
     @pytest.fixture
+    def sample_image_real(self):
+        """创建一个测试用的简单图像"""
+        #读取一张真实的图片
+        img = cv2.imread('data/sample/bottleneck_2.jpg', cv2.IMREAD_GRAYSCALE)
+        #将图片缩小2倍
+        img = cv2.resize(img, (img.shape[1]//2, img.shape[0]//2))
+        return img
+    
+    @pytest.fixture
     def measure_obj(self, sample_image):
         """创建一个测量对象"""
         h, w = sample_image.shape
@@ -41,19 +50,19 @@ class TestHalcon1DMeasure:
         assert measure_obj.interpolation == 'bilinear'
     
 
-    def test_basic_debug(self,sample_image):
+    def test_basic_debug(self,sample_image_real):
         """测试基本的调试功能"""
         print("=" * 60)
         print("测试基本调试功能")
         print("=" * 60)
         
         # 创建测试图像
-        img = create_test_image()
+        img = sample_image_real
         
         # 创建测量对象
         measure = Halcon1DMeasure(
-            row=300,
-            col=400,
+            row=1066 / 2,
+            col=1294 / 2,
             angle=0,
             length1=600,
             length2=50,
@@ -67,7 +76,7 @@ class TestHalcon1DMeasure:
             measure.draw_roi_on_image(img,wait_time=1000)
             # 执行测量（开启调试）
             row_edges, col_edges, amplitudes, distances = \
-                measure.measure_pos(img, sigma=1.5, threshold=15.0, 
+                measure.measure_pos(img, sigma=15, threshold=85.0, 
                                 transition='all', select='all', debug=True)
             
             print(f"\n✓ 测试成功！")
@@ -86,7 +95,7 @@ class TestHalcon1DMeasure:
             print("\n执行边缘对检测...")
             (row1, col1, amp1, row2, col2, amp2, 
             center_row, center_col, intra_dist, inter_dist) = \
-                measure.measure_pairs(img, sigma=1.5, threshold=15.0, 
+                measure.measure_pairs(img, sigma=15, threshold=85.0, 
                                 transition='negative', select='all')
             
             print(f"\n✓ 边缘对检测成功！")
