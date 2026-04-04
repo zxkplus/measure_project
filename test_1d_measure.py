@@ -55,7 +55,7 @@ class TestHalcon1DMeasure:
             row=300,
             col=400,
             angle=0,
-            length1=400,
+            length1=600,
             length2=50,
             interpolation='linear'
         )
@@ -76,6 +76,41 @@ class TestHalcon1DMeasure:
             for i in range(len(row_edges)):
                 print(f"  [{i+1}] ({col_edges[i]:.2f}, {row_edges[i]:.2f}), "
                     f"幅度={amplitudes[i]:.2f}")
+                
+            # 显示边缘检测结果
+            print("\n显示边缘检测结果...")
+            measure.display_results(img, row_edges, col_edges, amplitudes, 
+                                window_name='Edge Detection Results', wait_time=1000)
+            
+            # 执行边缘对检测
+            print("\n执行边缘对检测...")
+            (row1, col1, amp1, row2, col2, amp2, 
+            center_row, center_col, intra_dist, inter_dist) = \
+                measure.measure_pairs(img, sigma=1.5, threshold=15.0, 
+                                transition='negative', select='all')
+            
+            print(f"\n✓ 边缘对检测成功！")
+            print(f"检测到 {len(row1)} 个边缘对")
+            print(f"边缘对详情:")
+            for i in range(len(row1)):
+                print(f"  [{i+1}] 第一条边: ({col1[i]:.2f}, {row1[i]:.2f}), 幅度={amp1[i]:.2f}")
+                print(f"       第二条边: ({col2[i]:.2f}, {row2[i]:.2f}), 幅度={amp2[i]:.2f}")
+                print(f"       中心点: ({center_col[i]:.2f}, {center_row[i]:.2f})")
+                print(f"       宽度: {intra_dist[i]:.2f} 像素")
+            
+            if inter_dist:
+                print(f"\n边缘对间距: {[f'{d:.2f}' for d in inter_dist]}")
+            
+            # 显示边缘对检测结果
+            print("\n显示边缘对检测结果...")
+            measure.display_results(img, row_edges=None, col_edges=None, amplitudes=None,
+                                row1=row1, col1=col1, amp1=amp1,
+                                row2=row2, col2=col2, amp2=amp2,
+                                centers_row=center_row, centers_col=center_col,
+                                intra_dist=intra_dist, inter_dist=inter_dist,
+                                window_name='Pair Detection Results', wait_time=500000)
+            
+            print("\n✓ 测试成功完成！")
             
             return True
             
