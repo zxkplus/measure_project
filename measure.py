@@ -906,9 +906,9 @@ class Halcon1DMeasure:
                     mid_x = (centers_col[i] + centers_col[i+1]) / 2
                     mid_y = (centers_row[i] + centers_row[i+1]) / 2
                     dist_text = f'{inter_dist[i]:.2f}px'
-                    cv2.putText(vis, dist_text, (int(mid_x) + 10, int(mid_y)),
+                    cv2.putText(vis, dist_text, (int(mid_x) + 10, int(mid_y) + 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)
-                    cv2.putText(vis, dist_text, (int(mid_x) + 10, int(mid_y)),
+                    cv2.putText(vis, dist_text, (int(mid_x) + 10, int(mid_y) + 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 100, 255), 1)
         
         # 如果只有单个边缘结果，显示单个边缘
