@@ -138,9 +138,25 @@ def create_test_image_with_multiple_circles(width: int = 600, height: int = 500)
     
     return img
 
+def sample_image_real():
+        """创建一个测试用的简单图像"""
+        #读取一张真实的图片
+        img = cv2.imread('data/sample/bottleneck_2.jpg', cv2.IMREAD_GRAYSCALE)
+        #将图片缩小2倍
+        img = cv2.resize(img, (img.shape[1]//2, img.shape[0]//2))
+        return img
+    
+def sample_image_real_2():
+    """创建一个测试用的简单图像"""
+    #读取一张真实的图片
+    img = cv2.imread('data/sample/bottleopen_2.jpg', cv2.IMREAD_GRAYSCALE)
+    #将图片缩小2倍
+    img = cv2.resize(img, (img.shape[1]//2, img.shape[0]//2))
+    return img
 
 class TestLineMeasureObject:
     """直线测量对象测试"""
+    
     
     @staticmethod
     def test_horizontal_line():
@@ -153,13 +169,14 @@ class TestLineMeasureObject:
         img = create_test_image_with_line(
             width=500, height=400,
             line_angle=0,  # 水平
-            line_position=(200, 250)  # row=200
+            line_position=(200, 250),  # row=200
+            line_thickness=100
         )
         
         # 创建直线测量对象
         line_obj = LineMeasureObject(
-            start=(200, 50),      # 起点 (row, col)
-            end=(200, 450),       # 终点 (row, col)
+            start=(250, 50),      # 起点 (row, col)
+            end=(250, 450),       # 终点 (row, col)
             measure_length1=10,   # 沿直线方向半长度
             measure_length2=25,   # 垂直直线方向半宽度
             num_measures=12,
@@ -258,16 +275,17 @@ class TestLineMeasureObject:
         print("="*60)
         
         # 创建测试图像（45度斜线）
-        angle = np.pi / 4  # 45度
+        angle = np.pi / 6  # 45度
         img = create_test_image_with_line(
             width=500, height=400,
             line_angle=angle,
-            line_position=(200, 250)
+            line_position=(200, 250),
+            line_thickness=100
         )
         
         # 计算斜线的起点和终点
         length = 300
-        center_row, center_col = 200, 250
+        center_row, center_col = 200, 350
         start = (center_row - length/2 * np.sin(angle), 
                  center_col - length/2 * np.cos(angle))
         end = (center_row + length/2 * np.sin(angle), 
@@ -277,22 +295,16 @@ class TestLineMeasureObject:
         line_obj = LineMeasureObject(
             start=start,
             end=end,
-            measure_length1=10,
-            measure_length2=25,
-            num_measures=15,
-            sigma=1.0,
-            threshold=20.0
+            measure_length1=40,
+            measure_length2=100,
+            num_measures=10,
+            sigma=5.0,
+            threshold=40
         )
         
         # 执行测量
         result = line_obj.measure(img)
-        
         assert result is not None, "测量结果不应为空"
-        
-        angle_deg = np.degrees(result['angle'])
-        print(f"拟合直线角度: {angle_deg:.2f}° (预期约45°)")
-        print(f"边缘点数: {result['num_points']}")
-        print(f"拟合误差: {result['mean_error']:.4f} px")
         
         # 可视化
         vis_img = line_obj.visualize(img)
@@ -304,8 +316,66 @@ class TestLineMeasureObject:
         cv2.imshow('Diagonal Line Measure', vis_img)
         cv2.waitKey(1000)
         
+        angle_deg = np.degrees(result['angle'])
+        print(f"拟合直线角度: {angle_deg:.2f}° (预期约45°)")
+        print(f"边缘点数: {result['num_points']}")
+        print(f"拟合误差: {result['mean_error']:.4f} px")
+        
+       
+        
         return True
-
+    
+    def test_horizontal_line_real(self):
+        """测试水平直线测量"""
+        print("\n" + "="*60)
+        print("测试：水平直线测量")
+        print("="*60)
+        
+        # 创建测试图像（水平直线）
+        img = sample_image_real()
+        
+        # 创建直线测量对象
+        line_obj = LineMeasureObject(
+            start=(750 / 2,966 / 2),      # 起点 (row, col)
+            end=(760/ 2,1626 / 2),       # 终点 (row, col)
+            measure_length1=10,   # 沿直线方向半长度
+            measure_length2=25,   # 垂直直线方向半宽度
+            num_measures=12,
+            sigma=1.0,
+            threshold=20.0
+        )
+        
+        # 执行测量
+        result = line_obj.measure(img)
+        line_obj.visualize(img,True,False,False,wait_time=10000)
+        # 验证结果
+        assert result is not None, "测量结果不应为空"
+        assert result['num_points'] >= 10, f"边缘点数应>=10，实际为{result['num_points']}"
+        
+        # 验证直线角度（应该接近水平，即接近0或π）
+        angle_deg = np.degrees(result['angle'])
+        print(f"拟合直线角度: {angle_deg:.2f}°")
+        print(f"边缘点数: {result['num_points']}")
+        print(f"拟合误差: {result['mean_error']:.4f} px")
+        
+        # 验证直线位置（应该在 row=200 附近）
+        line_row = result['point'][0]
+        print(f"直线位置: row ≈ {line_row:.2f}")
+        
+        # 可视化
+        vis_img = line_obj.visualize(img)
+        
+        # 保存结果
+        output_dir = os.path.join(os.path.dirname(__file__), 'output')
+        os.makedirs(output_dir, exist_ok=True)
+        cv2.imwrite(os.path.join(output_dir, 'test_horizontal_line.png'), vis_img)
+        print(f"可视化结果已保存到: {output_dir}/test_horizontal_line.png")
+        
+        # 显示结果
+        cv2.imshow('Horizontal Line Measure', vis_img)
+        cv2.waitKey(100000)
+        
+        return True
 
 class TestCircleMeasureObject:
     """圆测量对象测试"""
