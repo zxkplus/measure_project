@@ -44,8 +44,8 @@ class Halcon1DMeasure:
         
         关键：将ROI中心旋转到原点，旋转-angle角度，再平移回目标图像中心
         """
-        # 旋转角度（转换为度数，取负号因为我们想把图像"摆正"）
-        angle_deg = -np.degrees(self.angle)
+        # 旋转角度
+        angle_deg = np.degrees(self.angle)
         
         # 计算正矩形在目标图像中的中心位置
         target_center_x = self.length1 / 2
