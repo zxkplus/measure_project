@@ -470,7 +470,7 @@ class TestCircleMeasureObject:
             center=(250, 250),
             radius=100,
             radius_min=80,
-            radius_max=120,
+            radius_max=200,
             measure_length1=30,
             measure_length2=10,
             num_measures=10,
@@ -497,7 +497,7 @@ class TestCircleMeasureObject:
         print(f"可视化结果已保存到: {output_dir}/test_partial_circle.png")
         
         cv2.imshow('Partial Circle Measure', vis_img)
-        cv2.waitKey(1000)
+        cv2.waitKey(10000)
         
         return True
     
@@ -551,6 +551,43 @@ class TestCircleMeasureObject:
         cv2.waitKey(1000)
         
         return True
+
+    @staticmethod
+    def test_circle_real():
+        """测试真实的原图测量"""
+        print("\n" + "="*60)
+        print("测试：原图测量")
+        print("="*60)
+        
+        # 创建测试图像（小圆）
+        img = sample_image_real_2()
+        # 创建圆测量对象
+        circle_obj = CircleMeasureObject(
+            center=(1016 / 2,1370 / 2),
+            radius=200,
+            radius_min=100,
+            radius_max=220,
+            measure_length1=200,
+            measure_length2=20,
+            num_measures=12,
+            sigma=15.0,
+            threshold=40.0
+        )
+        
+        # 执行测量
+        result = circle_obj.measure(img)
+
+        # 可视化
+        vis_img = circle_obj.visualize(img)
+        
+        output_dir = os.path.join(os.path.dirname(__file__), 'output')
+        cv2.imwrite(os.path.join(output_dir, 'test_real_circle.png'), vis_img)
+        print(f"可视化结果已保存到: {output_dir}/test_real_circle.png")
+        
+        cv2.imshow('real Circle Measure', vis_img)
+        cv2.waitKey(10000)
+        cv2.destroyAllWindows()
+        
 
 
 class TestMetrologyModel:
