@@ -21,6 +21,24 @@ class TestHalcon1DMeasure:
         
         return img
     
+    @pytest.fixture    
+    # 测试和可视化函数
+    def create_test_image(self) -> np.ndarray:
+        """创建测试图像：包含几个黑色条带"""
+        img = np.ones((600, 800), dtype=np.uint8) * 200
+        
+        # 添加几个黑色条带（垂直）
+        positions = [200, 300, 400, 500]
+        width = 20
+        for pos in positions:
+            img[:, pos:pos+width] = 50
+        
+        # 添加一些噪声
+        noise = np.random.normal(0, 5, img.shape).astype(np.int16)
+        img = np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+        
+        return img
+
     @pytest.fixture
     def sample_image_real(self):
         """创建一个测试用的简单图像"""
@@ -37,6 +55,32 @@ class TestHalcon1DMeasure:
         img = cv2.imread('data/sample/bottleopen_2.jpg', cv2.IMREAD_GRAYSCALE)
         #将图片缩小2倍
         img = cv2.resize(img, (img.shape[1]//2, img.shape[0]//2))
+        return img
+    @pytest.fixture
+    def sample_image_real_3(self):
+        """创建一个测试用的简单图像"""
+        #读取一张真实的图片
+        img = cv2.imread('data/sample/bottleneck_3.jpg', cv2.IMREAD_GRAYSCALE)
+        #将图片缩小2倍
+        img = cv2.resize(img, (img.shape[1]//3, img.shape[0]//3))
+        return img
+
+    @pytest.fixture
+    def sample_image_real_4(self):
+        """创建一个测试用的简单图像"""
+        #读取一张真实的图片
+        img = cv2.imread('data/sample/bottleneck_4.bmp', cv2.IMREAD_GRAYSCALE)
+        #将图片缩小2倍
+        img = cv2.resize(img, (img.shape[1], img.shape[0]))
+        return img
+    
+    @pytest.fixture
+    def sample_image_real_5(self):
+        """创建一个测试用的简单图像"""
+        #读取一张真实的图片
+        img = cv2.imread('data/sample/bottleneck_5.bmp', cv2.IMREAD_GRAYSCALE)
+        #将图片缩小2倍
+        img = cv2.resize(img, (img.shape[1]//3, img.shape[0]//3))
         return img
     
     @pytest.fixture
@@ -57,7 +101,6 @@ class TestHalcon1DMeasure:
         assert measure_obj.length1 == 100
         assert measure_obj.length2 == 40
         assert measure_obj.interpolation == 'bilinear'
-    
 
     def test_basic_debug(self,sample_image_real):
         """测试基本的调试功能"""
@@ -108,16 +151,75 @@ class TestHalcon1DMeasure:
             traceback.print_exc()
             return False
     
-    def test_measure_pairs(self, sample_image_real):
+    def test_measure_base(self,create_test_image):
+
+        #    # Step 6: 根据transition筛选
+        # if transition == 'positive':
+        # elif transition == 'negative':
+        #select == 'first' 'last'
+        
+        img = create_test_image
+        # 创建测量对象
+        measure = Halcon1DMeasure(
+            row=img.shape[1] / 2,
+            col=img.shape[0] / 2 + 100,
+            angle=0,
+            length1=600,
+            length2=50,
+            interpolation='linear'
+        )
+        try:
+            measure.draw_roi_on_image(img,wait_time=1000)
+            # 执行边缘对检测
+            print("\n执行边缘对检测...")
+            (row1, col1, amp1, row2, col2, amp2, 
+            center_row, center_col, intra_dist, inter_dist) = \
+                measure.measure_pairs(img, sigma=15, threshold=40.0, 
+                                transition='positive', select='all',debug=True)
+            
+            print(f"\n✓ 边缘对检测成功！")
+            print(f"检测到 {len(row1)} 个边缘对")
+            print(f"边缘对详情:")
+            for i in range(len(row1)):
+                print(f"  [{i+1}] 第一条边: ({col1[i]:.2f}, {row1[i]:.2f}), 幅度={amp1[i]:.2f}")
+                print(f"       第二条边: ({col2[i]:.2f}, {row2[i]:.2f}), 幅度={amp2[i]:.2f}")
+                print(f"       中心点: ({center_col[i]:.2f}, {center_row[i]:.2f})")
+                print(f"       宽度: {intra_dist[i]:.2f} 像素")
+            
+            if inter_dist:
+                print(f"\n边缘对间距: {[f'{d:.2f}' for d in inter_dist]}")
+            
+            # 显示边缘对检测结果
+            print("\n显示边缘对检测结果...")
+            measure.display_results(img, row_edges=None, col_edges=None, amplitudes=None,
+                                row1=row1, col1=col1, amp1=amp1,
+                                row2=row2, col2=col2, amp2=amp2,
+                                centers_row=center_row, centers_col=center_col,
+                                intra_dist=intra_dist, inter_dist=inter_dist,
+                                window_name='Pair Detection Results', wait_time=500000)
+            
+            print("\n✓ 测试成功完成！")
+            
+            return True
+            
+        except Exception as e:
+            print(f"\n✗ 测试失败！")
+            print(f"错误信息: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        
+
+    def test_measure_pairs(self, sample_image_real_3):
        # 创建测试图像
-        img = sample_image_real
+        img = sample_image_real_3
         
         # 创建测量对象
         measure = Halcon1DMeasure(
-            row=1366 / 2,
-            col=1294 / 2,
-            angle=0,
-            length1=600,
+            row=1500 / 3,
+            col=1294 / 3,
+            angle=np.pi/2,
+            length1=900,
             length2=50,
             interpolation='linear'
         )
@@ -131,7 +233,7 @@ class TestHalcon1DMeasure:
             print("\n执行边缘对检测...")
             (row1, col1, amp1, row2, col2, amp2, 
             center_row, center_col, intra_dist, inter_dist) = \
-                measure.measure_pairs(img, sigma=15, threshold=79.0, 
+                measure.measure_pairs(img, sigma=15, threshold=40.0, 
                                 transition='all', select='all',debug=True)
             
             print(f"\n✓ 边缘对检测成功！")
@@ -281,3 +383,41 @@ class TestHalcon1DMeasure:
             traceback.print_exc()
             return False
         
+    def test_measure_pairs_4(self, sample_image_real_4):
+       # 创建测试图像
+        img = sample_image_real_4
+        
+        # 创建测量对象
+        measure = Halcon1DMeasure(
+            row=490,
+            col=254,
+            angle= np.pi / 2  ,#测试垂直的情况
+            length1=800,
+            length2=220,
+            interpolation='linear'
+        )
+        
+        print("\n执行测量（debug=True）...")
+        print("将显示多个调试窗口，请按任意键继续...")
+        
+        try:
+            measure.draw_roi_on_image(img,wait_time=1000)
+            row_edges, col_edges, amplitudes, distances = measure.measure_pos(img,0.1,3,debug=True)
+            # 执行边缘对检测
+            print(f"\n✓ 测试成功！")
+            print(f"检测到 {len(row_edges)} 个边缘")
+            print(f"边缘坐标:")
+            for i in range(len(row_edges)):
+                print(f"  [{i+1}] ({col_edges[i]:.2f}, {row_edges[i]:.2f}), "
+                    f"幅度={amplitudes[i]:.2f}")
+            # 显示边缘检测结果
+            print("\n显示边缘检测结果...")
+            measure.display_results(img, row_edges, col_edges, amplitudes, 
+                                window_name='Edge Detection Results', wait_time=5000)
+            print("\n✓ 测试成功完成！")
+        except Exception as e:
+            print(f"\n✗ 测试失败！")
+            print(f"错误信息: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
