@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from typing import Tuple, List, Optional
+from scipy.ndimage import gaussian_filter1d
 
 class Halcon1DMeasure:
     """
@@ -159,14 +160,7 @@ class Halcon1DMeasure:
         
         # Step 3: 高斯平滑
         if sigma > 0:
-            kernel_size = max(3, int(6 * sigma + 1))
-            if kernel_size % 2 == 0:
-                kernel_size += 1
-            profile_smooth = cv2.GaussianBlur(
-                profile.reshape(-1, 1).astype(np.float32),
-                (kernel_size, 1),
-                sigma
-            ).flatten()
+            profile_smooth = gaussian_filter1d(profile.reshape(-1, 1).astype(np.float32), sigma=sigma).flatten()
         else:
             profile_smooth = profile.astype(np.float32)
         
