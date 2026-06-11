@@ -16,7 +16,10 @@ from typing import Tuple
 # Ensure the module can be imported from the repo root
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from measure_template import TemplatePoint, DistanceMeasure
+from measure_template import (TemplatePoint, DistanceMeasure,
+                              RawPreprocessor, CannyPreprocessor,
+                              SobelPreprocessor, CLAHEPreprocessor,
+                              _PREPROCESSOR_REGISTRY, _deserialize_preprocessor)
 
 
 # =========================================================================
@@ -711,8 +714,8 @@ class TestDistanceMeasure:
     @staticmethod
     def test_visual_real_demo(wait_time: int = 1500):
         template_org_path = "data/sample/part_1.jpg"
-        test_path1 = "data/sample/part_5.jpg"
-        output_dir = "output/template_match_5"
+        test_path1 = "data/sample/part_3.jpg"
+        output_dir = "output/template_match_3"
 
         ##读取为np.uint8的灰度图
         ref = cv2.imread(template_org_path, cv2.IMREAD_GRAYSCALE)
@@ -753,7 +756,8 @@ class TestDistanceMeasure:
               f"edges={np.count_nonzero(pt_a.edge_template)}")
         print(f"  Template B: {pt_b._crop_h}x{pt_b._crop_w} px, "
               f"edges={np.count_nonzero(pt_b.edge_template)}")
-
+        pt_a.save(os.path.join(output_dir, "template_a"))
+        pt_b.save(os.path.join(output_dir, "template_b"))
         # ---- Reference image with template boxes ----
         vis_a = pt_a.visualize(ref, wait_time=-1,
                                template_color=(0, 255, 0),
@@ -962,6 +966,211 @@ class TestDistanceMeasure:
         cv2.waitKey(wait_time)
         cv2.destroyAllWindows()
         print("  ✓ test_visual_real_demo passed")
+
+
+# =========================================================================
+# Test: Preprocessors
+# =========================================================================
+
+class TestPreprocessor:
+    """Tests for the Preprocessor classes and serialization."""
+
+    @staticmethod
+    def test_raw_preprocessor():
+        """RawPreprocessor should return float32 with same shape."""
+        img = np.ones((100, 100), dtype=np.uint8) * 128
+        pp = RawPreprocessor()
+        result = pp(img)
+        assert result.shape == (100, 100)
+        assert result.dtype == np.float32
+        assert pp.name == 'Raw'
+        print("  ✓ test_raw_preprocessor passed")
+
+    @staticmethod
+    def test_canny_preprocessor():
+        """CannyPreprocessor should return uint8 binary edge map."""
+        img = create_synthetic_reference()
+        pp = CannyPreprocessor(50, 150)
+        result = pp(img)
+        assert result.shape == img.shape
+        assert result.dtype == np.uint8
+        assert 'Canny' in pp.name
+        # Should contain edges on synthetic image with features
+        assert np.count_nonzero(result) > 0
+        print("  ✓ test_canny_preprocessor passed")
+
+    @staticmethod
+    def test_sobel_preprocessor():
+        """SobelPreprocessor should return float32 gradient magnitude."""
+        img = create_synthetic_reference()
+        pp = SobelPreprocessor(kernel_size=3)
+        result = pp(img)
+        assert result.shape == img.shape
+        assert result.dtype == np.float32
+        assert 'Sobel' in pp.name
+        print("  ✓ test_sobel_preprocessor passed")
+
+    @staticmethod
+    def test_clahe_preprocessor():
+        """CLAHEPreprocessor should return float32 enhanced image."""
+        img = create_synthetic_reference()
+        pp = CLAHEPreprocessor(clip_limit=2.0)
+        result = pp(img)
+        assert result.shape == img.shape
+        assert result.dtype == np.float32
+        assert 'CLAHE' in pp.name
+        print("  ✓ test_clahe_preprocessor passed")
+
+    @staticmethod
+    def test_template_with_canny_preprocessor():
+        """TemplatePoint with CannyPreprocessor should match correctly."""
+        ref = create_synthetic_reference()
+        pt = TemplatePoint(ref, click_row=100, click_col=100, template_size=80,
+                           preprocessor=CannyPreprocessor(50, 150))
+
+        # Template should be uint8 (Canny output)
+        assert pt.edge_template.dtype == np.uint8
+
+        # Should match perfectly on same image
+        result = pt.measure(ref)
+        assert result['valid'], f"Match should be valid, score={result['match_score']:.4f}"
+        assert abs(result['matched_row'] - 100) < 2.0
+        assert abs(result['matched_col'] - 100) < 2.0
+
+        print("  ✓ test_template_with_canny_preprocessor passed")
+
+    @staticmethod
+    def test_preprocessor_serialization_roundtrip():
+        """Each built-in preprocessor should survive serialize → deserialize."""
+        test_cases = [
+            RawPreprocessor(),
+            CannyPreprocessor(60, 180),
+            SobelPreprocessor(kernel_size=5),
+            CLAHEPreprocessor(clip_limit=3.0, tile_grid_size=(16, 16)),
+        ]
+
+        img = create_synthetic_reference()
+
+        for pp_orig in test_cases:
+            data = pp_orig.serialize()
+            pp_restored = _deserialize_preprocessor(data)
+            result_orig = pp_orig(img)
+            result_restored = pp_restored(img)
+            # Results should be identical (same dtype, same values)
+            assert result_orig.dtype == result_restored.dtype
+            assert np.array_equal(result_orig, result_restored), \
+                f"Roundtrip mismatch for {pp_orig.name}"
+
+        print("  ✓ test_preprocessor_serialization_roundtrip passed")
+
+    @staticmethod
+    def test_template_save_load_with_preprocessor():
+        """TemplatePoint with non-default preprocessor should survive save → from_file."""
+        ref = create_synthetic_reference()
+        pt_orig = TemplatePoint(ref, click_row=100, click_col=100, template_size=80,
+                                preprocessor=CannyPreprocessor(70, 160))
+
+        filepath = "/tmp/test_template_preprocessor_roundtrip.npz"
+        pt_orig.save(filepath)
+        pt_loaded = TemplatePoint.from_file(filepath)
+
+        # Verify preprocessor restored correctly
+        assert isinstance(pt_loaded.preprocessor, CannyPreprocessor)
+        assert pt_loaded.preprocessor.threshold1 == 70
+        assert pt_loaded.preprocessor.threshold2 == 160
+
+        # Verify match results are identical
+        inspection = create_synthetic_inspection(ref, offset_row=7.0, offset_col=3.0, noise_level=0.5)
+        result_orig = pt_orig.measure(inspection)
+        result_loaded = pt_loaded.measure(inspection)
+        assert abs(result_orig['matched_row'] - result_loaded['matched_row']) < 0.01
+        assert abs(result_orig['matched_col'] - result_loaded['matched_col']) < 0.01
+
+        print("  ✓ test_template_save_load_with_preprocessor passed")
+
+    @staticmethod
+    def test_custom_preprocessor_registration():
+        """Users should be able to register and use custom preprocessors."""
+        # Define a custom preprocessor
+        class GaussianBlurPP:
+            name = 'GaussianBlur(sigma=1.0)'
+
+            def serialize(self):
+                return {'type': 'gaussian_blur_test', 'sigma': 1.0}
+
+            @staticmethod
+            def deserialize(data):
+                return GaussianBlurPP()
+
+            def __call__(self, image):
+                return cv2.GaussianBlur(image, (0, 0), 1.0).astype(np.float32)
+
+        # Register it
+        _PREPROCESSOR_REGISTRY['gaussian_blur_test'] = GaussianBlurPP
+
+        # Use it
+        ref = create_synthetic_reference()
+        pt = TemplatePoint(ref, click_row=100, click_col=100, template_size=80,
+                           preprocessor=GaussianBlurPP())
+        result = pt.measure(ref)
+        assert result['valid'], "Custom preprocessor should produce valid match"
+
+        # Cleanup
+        del _PREPROCESSOR_REGISTRY['gaussian_blur_test']
+
+        print("  ✓ test_custom_preprocessor_registration passed")
+
+    @staticmethod
+    def test_backward_compat_old_npz_format():
+        """Old .npz files with use_edges should deserialize correctly."""
+        ref = create_synthetic_reference()
+
+        # Simulate old format: write raw npz with use_edges=True
+        pt_old_style = TemplatePoint(ref, click_row=100, click_col=100, template_size=80)
+        # Manually add use_edges to simulate old format
+        filepath = "/tmp/test_old_format_compat.npz"
+        np.savez_compressed(
+            filepath,
+            edge_template=pt_old_style.edge_template,
+            click_row=pt_old_style.click_row,
+            click_col=pt_old_style.click_col,
+            template_size=pt_old_style.template_size,
+            use_edges=np.bool_(True),
+            canny_threshold1=np.float64(55.0),
+            canny_threshold2=np.float64(165.0),
+            match_score_threshold=pt_old_style.match_score_threshold,
+            use_subpixel=pt_old_style.use_subpixel,
+            crop_center_row=pt_old_style._crop_center_row,
+            crop_center_col=pt_old_style._crop_center_col,
+            crop_h=pt_old_style._crop_h,
+            crop_w=pt_old_style._crop_w,
+            actual_crop_bounds=np.array(pt_old_style._actual_crop_bounds, dtype=np.int32),
+        )
+
+        # Load with new code
+        pt_loaded = TemplatePoint.from_file(filepath)
+        assert isinstance(pt_loaded.preprocessor, CannyPreprocessor), \
+            f"Expected CannyPreprocessor, got {type(pt_loaded.preprocessor)}"
+        assert pt_loaded.preprocessor.threshold1 == 55.0
+        assert pt_loaded.preprocessor.threshold2 == 165.0
+
+        print("  ✓ test_backward_compat_old_npz_format passed")
+
+    @staticmethod
+    def test_from_file_preprocessor_override():
+        """from_file(..., preprocessor=...) should override stored preprocessor."""
+        ref = create_synthetic_reference()
+        pt_orig = TemplatePoint(ref, click_row=100, click_col=100, template_size=80,
+                                preprocessor=RawPreprocessor())
+
+        filepath = "/tmp/test_override_preprocessor.npz"
+        pt_orig.save(filepath)
+
+        # Load with a different preprocessor
+        pt_loaded = TemplatePoint.from_file(filepath, preprocessor=CannyPreprocessor(50, 150))
+        assert isinstance(pt_loaded.preprocessor, CannyPreprocessor)
+
+        print("  ✓ test_from_file_preprocessor_override passed")
 # =========================================================================
 # Test Runner
 # =========================================================================
@@ -988,6 +1197,17 @@ def run_all_tests():
         ("DistanceMeasure: visualize smoke", TestDistanceMeasure.test_visualize_smoke),
         ("DistanceMeasure: VISUAL DEMO", TestDistanceMeasure.test_visual_demo),
         ("DistanceMeasure: REAL IMAGE VISUAL DEMO", TestDistanceMeasure.test_visual_real_demo),
+        # Preprocessor tests
+        ("Preprocessor: raw", TestPreprocessor.test_raw_preprocessor),
+        ("Preprocessor: canny", TestPreprocessor.test_canny_preprocessor),
+        ("Preprocessor: sobel", TestPreprocessor.test_sobel_preprocessor),
+        ("Preprocessor: clahe", TestPreprocessor.test_clahe_preprocessor),
+        ("Preprocessor: template with canny", TestPreprocessor.test_template_with_canny_preprocessor),
+        ("Preprocessor: serialization roundtrip", TestPreprocessor.test_preprocessor_serialization_roundtrip),
+        ("Preprocessor: template save/load", TestPreprocessor.test_template_save_load_with_preprocessor),
+        ("Preprocessor: custom registration", TestPreprocessor.test_custom_preprocessor_registration),
+        ("Preprocessor: backward compat", TestPreprocessor.test_backward_compat_old_npz_format),
+        ("Preprocessor: from_file override", TestPreprocessor.test_from_file_preprocessor_override),
     ]
 
     print("=" * 70)
