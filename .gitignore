@@ -2,3 +2,5 @@ __pycache__
 .vscode
 .pytest_cache
 data
+propmt_history.txt
+output
