@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from measure_template import (TemplatePoint, DistanceMeasure,
                               RawPreprocessor, CannyPreprocessor,
                               SobelPreprocessor, CLAHEPreprocessor,
+                              ThresholdPreprocessor,
                               _PREPROCESSOR_REGISTRY, _deserialize_preprocessor)
 
 
@@ -731,6 +732,8 @@ class TestDistanceMeasure:
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
 
+        pp = ThresholdPreprocessor(threshold=180)
+
         print("=" * 60)
         print("Visual Demo: Real Image Template Matching")
         print("=" * 60)
@@ -740,7 +743,7 @@ class TestDistanceMeasure:
         # ------------------------------------------------------------------
         click_a = [148, 310]
         click_b = [164, 2128]
-        template_size = 256
+        template_size = 125
 
         print(f"\n[Step 1] Creating templates from reference image "
               f"({ref.shape[0]}x{ref.shape[1]} px)...")
@@ -748,9 +751,9 @@ class TestDistanceMeasure:
         print(f"  Point B: row={click_b[0]}, col={click_b[1]}, template={template_size}px")
 
         pt_a = TemplatePoint(ref, click_row=click_a[0], click_col=click_a[1],
-                             template_size=template_size)
+                             template_size=template_size, preprocessor=pp)
         pt_b = TemplatePoint(ref, click_row=click_b[0], click_col=click_b[1],
-                             template_size=template_size)
+                             template_size=template_size, preprocessor=pp)
 
         print(f"  Template A: {pt_a._crop_h}x{pt_a._crop_w} px, "
               f"edges={np.count_nonzero(pt_a.edge_template)}")
@@ -1171,6 +1174,42 @@ class TestPreprocessor:
         assert isinstance(pt_loaded.preprocessor, CannyPreprocessor)
 
         print("  ✓ test_from_file_preprocessor_override passed")
+
+    @staticmethod
+    def test_threshold_preprocessor():
+        """ThresholdPreprocessor should produce binary output and match correctly."""
+        ref = create_synthetic_reference()
+        pp = ThresholdPreprocessor(threshold=128)
+
+        # Basic property checks
+        result = pp(ref)
+        assert result.shape == ref.shape
+        assert result.dtype == np.uint8
+        assert 'Threshold' in pp.name
+        # Binary output should only contain 0 and 255
+        assert np.all((result == 0) | (result == 255))
+
+        # binary_inv mode
+        pp_inv = ThresholdPreprocessor(threshold=128, mode='binary_inv')
+        result_inv = pp_inv(ref)
+        # Inverted should be the complement
+        assert np.all((result == 0) == (result_inv == 255))
+        assert np.all((result == 255) == (result_inv == 0))
+
+        # Serialization roundtrip
+        data = pp.serialize()
+        pp2 = _deserialize_preprocessor(data)
+        assert isinstance(pp2, ThresholdPreprocessor)
+        assert pp2.threshold == 128
+        assert pp2.mode == 'binary'
+
+        # TemplatePoint integration
+        pt = TemplatePoint(ref, click_row=100, click_col=100, template_size=80,
+                           preprocessor=ThresholdPreprocessor(threshold=100))
+        match_result = pt.measure(ref)
+        assert match_result['valid'], f"Match should be valid, score={match_result['match_score']:.4f}"
+
+        print("  ✓ test_threshold_preprocessor passed")
 # =========================================================================
 # Test Runner
 # =========================================================================
@@ -1208,6 +1247,7 @@ def run_all_tests():
         ("Preprocessor: custom registration", TestPreprocessor.test_custom_preprocessor_registration),
         ("Preprocessor: backward compat", TestPreprocessor.test_backward_compat_old_npz_format),
         ("Preprocessor: from_file override", TestPreprocessor.test_from_file_preprocessor_override),
+        ("Preprocessor: threshold", TestPreprocessor.test_threshold_preprocessor),
     ]
 
     print("=" * 70)
