@@ -42,6 +42,11 @@ measure_pairs - 检测边缘对（如物体边缘）
 直线测量 - 沿直线生成多个测量矩形，检测边缘点并拟合直线
 圆测量 - 沿圆弧生成多个测量矩形，检测边缘点并拟合圆
 Metrology 模型 - 统一管理多个测量对象
+🎯 模板匹配测量
+
+在参考图上点击选点 → 创建模板 → 在新图上自动匹配定位 → 计算两点距离
+可配置预处理器 (Raw, Canny, Sobel, CLAHE, Threshold) 适应不同图像特征
+支持模板序列化 (.npz) 跨会话复用
 🛠️ 调试与可视化
 
 
@@ -156,6 +161,34 @@ result = circle_measure.measure(img)
 if result:
     print(f"圆心: {result['center']}, 半径: {result['radius']:.2f}")
 
+
+4. 模板匹配测量
+
+```python
+from measure_template import TemplatePoint, DistanceMeasure, CannyPreprocessor
+
+# 从参考图创建两个模板点
+pt_a = TemplatePoint(ref_img, click_row=200, click_col=150, template_size=80)
+pt_b = TemplatePoint(ref_img, click_row=200, click_col=350, template_size=80)
+
+# 也可使用预处理器增强匹配鲁棒性
+# pt_a = TemplatePoint(ref_img, ..., preprocessor=CannyPreprocessor(50, 150))
+
+# 保存模板供后续使用
+pt_a.save("template_A.npz")
+pt_b.save("template_B.npz")
+
+# 在新图上匹配并计算距离
+pt_a = TemplatePoint.from_file("template_A.npz")
+pt_b = TemplatePoint.from_file("template_B.npz")
+dm = DistanceMeasure(pt_a, pt_b)
+result = dm.measure(new_img)
+print(f"距离: {result["distance"]:.2f} px")
+
+# 可视化
+vis = dm.visualize(new_img)
+cv2.imwrite("result.jpg", vis)
+```
 
 
 📚 核心概念
@@ -378,6 +411,45 @@ circle_result = model.get_result(circle_id)
 
 
 
+
+### 模板匹配 (Template Matching)
+
+**TemplatePoint 类** — 单点模板匹配
+
+```python
+TemplatePoint(
+    reference_image: np.ndarray,  # 参考图像 (灰度)
+    click_row: float,             # 点击行坐标
+    click_col: float,             # 点击列坐标
+    template_size: int = 80,      # 模板正方形边长 (px)
+    preprocessor: Preprocessor = None,  # 预处理器 (None=原始像素)
+    match_score_threshold: float = 0.5, # 匹配置信度阈值
+    use_subpixel: bool = True     # 亚像素精炼
+)
+
+# 主要方法
+measure(image, search_region=None) -> Dict  # 在新图上匹配
+visualize(image, ...) -> np.ndarray         # 可视化结果
+save(filepath) / from_file(filepath)       # 序列化
+```
+
+**预处理器 (Preprocessor)** — 可插拔的图像增强
+
+| 类 | 说明 |
+|------|------|
+| `RawPreprocessor()` | 不做增强，使用原始像素 |
+| `CannyPreprocessor(t1, t2)` | Canny 边缘检测 → 二值边缘图 |
+| `SobelPreprocessor(ksize)` | Sobel 梯度幅值 |
+| `CLAHEPreprocessor(clip_limit)` | 自适应直方图均衡化 |
+| `ThresholdPreprocessor(threshold, mode)` | 全局阈值二值化 |
+
+**DistanceMeasure 类** — 两点距离测量
+
+```python
+dm = DistanceMeasure(point_a: TemplatePoint, point_b: TemplatePoint)
+result = dm.measure(image)  # -> {"point_a": ..., "point_b": ..., "distance": float, "valid": bool}
+vis = dm.visualize(image)
+```
 💡 示例代码
 示例 1：基本边缘检测
 
