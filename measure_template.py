@@ -170,6 +170,49 @@ class CLAHEPreprocessor:
         return self._clahe.apply(image).astype(np.float32)
 
 
+class ThresholdPreprocessor:
+    """
+    Global threshold binarization — uint8 (0/255).
+
+    Uses cv2.threshold to split the image into foreground (255) and
+    background (0) based on a fixed intensity threshold.
+
+    Useful when the measurement target has consistent intensity contrast
+    against the background (e.g., dark part on light surface).
+    """
+
+    def __init__(self, threshold: float = 128.0,
+                 mode: str = 'binary'):
+        """
+        Args:
+            threshold: Intensity threshold in [0, 255].
+            mode: 'binary' (above→255, below→0) or
+                  'binary_inv' (above→0, below→255).
+        """
+        self.threshold = threshold
+        self.mode = mode
+        if mode == 'binary_inv':
+            self._cv_mode = cv2.THRESH_BINARY_INV
+        else:
+            self._cv_mode = cv2.THRESH_BINARY
+
+    @property
+    def name(self) -> str:
+        inv = '_INV' if self.mode == 'binary_inv' else ''
+        return f'Threshold(t={self.threshold:.0f}{inv})'
+
+    def serialize(self) -> Dict[str, Any]:
+        return {'type': 'threshold', 'threshold': self.threshold, 'mode': self.mode}
+
+    @staticmethod
+    def deserialize(data: Dict[str, Any]) -> 'ThresholdPreprocessor':
+        return ThresholdPreprocessor(data['threshold'], data.get('mode', 'binary'))
+
+    def __call__(self, image: np.ndarray) -> np.ndarray:
+        _, binary = cv2.threshold(image, self.threshold, 255, self._cv_mode)
+        return binary
+
+
 # Registry: maps serialize()['type'] → Preprocessor class for deserialization.
 # Users can register custom preprocessors:
 #   _PREPROCESSOR_REGISTRY['my_type'] = MyPreprocessor
@@ -178,6 +221,7 @@ _PREPROCESSOR_REGISTRY: Dict[str, type] = {
     'canny': CannyPreprocessor,
     'sobel': SobelPreprocessor,
     'clahe': CLAHEPreprocessor,
+    'threshold': ThresholdPreprocessor,
 }
 
 
