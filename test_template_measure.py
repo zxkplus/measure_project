@@ -969,6 +969,264 @@ class TestDistanceMeasure:
         cv2.waitKey(wait_time)
         cv2.destroyAllWindows()
         print("  ✓ test_visual_real_demo passed")
+    
+    @staticmethod
+    def test_visual_real_demo_2(wait_time: int = 1500):
+        template_org_path = "/home/industai/workspace/srv-profilometer-1st/test_data/bottleneck_5.jpg"
+        test_path1 = "/home/industai/workspace/srv-profilometer-1st/test_data/bottleneck_6.jpg"
+        output_dir = "output/template_match_6"
+
+        ##读取为np.uint8的灰度图
+        ref = cv2.imread(template_org_path, cv2.IMREAD_GRAYSCALE)
+        insp1 = cv2.imread(test_path1, cv2.IMREAD_GRAYSCALE)
+
+        if ref is None:
+            print(f"  SKIP: reference image not found: {template_org_path}")
+            return
+        if insp1 is None:
+            print(f"  SKIP: inspection image not found: {test_path1}")
+            return
+
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+
+        pp = ThresholdPreprocessor(threshold=180)
+
+        print("=" * 60)
+        print("Visual Demo: Real Image Template Matching")
+        print("=" * 60)
+
+        # ------------------------------------------------------------------
+        # Step 1: Create templates from reference image
+        # ------------------------------------------------------------------
+        click_a = [729, 609]
+        click_b = [770, 2734]
+        template_size = 125
+
+        print(f"\n[Step 1] Creating templates from reference image "
+              f"({ref.shape[0]}x{ref.shape[1]} px)...")
+        print(f"  Point A: row={click_a[0]}, col={click_a[1]}, template={template_size}px")
+        print(f"  Point B: row={click_b[0]}, col={click_b[1]}, template={template_size}px")
+
+        pt_a = TemplatePoint(ref, click_row=click_a[0], click_col=click_a[1],
+                             template_size=template_size, preprocessor=pp)
+        pt_b = TemplatePoint(ref, click_row=click_b[0], click_col=click_b[1],
+                             template_size=template_size, preprocessor=pp)
+
+        print(f"  Template A: {pt_a._crop_h}x{pt_a._crop_w} px, "
+              f"edges={np.count_nonzero(pt_a.edge_template)}")
+        print(f"  Template B: {pt_b._crop_h}x{pt_b._crop_w} px, "
+              f"edges={np.count_nonzero(pt_b.edge_template)}")
+        pt_a.save(os.path.join(output_dir, "template_a"))
+        pt_b.save(os.path.join(output_dir, "template_b"))
+        # ---- Reference image with template boxes ----
+        vis_a = pt_a.visualize(ref, wait_time=-1,
+                               template_color=(0, 255, 0),
+                               matched_color=(0, 0, 255))
+        vis_both = pt_b.visualize(vis_a, wait_time=-1,
+                                  template_color=(0, 255, 255),
+                                  matched_color=(255, 0, 255))
+
+        cv2.putText(vis_both, 'STEP 1: Reference Image + Templates',
+                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+        cv2.putText(vis_both, 'STEP 1: Reference Image + Templates',
+                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+        cv2.putText(vis_both, f'Green=PtA ({click_a[0]},{click_a[1]}), '
+                    f'Yellow=PtB ({click_b[0]},{click_b[1]})',
+                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+        cv2.putText(vis_both, f'Green=PtA ({click_a[0]},{click_a[1]}), '
+                    f'Yellow=PtB ({click_b[0]},{click_b[1]})',
+                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+
+        cv2.imwrite(f"{output_dir}/01_reference_with_templates.jpg", vis_both)
+        cv2.imshow("Step1_Reference", vis_both)
+        cv2.waitKey(wait_time)
+
+        # ---- Edge templates ----
+        disp_h = 300
+        for edge, name in [(pt_a.edge_template, 'A'), (pt_b.edge_template, 'B')]:
+            h, w = edge.shape
+            disp_w = int(w * disp_h / h)
+            edge_disp = cv2.resize(edge, (disp_w, disp_h), interpolation=cv2.INTER_NEAREST)
+            edge_bgr = cv2.cvtColor(edge_disp, cv2.COLOR_GRAY2BGR)
+            cv2.putText(edge_bgr, f'Edge Template {name} ({h}x{w})',
+                        (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+            cv2.putText(edge_bgr, f'Edge Template {name} ({h}x{w})',
+                        (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 1)
+            cv2.imwrite(f"{output_dir}/02_edge_template_{name}.jpg", edge_bgr)
+            cv2.imshow(f"Step1_EdgeTemplate_{name}", edge_bgr)
+        cv2.waitKey(wait_time)
+
+        # ------------------------------------------------------------------
+        # Step 2: Match on the inspection image
+        # ------------------------------------------------------------------
+        print(f"\n[Step 2] Matching on inspection image "
+              f"({insp1.shape[0]}x{insp1.shape[1]} px)...")
+
+        dm = DistanceMeasure(pt_a, pt_b)
+        result = dm.measure(insp1)
+
+        print(f"  Point A: matched ({result['point_a']['matched_row']:.2f}, "
+              f"{result['point_a']['matched_col']:.2f}), "
+              f"score={result['point_a']['match_score']:.4f}, "
+              f"{'VALID' if result['point_a']['valid'] else 'INVALID'}")
+        print(f"  Point B: matched ({result['point_b']['matched_row']:.2f}, "
+              f"{result['point_b']['matched_col']:.2f}), "
+              f"score={result['point_b']['match_score']:.4f}, "
+              f"{'VALID' if result['point_b']['valid'] else 'INVALID'}")
+
+        # ---- Matched positions on inspection image ----
+        vis_match = cv2.cvtColor(insp1, cv2.COLOR_GRAY2BGR)
+
+        colors = [(0, 255, 0), (0, 255, 255)]  # green for A, yellow for B
+        labels = ['A', 'B']
+        for i, pt_res in enumerate([result['point_a'], result['point_b']]):
+            r = pt_res['matched_row']
+            c = pt_res['matched_col']
+            color = colors[i]
+            half = template_size // 2
+
+            # Matched template box
+            cv2.rectangle(vis_match, (int(c - half), int(r - half)),
+                          (int(c + half), int(r + half)), (0, 0, 0), 3)
+            cv2.rectangle(vis_match, (int(c - half), int(r - half)),
+                          (int(c + half), int(r + half)), color, 2)
+
+            # Crosshair
+            cv2.line(vis_match, (int(c) - 15, int(r)), (int(c) + 15, int(r)),
+                     (0, 0, 0), 3)
+            cv2.line(vis_match, (int(c) - 15, int(r)), (int(c) + 15, int(r)),
+                     color, 2)
+            cv2.line(vis_match, (int(c), int(r) - 15), (int(c), int(r) + 15),
+                     (0, 0, 0), 3)
+            cv2.line(vis_match, (int(c), int(r) - 15), (int(c), int(r) + 15),
+                     color, 2)
+
+            # Score label
+            score_text = f'Pt{labels[i]}: ({r:.1f},{c:.1f}) score={pt_res["match_score"]:.3f}'
+            cv2.putText(vis_match, score_text, (int(c) + 20, int(r) - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 2)
+            cv2.putText(vis_match, score_text, (int(c) + 20, int(r) - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+
+        # Distance line
+        r1, c1 = result['point_a']['matched_row'], result['point_a']['matched_col']
+        r2, c2 = result['point_b']['matched_row'], result['point_b']['matched_col']
+        cv2.line(vis_match, (int(c1), int(r1)), (int(c2), int(r2)),
+                 (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.line(vis_match, (int(c1), int(r1)), (int(c2), int(r2)),
+                 (255, 0, 255), 2, cv2.LINE_AA)
+
+        mid_r = int((r1 + r2) / 2)
+        mid_c = int((c1 + c2) / 2)
+        dist_text = f'{result["distance"]:.2f} px'
+        cv2.putText(vis_match, dist_text, (mid_c - 50, mid_r - 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
+        cv2.putText(vis_match, dist_text, (mid_c - 50, mid_r - 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 1)
+
+        status_text = 'VALID' if result['valid'] else 'PARTIAL/INVALID'
+        status_color = (0, 255, 0) if result['valid'] else (0, 165, 255)
+        cv2.putText(vis_match, f'Status: {status_text}  |  Distance: {result["distance"]:.2f} px',
+                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+        cv2.putText(vis_match, f'Status: {status_text}  |  Distance: {result["distance"]:.2f} px',
+                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, status_color, 1)
+        cv2.putText(vis_match, 'STEP 2: Matched Positions + Distance',
+                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+        cv2.putText(vis_match, 'STEP 2: Matched Positions + Distance',
+                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+
+        cv2.imwrite(f"{output_dir}/03_matched_positions_distance.jpg", vis_match)
+        cv2.imshow("Step2_MatchResult", vis_match)
+        cv2.waitKey(wait_time)
+
+        # ------------------------------------------------------------------
+        # Step 3: Reference vs Inspection side-by-side comparison
+        # ------------------------------------------------------------------
+        print("\n[Step 3] Side-by-side comparison...")
+
+        # Reference side
+        vis_ref = cv2.cvtColor(ref, cv2.COLOR_GRAY2BGR)
+        ref_colors = [(0, 255, 0), (0, 255, 255)]
+        for (cr, cc), color, label in [
+            ((click_a[0], click_a[1]), ref_colors[0], 'A'),
+            ((click_b[0], click_b[1]), ref_colors[1], 'B'),
+        ]:
+            half = template_size // 2
+            cv2.rectangle(vis_ref, (cc - half, cr - half), (cc + half, cr + half),
+                          (0, 0, 0), 3)
+            cv2.rectangle(vis_ref, (cc - half, cr - half), (cc + half, cr + half),
+                          color, 2)
+            cv2.circle(vis_ref, (cc, cr), 6, (0, 0, 255), -1)
+            cv2.circle(vis_ref, (cc, cr), 8, (0, 0, 0), 2)
+            cv2.putText(vis_ref, f'Pt{label}', (cc + 14, cr - 14),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
+            cv2.putText(vis_ref, f'Pt{label}', (cc + 14, cr - 14),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        cv2.putText(vis_ref, 'REFERENCE', (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+        cv2.putText(vis_ref, 'REFERENCE', (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+
+        cv2.imwrite(f"{output_dir}/04a_reference.jpg", vis_ref)
+
+        # Inspection side
+        vis_insp = dm.visualize(insp1, wait_time=-1,
+                                show_distance_line=True,
+                                template_color=(0, 200, 0))
+        cv2.putText(vis_insp, 'INSPECTION', (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+        cv2.putText(vis_insp, 'INSPECTION', (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+
+        cv2.imwrite(f"{output_dir}/04b_inspection.jpg", vis_insp)
+
+        # Side-by-side
+        target_w = min(vis_ref.shape[1], vis_insp.shape[1])
+        scale_ref = target_w / vis_ref.shape[1]
+        scale_insp = target_w / vis_insp.shape[1]
+        vis_ref_resized = cv2.resize(vis_ref, (target_w, int(vis_ref.shape[0] * scale_ref)))
+        vis_insp_resized = cv2.resize(vis_insp, (target_w, int(vis_insp.shape[0] * scale_insp)))
+
+        border_bar = np.ones((max(vis_ref_resized.shape[0], vis_insp_resized.shape[0]), 4, 3),
+                             dtype=np.uint8) * 100
+        max_h = max(vis_ref_resized.shape[0], vis_insp_resized.shape[0])
+        if vis_ref_resized.shape[0] < max_h:
+            pad = np.ones((max_h - vis_ref_resized.shape[0], target_w, 3), dtype=np.uint8) * 80
+            vis_ref_resized = np.vstack([vis_ref_resized, pad])
+        if vis_insp_resized.shape[0] < max_h:
+            pad = np.ones((max_h - vis_insp_resized.shape[0], target_w, 3), dtype=np.uint8) * 80
+            vis_insp_resized = np.vstack([vis_insp_resized, pad])
+
+        side_by_side = np.hstack([vis_ref_resized, border_bar, vis_insp_resized])
+        cv2.imwrite(f"{output_dir}/05_side_by_side_comparison.jpg", side_by_side)
+        cv2.imshow("Step3_SideBySide", side_by_side)
+        cv2.waitKey(wait_time)
+
+        # ------------------------------------------------------------------
+        # Summary
+        # ------------------------------------------------------------------
+        ref_dist = np.sqrt((click_b[0] - click_a[0]) ** 2 + (click_b[1] - click_a[1]) ** 2)
+        print("\n" + "=" * 60)
+        print("Real Image Demo — Summary")
+        print("=" * 60)
+        print(f"  Reference distance (click positions): {ref_dist:.2f} px")
+        print(f"  Measured distance (matched positions): {result['distance']:.2f} px")
+        print(f"  Point A score: {result['point_a']['match_score']:.4f} "
+              f"({'VALID' if result['point_a']['valid'] else 'INVALID'})")
+        print(f"  Point B score: {result['point_b']['match_score']:.4f} "
+              f"({'VALID' if result['point_b']['valid'] else 'INVALID'})")
+        print(f"  Overall: {status_text}")
+        print(f"\nImages saved to: {os.path.abspath(output_dir)}/")
+        print(f"  01_reference_with_templates.jpg")
+        print(f"  02_edge_template_A.jpg / B.jpg")
+        print(f"  03_matched_positions_distance.jpg")
+        print(f"  04a_reference.jpg / 04b_inspection.jpg")
+        print(f"  05_side_by_side_comparison.jpg")
+
+        cv2.waitKey(wait_time)
+        cv2.destroyAllWindows()
+        print("  ✓ test_visual_real_demo passed")
 
 
 # =========================================================================
