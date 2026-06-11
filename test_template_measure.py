@@ -108,10 +108,11 @@ class TestTemplatePoint:
         assert pt.edge_template is not None
         assert pt.edge_template.shape[0] == 80
         assert pt.edge_template.shape[1] == 80
-        assert pt.edge_template.dtype == np.uint8
+        # dtype depends on mode: uint8 for edges, float32 for raw
+        assert pt.edge_template.dtype in (np.uint8, np.float32)
 
-        # Edge template should have some edges (the feature is high-contrast)
-        assert np.count_nonzero(pt.edge_template) > 0, "Edge template is empty!"
+        # Template should have non-zero variance (feature is high-contrast)
+        assert pt.edge_template.std() > 0, "Template has zero variance!"
 
         # Result should be None before measure()
         assert pt.result is None
@@ -710,8 +711,8 @@ class TestDistanceMeasure:
     @staticmethod
     def test_visual_real_demo(wait_time: int = 1500):
         template_org_path = "data/sample/part_1.jpg"
-        test_path1 = "data/sample/part_2.jpg"
-        output_dir = "output/template_match"
+        test_path1 = "data/sample/part_5.jpg"
+        output_dir = "output/template_match_5"
 
         ##读取为np.uint8的灰度图
         ref = cv2.imread(template_org_path, cv2.IMREAD_GRAYSCALE)
@@ -736,7 +737,7 @@ class TestDistanceMeasure:
         # ------------------------------------------------------------------
         click_a = [148, 310]
         click_b = [164, 2128]
-        template_size = 512
+        template_size = 256
 
         print(f"\n[Step 1] Creating templates from reference image "
               f"({ref.shape[0]}x{ref.shape[1]} px)...")
