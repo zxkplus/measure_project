@@ -3,19 +3,25 @@ Template Matching 2D Point Measurement Module
 
 Core principle:
 1. Crop a square template centered at a user-clicked position on a reference image
-2. Extract Canny edge features from the template (lighting-invariant representation)
-3. On inspection images, match the edge template using normalized cross-correlation
+2. Apply a configurable Preprocessor to both template and inspection images
+3. Match using normalized cross-correlation (cv2.matchTemplate with TM_CCOEFF_NORMED)
 4. Refine the match location to subpixel accuracy via quadratic interpolation
 5. Compute Euclidean distance between two matched points
 
 Usage:
-    # Create templates from reference image
-    pt_a = TemplatePoint(ref_img, click_row=200, click_col=150, template_size=80)
-    pt_b = TemplatePoint(ref_img, click_row=200, click_col=350, template_size=80)
+    from measure_template import TemplatePoint, DistanceMeasure
+    from measure_template import RawPreprocessor, CannyPreprocessor
+
+    # Raw pixel matching (default)
+    pt_a = TemplatePoint(ref, click_row=200, click_col=150, template_size=80)
+    pt_b = TemplatePoint(ref, click_row=200, click_col=350, template_size=80)
+
+    # Canny edge matching
+    pt_a = TemplatePoint(ref, click_row=200, click_col=150, template_size=80,
+                         preprocessor=CannyPreprocessor(50, 150))
 
     # Save for later use
     pt_a.save("template_A.npz")
-    pt_b.save("template_B.npz")
 
     # ... later, on a new image ...
     pt_a = TemplatePoint.from_file("template_A.npz")
@@ -27,23 +33,189 @@ Usage:
     vis = dm.visualize(inspection_img)
 """
 
+import json
 import cv2
 import numpy as np
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any, Protocol
 
+
+# =========================================================================
+# Preprocessor Protocol & Built-in Implementations
+# =========================================================================
+
+class Preprocessor(Protocol):
+    """
+    Template matching preprocessing interface.
+
+    Each Preprocessor transforms a raw grayscale image (uint8) into a
+    representation suitable for cv2.matchTemplate(TM_CCOEFF_NORMED).
+
+    Critical constraint: the same preprocessor instance is applied to both
+    the template crop (at construction time) and the inspection image
+    (at measure time), ensuring consistent feature representation.
+
+    To create a custom preprocessor, implement __call__, name, serialize(),
+    and deserialize(), then register it in _PREPROCESSOR_REGISTRY.
+    """
+
+    @property
+    def name(self) -> str:
+        """Human-readable name for display labels and debugging."""
+        ...
+
+    def serialize(self) -> Dict[str, Any]:
+        """Serialize to a dict. Must be reconstructable via deserialize()."""
+        ...
+
+    @staticmethod
+    def deserialize(data: Dict[str, Any]) -> 'Preprocessor':
+        """Reconstruct a preprocessor from the dict returned by serialize()."""
+        ...
+
+    def __call__(self, image: np.ndarray) -> np.ndarray:
+        """
+        Apply preprocessing to a grayscale image.
+
+        Args:
+            image: 2D grayscale image, dtype=uint8.
+
+        Returns:
+            2D processed image, any dtype suitable for matchTemplate.
+        """
+        ...
+
+
+class RawPreprocessor:
+    """No enhancement — passes raw pixel intensity as float32."""
+
+    name = 'Raw'
+
+    def serialize(self) -> Dict[str, Any]:
+        return {'type': 'raw'}
+
+    @staticmethod
+    def deserialize(data: Dict[str, Any]) -> 'RawPreprocessor':
+        return RawPreprocessor()
+
+    def __call__(self, image: np.ndarray) -> np.ndarray:
+        return image.astype(np.float32)
+
+
+class CannyPreprocessor:
+    """Canny edge detection — produces a binary edge map (uint8: 0/255)."""
+
+    def __init__(self, threshold1: float = 50.0, threshold2: float = 150.0):
+        self.threshold1 = threshold1
+        self.threshold2 = threshold2
+
+    @property
+    def name(self) -> str:
+        return f'Canny(t1={self.threshold1:.0f}, t2={self.threshold2:.0f})'
+
+    def serialize(self) -> Dict[str, Any]:
+        return {'type': 'canny', 't1': self.threshold1, 't2': self.threshold2}
+
+    @staticmethod
+    def deserialize(data: Dict[str, Any]) -> 'CannyPreprocessor':
+        return CannyPreprocessor(data['t1'], data['t2'])
+
+    def __call__(self, image: np.ndarray) -> np.ndarray:
+        return cv2.Canny(image, self.threshold1, self.threshold2)
+
+
+class SobelPreprocessor:
+    """Sobel gradient magnitude — float32."""
+
+    def __init__(self, kernel_size: int = 3):
+        self.kernel_size = kernel_size
+
+    @property
+    def name(self) -> str:
+        return f'Sobel(k={self.kernel_size})'
+
+    def serialize(self) -> Dict[str, Any]:
+        return {'type': 'sobel', 'ksize': self.kernel_size}
+
+    @staticmethod
+    def deserialize(data: Dict[str, Any]) -> 'SobelPreprocessor':
+        return SobelPreprocessor(data['ksize'])
+
+    def __call__(self, image: np.ndarray) -> np.ndarray:
+        gx = cv2.Sobel(image, cv2.CV_32F, 1, 0, ksize=self.kernel_size)
+        gy = cv2.Sobel(image, cv2.CV_32F, 0, 1, ksize=self.kernel_size)
+        return np.sqrt(gx ** 2 + gy ** 2)
+
+
+class CLAHEPreprocessor:
+    """CLAHE contrast-limited adaptive histogram equalization — float32."""
+
+    def __init__(self, clip_limit: float = 2.0, tile_grid_size: Tuple[int, int] = (8, 8)):
+        self.clip_limit = clip_limit
+        self.tile_grid_size = tile_grid_size
+        self._clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+
+    @property
+    def name(self) -> str:
+        return f'CLAHE(cl={self.clip_limit:.1f})'
+
+    def serialize(self) -> Dict[str, Any]:
+        return {'type': 'clahe', 'clip_limit': self.clip_limit,
+                'tile_grid_size': list(self.tile_grid_size)}
+
+    @staticmethod
+    def deserialize(data: Dict[str, Any]) -> 'CLAHEPreprocessor':
+        return CLAHEPreprocessor(data['clip_limit'], tuple(data['tile_grid_size']))
+
+    def __call__(self, image: np.ndarray) -> np.ndarray:
+        return self._clahe.apply(image).astype(np.float32)
+
+
+# Registry: maps serialize()['type'] → Preprocessor class for deserialization.
+# Users can register custom preprocessors:
+#   _PREPROCESSOR_REGISTRY['my_type'] = MyPreprocessor
+_PREPROCESSOR_REGISTRY: Dict[str, type] = {
+    'raw': RawPreprocessor,
+    'canny': CannyPreprocessor,
+    'sobel': SobelPreprocessor,
+    'clahe': CLAHEPreprocessor,
+}
+
+
+def _deserialize_preprocessor(data: Dict[str, Any]) -> Preprocessor:
+    """Reconstruct a preprocessor from its serialized dict."""
+    ptype = data['type']
+    cls = _PREPROCESSOR_REGISTRY.get(ptype)
+    if cls is None:
+        known = list(_PREPROCESSOR_REGISTRY.keys())
+        raise ValueError(
+            f"Unknown preprocessor type: '{ptype}'. "
+            f"Known types: {known}. "
+            f"Register a custom type via: _PREPROCESSOR_REGISTRY['{ptype}'] = YourClass"
+        )
+    return cls.deserialize(data)
+
+
+# =========================================================================
+# TemplatePoint
+# =========================================================================
 
 class TemplatePoint:
     """
     Template-matching point measurement object.
 
     Crops a square template centered at a user-clicked position on a reference
-    image, extracts Canny edge features, and matches them against inspection
+    image, applies a configurable Preprocessor, and matches against inspection
     images using normalized cross-correlation.
 
     Usage:
+        # Raw pixels (default)
         pt = TemplatePoint(ref_image, click_row=200, click_col=300, template_size=80)
+
+        # Canny edges
+        pt = TemplatePoint(ref_image, click_row=200, click_col=300, template_size=80,
+                           preprocessor=CannyPreprocessor(50, 150))
+
         pt.save("template_A.npz")
-        # ... later ...
         pt2 = TemplatePoint.from_file("template_A.npz")
         result = pt2.measure(inspection_image)
         vis = pt2.visualize(inspection_image)
@@ -54,36 +226,29 @@ class TemplatePoint:
                  click_row: float,
                  click_col: float,
                  template_size: int = 80,
-                 use_edges: bool = False,
-                 canny_threshold1: float = 50.0,
-                 canny_threshold2: float = 150.0,
+                 preprocessor: Optional[Preprocessor] = None,
                  match_score_threshold: float = 0.5,
                  use_subpixel: bool = True):
         """
         Initialize a template point from a reference image.
 
-        Crops a template_size x template_size square centered at (click_row, click_col)
-        from the reference image. When use_edges=True, extracts a Canny edge map;
-        otherwise uses raw pixel intensity for template matching.
+        Crops a template_size × template_size square centered at (click_row, click_col)
+        and applies the preprocessor to it.
 
         Args:
             reference_image: Grayscale reference image (uint8)
             click_row: User-clicked row position (y-coordinate in image)
             click_col: User-clicked column position (x-coordinate in image)
             template_size: Square template side length in pixels (default 80)
-            use_edges: If True, match on Canny edge maps (lighting-robust).
-                       If False, match on raw pixel intensity (default False).
-            canny_threshold1: Canny lower threshold (default 50, only when use_edges=True)
-            canny_threshold2: Canny upper threshold (default 150, only when use_edges=True)
+            preprocessor: Preprocessor instance (RawPreprocessor if None).
+                          Applied identically to template and inspection images.
             match_score_threshold: Minimum NCC score for valid match (default 0.5)
             use_subpixel: Enable subpixel refinement of the correlation peak (default True)
         """
         self.click_row = click_row
         self.click_col = click_col
         self.template_size = template_size
-        self.use_edges = use_edges
-        self.canny_threshold1 = canny_threshold1
-        self.canny_threshold2 = canny_threshold2
+        self.preprocessor = preprocessor if preprocessor is not None else RawPreprocessor()
         self.match_score_threshold = match_score_threshold
         self.use_subpixel = use_subpixel
 
@@ -107,25 +272,15 @@ class TemplatePoint:
         self._crop_center_col = (c1 + c2) / 2.0
         self._crop_h, self._crop_w = crop.shape
 
-        if self.use_edges:
-            # Extract Canny edge template
-            edge_result = self._extract_edges(crop)
-            if edge_result is None or edge_result.size == 0:
-                raise ValueError(
-                    f"Edge extraction returned empty result for template at "
-                    f"(row={click_row:.0f}, col={click_col:.0f}). "
-                    f"Crop size is {self._crop_h}x{self._crop_w} px."
-                )
-            self.edge_template = edge_result
+        # Apply preprocessor to template crop
+        self.edge_template = self.preprocessor(crop)
 
-            # Validate template has sufficient edge content
+        # Canny-specific: warn if edge content is too sparse
+        if isinstance(self.preprocessor, CannyPreprocessor):
             edge_ratio = np.count_nonzero(self.edge_template) / self.edge_template.size
             if edge_ratio < 0.001:
                 print(f"Warning: Template has very few edges (edge pixel ratio={edge_ratio:.4f}). "
                       f"Matching may be unreliable. Consider selecting a point with more texture.")
-        else:
-            # Use raw pixel intensity — store the crop directly
-            self.edge_template = crop.astype(np.float32)
 
         # Result storage
         self.result: Optional[Dict[str, Any]] = None
@@ -140,8 +295,8 @@ class TemplatePoint:
         """
         Match the template against an inspection image.
 
-        When use_edges=True, matches on Canny edge maps.
-        When use_edges=False (default), matches on raw pixel intensity.
+        The same preprocessor used for the template is applied to the
+        inspection image before matching.
 
         Args:
             inspection_image: Grayscale inspection image (uint8)
@@ -169,7 +324,7 @@ class TemplatePoint:
                 f"is smaller than template size ({self._crop_h}x{self._crop_w})"
             )
 
-        # Prepare search image (apply Canny if use_edges, else use raw pixels)
+        # Prepare search image and apply preprocessor
         if search_region is not None:
             r1, r2, c1, c2 = search_region
             r1 = max(0, r1)
@@ -181,10 +336,7 @@ class TemplatePoint:
             r1, c1 = 0, 0
             search_img = gray
 
-        if self.use_edges:
-            search_img = self._extract_edges(search_img)
-        else:
-            search_img = search_img.astype(np.float32)
+        search_img = self.preprocessor(search_img)
 
         # Template matching
         heatmap = cv2.matchTemplate(search_img, self.edge_template, cv2.TM_CCOEFF_NORMED)
@@ -319,7 +471,7 @@ class TemplatePoint:
     def _draw_info(self, img: np.ndarray):
         """Draw information text overlay."""
         y = 25
-        mode_str = 'Edges' if self.use_edges else 'Raw'
+        mode_str = self.preprocessor.name if hasattr(self.preprocessor, 'name') else 'Custom'
         title = f'Template Point [{mode_str}]'
         cv2.putText(img, title, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
         cv2.putText(img, title, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
@@ -349,21 +501,33 @@ class TemplatePoint:
         """
         Serialize the template to a .npz file.
 
-        Saves the edge template and all configuration parameters needed
+        Saves the processed template data and all configuration needed
         to reconstruct the TemplatePoint without the original reference image.
+
+        Note: only preprocessors registered in _PREPROCESSOR_REGISTRY can be
+        serialized. Custom unregistered preprocessors will raise ValueError.
 
         Args:
             filepath: Path to the .npz output file
+
+        Raises:
+            ValueError: If the preprocessor type is not in _PREPROCESSOR_REGISTRY.
         """
+        pp_data = self.preprocessor.serialize()
+        pp_type = pp_data.get('type', '')
+        if pp_type not in _PREPROCESSOR_REGISTRY:
+            raise ValueError(
+                f"Cannot serialize preprocessor of type '{pp_type}'. "
+                f"Register it via: _PREPROCESSOR_REGISTRY['{pp_type}'] = YourClass"
+            )
+
         np.savez_compressed(
             filepath,
             edge_template=self.edge_template,
             click_row=self.click_row,
             click_col=self.click_col,
             template_size=self.template_size,
-            use_edges=self.use_edges,
-            canny_threshold1=self.canny_threshold1,
-            canny_threshold2=self.canny_threshold2,
+            preprocessor_json=json.dumps(pp_data),
             match_score_threshold=self.match_score_threshold,
             use_subpixel=self.use_subpixel,
             crop_center_row=self._crop_center_row,
@@ -374,12 +538,15 @@ class TemplatePoint:
         )
 
     @classmethod
-    def from_file(cls, filepath: str) -> 'TemplatePoint':
+    def from_file(cls, filepath: str,
+                  preprocessor: Optional[Preprocessor] = None) -> 'TemplatePoint':
         """
         Deserialize a TemplatePoint from a .npz file.
 
         Args:
             filepath: Path to the .npz file
+            preprocessor: Optional preprocessor override. If provided, replaces
+                          the preprocessor stored in the file.
 
         Returns:
             A fully initialized TemplatePoint ready for measure()
@@ -391,10 +558,6 @@ class TemplatePoint:
         obj.click_row = float(data['click_row'])
         obj.click_col = float(data['click_col'])
         obj.template_size = int(data['template_size'])
-        # Backward compat: old .npz files don't have use_edges, default to True
-        obj.use_edges = bool(data['use_edges']) if 'use_edges' in data else True
-        obj.canny_threshold1 = float(data['canny_threshold1'])
-        obj.canny_threshold2 = float(data['canny_threshold2'])
         obj.match_score_threshold = float(data['match_score_threshold'])
         obj.use_subpixel = bool(data['use_subpixel'])
         obj._crop_center_row = float(data['crop_center_row'])
@@ -403,6 +566,28 @@ class TemplatePoint:
         obj._crop_w = int(data['crop_w'])
         obj._actual_crop_bounds = tuple(data['actual_crop_bounds'].tolist())
         obj.result = None
+
+        # Restore preprocessor
+        if preprocessor is not None:
+            obj.preprocessor = preprocessor
+        elif 'preprocessor_json' in data:
+            pp_data = json.loads(str(data['preprocessor_json']))
+            obj.preprocessor = _deserialize_preprocessor(pp_data)
+        elif 'preprocessor_data' in data:
+            # Legacy: old format with dict stored as object array
+            pp_data = data['preprocessor_data'].item()
+            obj.preprocessor = _deserialize_preprocessor(pp_data)
+        elif 'use_edges' in data:
+            # Backward compat: old format with use_edges + canny_threshold*
+            if bool(data['use_edges']):
+                t1 = float(data.get('canny_threshold1', 50))
+                t2 = float(data.get('canny_threshold2', 150))
+                obj.preprocessor = CannyPreprocessor(t1, t2)
+            else:
+                obj.preprocessor = RawPreprocessor()
+        else:
+            obj.preprocessor = RawPreprocessor()
+
         return obj
 
     # ------------------------------------------------------------------
@@ -437,15 +622,6 @@ class TemplatePoint:
         c1 = int(max(0, self.click_col - half))
         c2 = int(min(w, self.click_col + half))
         return (r1, r2, c1, c2)
-
-    def _extract_edges(self, image: np.ndarray) -> np.ndarray:
-        """
-        Apply Canny edge detection.
-
-        Returns:
-            Binary edge map (uint8, values 0 or 255)
-        """
-        return cv2.Canny(image, self.canny_threshold1, self.canny_threshold2)
 
     def _refine_subpixel_2d(self, heatmap: np.ndarray,
                              peak_y: int, peak_x: int) -> Tuple[float, float]:
@@ -503,6 +679,10 @@ class TemplatePoint:
 
         return subpixel_x, subpixel_y
 
+
+# =========================================================================
+# DistanceMeasure
+# =========================================================================
 
 class DistanceMeasure:
     """
@@ -587,16 +767,12 @@ class DistanceMeasure:
         Returns:
             Annotated BGR image (copy)
         """
-        # Each point's visualize handles grayscale-to-BGR conversion internally,
-        # so we just pass the image through sequentially
         vis_img = self.point_a.visualize(image, wait_time=-1, **kwargs)
         vis_img = self.point_b.visualize(vis_img, wait_time=-1, **kwargs)
 
-        # Draw distance line
         if show_distance_line and self.result is not None:
             self._draw_distance_line(vis_img, distance_color, line_thickness)
 
-        # Draw distance info
         self._draw_distance_info(vis_img)
 
         if wait_time >= 0:
