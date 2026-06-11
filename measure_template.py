@@ -54,6 +54,7 @@ class TemplatePoint:
                  click_row: float,
                  click_col: float,
                  template_size: int = 80,
+                 use_edges: bool = False,
                  canny_threshold1: float = 50.0,
                  canny_threshold2: float = 150.0,
                  match_score_threshold: float = 0.5,
@@ -62,21 +63,25 @@ class TemplatePoint:
         Initialize a template point from a reference image.
 
         Crops a template_size x template_size square centered at (click_row, click_col)
-        from the reference image and extracts its Canny edge map.
+        from the reference image. When use_edges=True, extracts a Canny edge map;
+        otherwise uses raw pixel intensity for template matching.
 
         Args:
             reference_image: Grayscale reference image (uint8)
             click_row: User-clicked row position (y-coordinate in image)
             click_col: User-clicked column position (x-coordinate in image)
             template_size: Square template side length in pixels (default 80)
-            canny_threshold1: Canny lower threshold (default 50)
-            canny_threshold2: Canny upper threshold (default 150)
+            use_edges: If True, match on Canny edge maps (lighting-robust).
+                       If False, match on raw pixel intensity (default False).
+            canny_threshold1: Canny lower threshold (default 50, only when use_edges=True)
+            canny_threshold2: Canny upper threshold (default 150, only when use_edges=True)
             match_score_threshold: Minimum NCC score for valid match (default 0.5)
             use_subpixel: Enable subpixel refinement of the correlation peak (default True)
         """
         self.click_row = click_row
         self.click_col = click_col
         self.template_size = template_size
+        self.use_edges = use_edges
         self.canny_threshold1 = canny_threshold1
         self.canny_threshold2 = canny_threshold2
         self.match_score_threshold = match_score_threshold
@@ -102,21 +107,25 @@ class TemplatePoint:
         self._crop_center_col = (c1 + c2) / 2.0
         self._crop_h, self._crop_w = crop.shape
 
-        # Extract edge template
-        edge_result = self._extract_edges(crop)
-        if edge_result is None or edge_result.size == 0:
-            raise ValueError(
-                f"Edge extraction returned empty result for template at "
-                f"(row={click_row:.0f}, col={click_col:.0f}). "
-                f"Crop size is {self._crop_h}x{self._crop_w} px."
-            )
-        self.edge_template = edge_result
+        if self.use_edges:
+            # Extract Canny edge template
+            edge_result = self._extract_edges(crop)
+            if edge_result is None or edge_result.size == 0:
+                raise ValueError(
+                    f"Edge extraction returned empty result for template at "
+                    f"(row={click_row:.0f}, col={click_col:.0f}). "
+                    f"Crop size is {self._crop_h}x{self._crop_w} px."
+                )
+            self.edge_template = edge_result
 
-        # Validate template has sufficient edge content
-        edge_ratio = np.count_nonzero(self.edge_template) / self.edge_template.size
-        if edge_ratio < 0.001:
-            print(f"Warning: Template has very few edges (edge pixel ratio={edge_ratio:.4f}). "
-                  f"Matching may be unreliable. Consider selecting a point with more texture.")
+            # Validate template has sufficient edge content
+            edge_ratio = np.count_nonzero(self.edge_template) / self.edge_template.size
+            if edge_ratio < 0.001:
+                print(f"Warning: Template has very few edges (edge pixel ratio={edge_ratio:.4f}). "
+                      f"Matching may be unreliable. Consider selecting a point with more texture.")
+        else:
+            # Use raw pixel intensity — store the crop directly
+            self.edge_template = crop.astype(np.float32)
 
         # Result storage
         self.result: Optional[Dict[str, Any]] = None
@@ -129,7 +138,10 @@ class TemplatePoint:
                 inspection_image: np.ndarray,
                 search_region: Optional[Tuple[int, int, int, int]] = None) -> Dict[str, Any]:
         """
-        Match the edge template against an inspection image.
+        Match the template against an inspection image.
+
+        When use_edges=True, matches on Canny edge maps.
+        When use_edges=False (default), matches on raw pixel intensity.
 
         Args:
             inspection_image: Grayscale inspection image (uint8)
@@ -157,20 +169,25 @@ class TemplatePoint:
                 f"is smaller than template size ({self._crop_h}x{self._crop_w})"
             )
 
-        # Extract edges from inspection image
+        # Prepare search image (apply Canny if use_edges, else use raw pixels)
         if search_region is not None:
             r1, r2, c1, c2 = search_region
             r1 = max(0, r1)
             r2 = min(gray.shape[0], r2)
             c1 = max(0, c1)
             c2 = min(gray.shape[1], c2)
-            edge_search = self._extract_edges(gray[r1:r2, c1:c2])
+            search_img = gray[r1:r2, c1:c2]
         else:
             r1, c1 = 0, 0
-            edge_search = self._extract_edges(gray)
+            search_img = gray
 
-        # Template matching on edge maps
-        heatmap = cv2.matchTemplate(edge_search, self.edge_template, cv2.TM_CCOEFF_NORMED)
+        if self.use_edges:
+            search_img = self._extract_edges(search_img)
+        else:
+            search_img = search_img.astype(np.float32)
+
+        # Template matching
+        heatmap = cv2.matchTemplate(search_img, self.edge_template, cv2.TM_CCOEFF_NORMED)
 
         # Find integer peak
         _, max_val, _, max_loc = cv2.minMaxLoc(heatmap)
@@ -302,7 +319,8 @@ class TemplatePoint:
     def _draw_info(self, img: np.ndarray):
         """Draw information text overlay."""
         y = 25
-        title = 'Template Point'
+        mode_str = 'Edges' if self.use_edges else 'Raw'
+        title = f'Template Point [{mode_str}]'
         cv2.putText(img, title, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
         cv2.putText(img, title, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
@@ -343,6 +361,7 @@ class TemplatePoint:
             click_row=self.click_row,
             click_col=self.click_col,
             template_size=self.template_size,
+            use_edges=self.use_edges,
             canny_threshold1=self.canny_threshold1,
             canny_threshold2=self.canny_threshold2,
             match_score_threshold=self.match_score_threshold,
@@ -372,6 +391,8 @@ class TemplatePoint:
         obj.click_row = float(data['click_row'])
         obj.click_col = float(data['click_col'])
         obj.template_size = int(data['template_size'])
+        # Backward compat: old .npz files don't have use_edges, default to True
+        obj.use_edges = bool(data['use_edges']) if 'use_edges' in data else True
         obj.canny_threshold1 = float(data['canny_threshold1'])
         obj.canny_threshold2 = float(data['canny_threshold2'])
         obj.match_score_threshold = float(data['match_score_threshold'])
