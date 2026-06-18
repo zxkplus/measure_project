@@ -137,3 +137,6 @@ Users register custom preprocessors via `_PREPROCESSOR_REGISTRY['my_type'] = MyC
 ### Data directory
 
 `data/` is gitignored. Test fixtures reference `data/sample/bottleneck_2.jpg` — a real product image used for integration tests. This file must be obtained separately.
+
+### personal preferences
+Prioritize answering in Chinese

@@ -714,9 +714,9 @@ class TestDistanceMeasure:
 
     @staticmethod
     def test_visual_real_demo(wait_time: int = 1500):
-        template_org_path = "data/sample/part_1.jpg"
-        test_path1 = "data/sample/part_3.jpg"
-        output_dir = "output/template_match_3"
+        template_org_path = "data/sample/bottleneck_6.jpg"
+        test_path1 = "data/sample/bottleneck_5.jpg"
+        output_dir = "output/template_match_4"
 
         ##读取为np.uint8的灰度图
         ref = cv2.imread(template_org_path, cv2.IMREAD_GRAYSCALE)
@@ -732,7 +732,7 @@ class TestDistanceMeasure:
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
 
-        pp = ThresholdPreprocessor(threshold=180)
+        pp = ThresholdPreprocessor(threshold=200)
 
         print("=" * 60)
         print("Visual Demo: Real Image Template Matching")
@@ -741,9 +741,9 @@ class TestDistanceMeasure:
         # ------------------------------------------------------------------
         # Step 1: Create templates from reference image
         # ------------------------------------------------------------------
-        click_a = [148, 310]
-        click_b = [164, 2128]
-        template_size = 125
+        click_a = [2082,749]
+        click_b = [2123,2698]
+        template_size = 512
 
         print(f"\n[Step 1] Creating templates from reference image "
               f"({ref.shape[0]}x{ref.shape[1]} px)...")
