@@ -1008,114 +1008,174 @@ class TestVisualDemo:
         # Composed: angle between the two edges
         wf.add(TwoLinesAngleObject("angle_A", "edge_AB", "edge_AD"))
 
-        # ---------- 4. Resolve & measure ----------
-        results = wf.measure(inspection)
+        ##单独展示ref 和测量对象
+        wf.visualize(ref, show_objects=["loc_A", "loc_B", "loc_D", "edge_AB", "edge_AD", "angle_A"], wait_ms=0)
 
-        # ---------- 5. Print all results ----------
-        print(f"\n  --- Localization ---")
-        for lbl in ["loc_A", "loc_B", "loc_D"]:
-            r = results[lbl]
-            print(f"  {lbl}: ({r.row:.1f}, {r.col:.1f}) "
-                  f"score={r.meta['match_score']:.4f} valid={r.valid}")
-        print(f"  Transform: rot={np.degrees(wf.transform.rotation):.1f}deg, "
-              f"dx={wf.transform.translation_col:.1f}, "
-              f"dy={wf.transform.translation_row:.1f}, "
-              f"scale={wf.transform.scale:.4f}")
 
-        print(f"\n  --- Edge Lines ---")
-        for lbl in ["edge_AB", "edge_AD"]:
-            r = results[lbl]
-            print(f"  {lbl}: valid={r.valid}  "
-                  f"angle={r.angle_deg:.1f}deg  length={r.length:.1f}px  "
-                  f"mean_err={r.meta.get('mean_error', -1):.3f}px")
-        print(f"\n  --- Composed Angle ---")
-        a = results["angle_A"]
-        print(f"  angle_A: valid={a.valid}  value={a.value_deg:.2f}deg")
+        # # ---------- 4. Resolve & measure ----------
+        # results = wf.measure(inspection)
 
-        # ---------- 6. Step-by-step visualization ----------
-        def _to_bgr(img):
-            return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) if len(img.shape) == 2 else img.copy()
+        # # ---------- 5. 打印每个测量对象的数值结果 (teach vs match) ----------
+        # _print_detailed_results(wf, results)
 
-        wait_ms = 1200
+        # # ---------- 6. 在原图上逐对象展示 teach → match ----------
+        # _show_teach_vs_match_slideshow(wf, ref, inspection, wait_ms=1500)
 
-        # (a) Reference image with teach positions
-        vis = _to_bgr(ref)
-        cv2.putText(vis, "REFERENCE — Teach Positions", (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        for label in wf._registration_order:
-            obj = wf._objects[label]
+        # print("\n  Press any key to close...")
+        # cv2.waitKey(0)
+        # cv2.destroyAllWindows()
+        # print("=== Visual Demo Complete ===\n")
+
+
+def _print_detailed_results(wf, results):
+    """Print teach→match comparison for every measurement object."""
+    t = wf.transform
+
+    print(f"\n{'='*65}")
+    print(f"  Measurement Results — Teach vs Match")
+    print(f"{'='*65}")
+
+    print(f"\n  [Localization Transform]")
+    if t and t.is_valid:
+        print(f"    rotation = {np.degrees(t.rotation):.2f} deg")
+        print(f"    scale    = {t.scale:.4f}")
+        print(f"    dx       = {t.translation_col:.2f} px")
+        print(f"    dy       = {t.translation_row:.2f} px")
+    else:
+        print(f"    (none — no localization templates)")
+
+    for label in wf._registration_order:
+        obj = wf._objects[label]
+        r = obj.result
+        if r is None:
+            continue
+
+        cls_name = obj.__class__.__name__
+        print(f"\n  [{cls_name}] {label}")
+        print(f"    result_type = {r.type}")
+        print(f"    valid       = {r.valid}")
+
+        if isinstance(obj, TemplatePointObject):
+            print(f"    teach (row,col) = ({obj._teach_row:.1f}, {obj._teach_col:.1f})")
+            if r.valid:
+                print(f"    match (row,col) = ({r.row:.1f}, {r.col:.1f})")
+                print(f"    match_score     = {r.meta['match_score']:.4f}")
+
+        elif isinstance(obj, FitLineObject):
+            print(f"    teach_start = ({obj._teach_start[0]:.1f}, {obj._teach_start[1]:.1f})")
+            print(f"    teach_end   = ({obj._teach_end[0]:.1f}, {obj._teach_end[1]:.1f})")
+            if r.valid:
+                print(f"    line_eq     = {r.a:.4f}*row + {r.b:.4f}*col + {r.c:.4f} = 0")
+                print(f"    angle       = {r.angle_deg:.2f} deg")
+                print(f"    length      = {r.length:.1f} px")
+                print(f"    num_points  = {r.meta.get('num_points', 0)}")
+                print(f"    mean_error  = {r.meta.get('mean_error', 0):.3f} px")
+                print(f"    max_error   = {r.meta.get('max_error', 0):.3f} px")
+
+        elif isinstance(obj, TwoLinesAngleObject):
+            if r.valid:
+                print(f"    angle       = {r.value_deg:.3f} deg")
+
+
+def _show_teach_vs_match_slideshow(wf, ref, inspection, wait_ms=1500):
+    """Step-by-step slideshow: teach on ref (left) vs match on insp (right) per object."""
+
+    def _to_bgr(img):
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) if len(img.shape) == 2 else img.copy()
+
+    ref_bgr = _to_bgr(ref)
+    insp_bgr = _to_bgr(inspection)
+    h, w = ref.shape[:2]
+    total = len(wf._registration_order) + 2  # +1 for "all teach" +1 for "all results"
+
+    # ---------- 1. REFERENCE: ALL teach positions ----------
+    vis_ref = ref_bgr.copy()
+    cv2.putText(vis_ref, "REFERENCE — All Teach Positions", (10, 28),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    for label in wf._registration_order:
+        obj = wf._objects[label]
+        if isinstance(obj, TemplatePointObject):
+            tc = (int(obj._teach_col), int(obj._teach_row))
+            cv2.drawMarker(vis_ref, tc, (0, 255, 0), cv2.MARKER_CROSS, 12, 2)
+            cv2.putText(vis_ref, f"{label}\n({obj._teach_row:.0f},{obj._teach_col:.0f})",
+                        (tc[0] + 12, tc[1] - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1)
+        elif isinstance(obj, FitLineObject):
+            p1 = (int(obj._teach_start[1]), int(obj._teach_start[0]))
+            p2 = (int(obj._teach_end[1]), int(obj._teach_end[0]))
+            cv2.line(vis_ref, p1, p2, (255, 255, 0), 2)
+            mid = ((p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2)
+            cv2.putText(vis_ref, label, (mid[0] + 5, mid[1]),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+    cv2.imshow(f"1/{total} REFERENCE — All Teach Positions", vis_ref)
+    cv2.waitKey(wait_ms)
+
+    # ---------- 2..N-1: Per-object teach (left) vs match (right) ----------
+    window_idx = 2
+    for label in wf._registration_order:
+        obj = wf._objects[label]
+        r = obj.result
+        if r is None:
+            continue
+
+        left = ref_bgr.copy()
+        right = insp_bgr.copy()
+
+        # Left: teach position on reference
+        cv2.putText(left, f"{label} — TEACH", (8, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2)
+        if isinstance(obj, TemplatePointObject):
+            tc = (int(obj._teach_col), int(obj._teach_row))
+            cv2.drawMarker(left, tc, (0, 255, 0), cv2.MARKER_CROSS, 14, 2)
+            cv2.putText(left, f"({obj._teach_row:.0f},{obj._teach_col:.0f})",
+                        (tc[0] + 14, tc[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        elif isinstance(obj, FitLineObject):
+            p1 = (int(obj._teach_start[1]), int(obj._teach_start[0]))
+            p2 = (int(obj._teach_end[1]), int(obj._teach_end[0]))
+            cv2.line(left, p1, p2, (255, 255, 0), 2)
+            cv2.putText(left, "teach line", (p1[0] + 5, p1[1] - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+
+        # Right: match/measurement result on inspection
+        cv2.putText(right, f"{label} — RESULT", (8, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2)
+        if r.valid:
             if isinstance(obj, TemplatePointObject):
-                cv2.circle(vis, (int(obj._teach_col), int(obj._teach_row)),
-                           8, (0, 255, 0), 2)
-                cv2.putText(vis, obj.label,
-                            (int(obj._teach_col) + 12, int(obj._teach_row) - 8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+                tc_c = (int(obj._calibrated_col), int(obj._calibrated_row))
+                mc = (int(r.col), int(r.row))
+                cv2.drawMarker(right, tc_c, (255, 255, 0), cv2.MARKER_DIAMOND, 10, 2)
+                cv2.drawMarker(right, mc, (0, 255, 0), cv2.MARKER_CROSS, 14, 2)
+                cv2.line(right, tc_c, mc, (0, 200, 200), 1)
+                cv2.putText(right, f"({r.row:.1f},{r.col:.1f}) s={r.meta['match_score']:.3f}",
+                            (mc[0] + 14, mc[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
             elif isinstance(obj, FitLineObject):
-                cv2.line(vis,
-                         (int(obj._teach_start[1]), int(obj._teach_start[0])),
-                         (int(obj._teach_end[1]), int(obj._teach_end[0])),
-                         (255, 255, 0), 2)
-                mid = ((obj._teach_start[1] + obj._teach_end[1]) / 2,
-                       (obj._teach_start[0] + obj._teach_end[0]) / 2)
-                cv2.putText(vis, obj.label, (int(mid[0]) + 5, int(mid[1])),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1)
-        cv2.imshow("1/7 Reference — Teach Positions", vis)
+                right = obj.visualize(right)
+                cv2.putText(right, f"a={r.angle_deg:.1f}deg err={r.meta.get('mean_error',0):.3f}px",
+                            (10, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        else:
+            cv2.putText(right, "INVALID", (w // 2 - 40, h // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+        # Side-by-side
+        combined = np.hstack([left, right])
+        cv2.putText(combined, "TEACH", (10, combined.shape[0] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+        cv2.putText(combined, "MATCH", (w + 10, combined.shape[0] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+        cv2.imshow(f"{window_idx}/{total} {obj.__class__.__name__}: {label}", combined)
         cv2.waitKey(wait_ms)
+        window_idx += 1
 
-        # (b) Each localization template match on inspection
-        for lbl in ["loc_A", "loc_B", "loc_D"]:
-            vis = _to_bgr(inspection)
-            obj = wf._objects[lbl]
-            r = obj.result
-            cv2.putText(vis, f"Template match: {lbl}", (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            # Draw teach position (transformed)
-            tc = (int(obj._calibrated_col), int(obj._calibrated_row))
-            cv2.drawMarker(vis, tc, (0, 255, 255), cv2.MARKER_DIAMOND, 12, 2)
-            # Draw matched position
-            mc = (int(r.col), int(r.row))
-            cv2.drawMarker(vis, mc, (0, 255, 0), cv2.MARKER_CROSS, 14, 2)
-            cv2.putText(vis, f"score={r.meta['match_score']:.4f}",
-                        (mc[0] + 15, mc[1] - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            cv2.imshow(f"2-4/7 Template Match: {lbl}", vis)
-            cv2.waitKey(wait_ms)
-
-        # (c) Edge AB - FitLineObject
-        vis = wf._objects["edge_AB"].visualize(inspection)
-        cv2.putText(vis, "FitLineObject: edge_AB (top edge)", (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        r = results["edge_AB"]
-        cv2.putText(vis, f"angle={r.angle_deg:.1f}deg  mean_err={r.meta.get('mean_error',0):.3f}",
-                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        cv2.imshow("5/7 FitLine: edge_AB", vis)
-        cv2.waitKey(wait_ms)
-
-        # (d) Edge AD - FitLineObject
-        vis = wf._objects["edge_AD"].visualize(inspection)
-        cv2.putText(vis, "FitLineObject: edge_AD (left slanted edge)", (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        r = results["edge_AD"]
-        cv2.putText(vis, f"angle={r.angle_deg:.1f}deg  mean_err={r.meta.get('mean_error',0):.3f}",
-                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        cv2.imshow("6/7 FitLine: edge_AD", vis)
-        cv2.waitKey(wait_ms)
-
-        # (e) Full workflow visualization (all objects together)
-        vis = wf.visualize(inspection)
-        cv2.putText(vis, "ALL OBJECTS — Calibrated Measurement", (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        a = results["angle_A"]
-        # Also overlay the angle value prominently
-        loc_a = results["loc_A"]
-        cv2.putText(vis, f"Interior Angle = {a.value_deg:.2f} deg",
-                    (int(loc_a.col) + 20, int(loc_a.row) - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.imshow("7/7 ALL OBJECTS — Result", vis)
-        print("\n  Press any key to close...")
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-        print("=== Visual Demo Complete ===\n")
+    # ---------- Final: ALL objects on inspection ----------
+    vis_all = wf.visualize(inspection)
+    cv2.putText(vis_all, "INSPECTION — All Objects Calibrated + Measured", (10, 28),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+    a = wf.get_result("angle_A")
+    if a and a.valid:
+        loc_a = wf.get_result("loc_A")
+        cv2.putText(vis_all, f"Interior Angle = {a.value_deg:.2f} deg",
+                    (int(loc_a.col) + 15, int(loc_a.row) - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
+    cv2.imshow(f"{window_idx}/{total} ALL OBJECTS — Final Result", vis_all)
 
 
 def _create_parallelogram_image(height=500, width=550):

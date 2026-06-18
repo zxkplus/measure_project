@@ -66,6 +66,60 @@ from measure_template import (
 
 
 # ===========================================================================
+# Shared visualization helpers
+# ===========================================================================
+
+
+def _draw_label(image: np.ndarray, text: str, position: Tuple[float, float],
+                color: Tuple[int, int, int] = (0, 255, 0),
+                offset: Tuple[int, int] = (10, -10),
+                font_scale: float = 0.45) -> None:
+    """
+    Draw a label with dark outline near a position on the image.
+
+    Args:
+        image: BGR image (modified in-place).
+        text: Label text.
+        position: (col, row) anchor point.
+        color: Text color (B, G, R).
+        offset: (dx, dy) from anchor to text bottom-left.
+        font_scale: OpenCV font scale.
+    """
+    x = int(position[0]) + offset[0]
+    y = int(position[1]) + offset[1]
+    cv2.putText(image, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.putText(image, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale, color, 1, cv2.LINE_AA)
+
+
+def _draw_legend(image: np.ndarray, entries: List[Tuple[str, Tuple[int, int, int]]],
+                 start_x: int = 10, start_y: int = 25, line_height: int = 18) -> None:
+    """
+    Draw a legend panel at the top-left corner.
+
+    Args:
+        image: BGR image (modified in-place).
+        entries: List of (label, color) tuples.
+        start_x, start_y: Top-left position of the first entry.
+        line_height: Vertical spacing between entries.
+    """
+    x, y = start_x, start_y
+    # Semi-transparent background
+    overlay = image.copy()
+    n = len(entries)
+    cv2.rectangle(overlay, (x - 4, y - 16), (x + 200, y + n * line_height + 4),
+                  (40, 40, 40), -1)
+    cv2.addWeighted(overlay, 0.5, image, 0.5, 0, image)
+    for label, color in entries:
+        cv2.putText(image, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4, (0, 0, 0), 2, cv2.LINE_AA)
+        cv2.putText(image, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4, color, 1, cv2.LINE_AA)
+        y += line_height
+
+
+# ===========================================================================
 # Geometric result types — the output vocabulary of the system
 # ===========================================================================
 
@@ -543,7 +597,14 @@ class TemplatePointObject(MeasureObject):
         return obj
 
     def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:
-        return self._template_point.visualize(image, **kwargs)
+        vis = self._template_point.visualize(image, **kwargs)
+        # Draw label near the matched position (or teach position)
+        if self.result is not None and self.result.valid:
+            pos = (self.result.col, self.result.row)
+        else:
+            pos = (self._teach_col, self._teach_row)
+        _draw_label(vis, self.label, pos, color=(0, 255, 0))
+        return vis
 
 
 class EdgePointObject(MeasureObject):
@@ -696,7 +757,8 @@ class EdgePointObject(MeasureObject):
                 markerSize=10,
                 thickness=2,
             )
-
+        _draw_label(vis, self.label, (self._calibrated_col, self._calibrated_row),
+                    color=(0, 255, 0), offset=(12, -12))
         return vis
 
 
@@ -852,6 +914,8 @@ class EdgePairObject(MeasureObject):
                 markerSize=10,
                 thickness=2,
             )
+        _draw_label(vis, self.label, (self._calibrated_col, self._calibrated_row),
+                    color=(0, 255, 255), offset=(12, -12))
         return vis
 
 
@@ -989,7 +1053,12 @@ class FitLineObject(MeasureObject):
                 "mean_error": r.meta.get("mean_error", 0.0),
                 "max_error": r.meta.get("max_error", 0.0),
             }
-        return obj.visualize(image, **kwargs)
+        vis = obj.visualize(image, **kwargs)
+        # Draw label near line midpoint
+        mid_col = (self._calibrated_start[1] + self._calibrated_end[1]) / 2
+        mid_row = (self._calibrated_start[0] + self._calibrated_end[0]) / 2
+        _draw_label(vis, self.label, (mid_col, mid_row), color=(255, 255, 0))
+        return vis
 
 
 class FitCircleObject(MeasureObject):
@@ -1136,7 +1205,12 @@ class FitCircleObject(MeasureObject):
                 "mean_error": self.result.meta.get("mean_error", 0.0),
                 "max_error": self.result.meta.get("max_error", 0.0),
             }
-        return obj.visualize(image, **kwargs)
+        vis = obj.visualize(image, **kwargs)
+        _draw_label(vis, self.label,
+                    (self._calibrated_center[1] + self._calibrated_radius,
+                     self._calibrated_center[0] - self._calibrated_radius),
+                    color=(255, 100, 255), offset=(8, 0))
+        return vis
 
 
 # ===========================================================================
@@ -1226,6 +1300,12 @@ class TwoPointsLineObject(MeasureObject):
             # Double-stroke line
             cv2.line(vis, pt1, pt2, (0, 0, 0), thickness=3)
             cv2.line(vis, pt1, pt2, (255, 0, 255), thickness=2)
+        if self.result is not None and self.result.valid and len(self._input_objects) >= 2:
+            i0 = self._input_objects[0].result
+            i1 = self._input_objects[1].result
+            if i0 and i1:
+                mid = ((i0.col + i1.col) / 2, (i0.row + i1.row) / 2)
+                _draw_label(vis, self.label, mid, color=(255, 0, 255), offset=(0, 15))
         return vis
 
 
@@ -1281,15 +1361,8 @@ class TwoPointsDistanceObject(MeasureObject):
                     int(round((p1.col + p2.col) / 2)),
                     int(round((p1.row + p2.row) / 2)),
                 )
-                cv2.putText(
-                    vis,
-                    f"{self.result.value:.2f}px",
-                    (mid[0] + 10, mid[1]),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (255, 0, 255),
-                    2,
-                )
+                vis_label = f"{self.label} {self.result.value:.1f}px"
+                _draw_label(vis, vis_label, mid, color=(255, 0, 255))
         return vis
 
 
@@ -1359,15 +1432,8 @@ class PointLineDistanceObject(MeasureObject):
                 cv2.line(vis, pt1, pt2, (0, 0, 0), thickness=3)
                 cv2.line(vis, pt1, pt2, (0, 255, 255), thickness=2)
                 mid = ((pt1[0] + pt2[0]) // 2, (pt1[1] + pt2[1]) // 2)
-                cv2.putText(
-                    vis,
-                    f"{self.result.value:.2f}px",
-                    (mid[0] + 10, mid[1]),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (0, 255, 255),
-                    2,
-                )
+                _draw_label(vis, f"{self.label} {self.result.value:.1f}px",
+                            mid, color=(0, 255, 255))
         return vis
 
 
@@ -1438,15 +1504,8 @@ class TwoLinesAngleObject(MeasureObject):
                     ix = (int(round(ix_col)), int(round(ix_row)))
                     # Intersection marker + angle label
                     cv2.circle(vis, ix, 5, (0, 200, 255), -1)
-                    cv2.putText(
-                        vis,
-                        f"{self.result.value_deg:.1f} deg",
-                        (ix[0] + 12, ix[1] - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (0, 255, 255),
-                        2,
-                    )
+                    _draw_label(vis, f"{self.label} {self.result.value_deg:.1f}deg",
+                                ix, color=(0, 255, 255), offset=(12, -8))
         return vis
 
 
@@ -1512,15 +1571,8 @@ class PointCircleDistanceObject(MeasureObject):
                 cv2.line(vis, ctr, ptx, (0, 0, 0), thickness=3)
                 cv2.line(vis, ctr, ptx, (0, 255, 255), thickness=2)
                 mid = ((ctr[0] + ptx[0]) // 2, (ctr[1] + ptx[1]) // 2)
-                cv2.putText(
-                    vis,
-                    f"{self.result.value:.2f}px",
-                    (mid[0] + 10, mid[1]),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (0, 255, 255),
-                    2,
-                )
+                _draw_label(vis, f"{self.label} {self.result.value:.1f}px",
+                            mid, color=(0, 255, 255))
         return vis
 
 
