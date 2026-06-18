@@ -1818,13 +1818,21 @@ class MeasurementWorkflow:
     # Visualization
     # ------------------------------------------------------------------
 
-    def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:
+    def visualize(self, image: np.ndarray,
+                  show_objects: Optional[List[str]] = None,
+                  wait_ms: int = -1,
+                  **kwargs) -> np.ndarray:
         """
-        Render all measurement objects onto the image in execution order.
+        Render measurement objects onto the image in execution order.
 
         Args:
             image: Input image (grayscale or BGR).
-            **kwargs: Forwarded to each object's visualize() method.
+            show_objects: Optional list of object labels to render.
+                          If None, renders all objects.
+            wait_ms: If >= 0, display the result in an OpenCV window
+                     for wait_ms milliseconds. -1 means no display.
+            **kwargs: Forwarded to each object's visualize() method
+                      (e.g. show_labels, line_thickness, point_radius).
 
         Returns:
             Annotated BGR image.
@@ -1834,7 +1842,12 @@ class MeasurementWorkflow:
         else:
             vis = image.copy()
 
+        # Filter objects
         order = self._execution_order or self._registration_order
+        if show_objects is not None:
+            show_set = set(show_objects)
+            order = [l for l in order if l in show_set]
+
         for label in order:
             obj = self._objects[label]
             vis = obj.visualize(vis, **kwargs)
@@ -1861,6 +1874,12 @@ class MeasurementWorkflow:
             1,
             cv2.LINE_AA,
         )
+
+        if wait_ms >= 0:
+            cv2.imshow("MeasurementWorkflow.visualize", vis)
+            cv2.waitKey(wait_ms)
+
+        return vis
 
         return vis
 
