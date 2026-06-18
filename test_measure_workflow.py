@@ -970,7 +970,7 @@ class TestVisualDemo:
 
         # ---------- 2. Create inspection via rotation + translation ----------
         rows, cols = ref.shape
-        M = cv2.getRotationMatrix2D((cols / 2, rows / 2), 12.0, 1.0)
+        M = cv2.getRotationMatrix2D((cols / 2, rows / 2), -18.0, 1.0)
         M[0, 2] += 10  # dx
         M[1, 2] += 6   # dy
         inspection = cv2.warpAffine(ref, M, (cols, rows), borderMode=cv2.BORDER_REPLICATE)
@@ -987,30 +987,34 @@ class TestVisualDemo:
         # Localization templates at three corners (for robust transform)
         wf.add(TemplatePointObject("loc_A", ref, 120, 150, template_size=40,
                                     is_localization=True))
-        wf.add(TemplatePointObject("loc_B", ref, 120, 420, template_size=40,
-                                    is_localization=True))
+        # wf.add(TemplatePointObject("loc_B", ref, 120, 420, template_size=40,
+        #                             is_localization=True))
         wf.add(TemplatePointObject("loc_D", ref, 330, 210, template_size=40,
                                     is_localization=True))
 
         # Two FitLineObjects — measure two adjacent edges
         # Edge AB: top edge (point A → point B)
         wf.add(FitLineObject("edge_AB",
-                             start=(120, 150), end=(120, 420),
-                             measure_length1=15, measure_length2=25,
-                             num_measures=8, transition="positive"))
+                             start=(120, 180), end=(120, 400),
+                             measure_length1=5, measure_length2=25,
+                             num_measures=8, transition="positive",threshold=5.0))
 
         # Edge AD: left slanted edge (point A → point D)
         wf.add(FitLineObject("edge_AD",
-                             start=(120, 150), end=(330, 210),
-                             measure_length1=15, measure_length2=25,
-                             num_measures=8, transition="positive"))
+                             start=(160, 165), end=(309, 205),
+                             measure_length1=10, measure_length2=25,
+                             num_measures=8, transition="positive",threshold=5.0))
 
         # Composed: angle between the two edges
         wf.add(TwoLinesAngleObject("angle_A", "edge_AB", "edge_AD"))
 
+        wf.add(EdgePointObject("p_a", row=120, col=285, angle=np.pi/2, length1=100, length2=20, transition="positive", select="first", threshold=5.))
+        #将 ref 保存起来
+        wf.measure(ref)
         ##单独展示ref 和测量对象
-        wf.visualize(ref, show_objects=["loc_A", "loc_B", "loc_D", "edge_AB", "edge_AD", "angle_A"], wait_ms=0)
-
+        wf.visualize(ref, show_objects=["loc_A","loc_D", "angle_A"], wait_ms=0)  # "edge_AB", "edge_AD", "angle_A"
+        #保存 ref
+        cv2.imwrite("ref.png", ref)
 
         # # ---------- 4. Resolve & measure ----------
         # results = wf.measure(inspection)
@@ -1208,15 +1212,25 @@ def _create_parallelogram_image(height=500, width=550):
     # Draw dark border around the parallelogram for clear edges
     cv2.polylines(img, [corners], True, 20, thickness=4)
 
-    # Add small cross features at three corners for template matching
-    for (cr, cc) in [(120, 150), (120, 420), (330, 210)]:
-        cross_sz = 8
-        cv2.line(img,
-                 (cc - cross_sz, cr), (cc + cross_sz, cr),
-                 255, thickness=2)
-        cv2.line(img,
-                 (cc, cr - cross_sz), (cc, cr + cross_sz),
-                 255, thickness=2)
+    # Add distinct features at three corners for template matching
+    # (different shapes prevent mismatching between templates)
+
+    # loc_A (120, 150): solid circle (dot marker, rotation invariant)
+    cv2.circle(img, (150, 120), 6, 255, -1)
+
+    # loc_B (120, 420): diamond (rotated square, 45°)
+    diamond_pts = np.array([
+        [420, 112],   # top
+        [428, 120],   # right
+        [420, 128],   # bottom
+        [412, 120],   # left
+    ], dtype=np.int32)
+    cv2.fillPoly(img, [diamond_pts], 255)
+
+    # loc_D (330, 210): L-shaped corner bracket
+    l_sz = 7
+    cv2.line(img, (210 - l_sz, 330), (210 + l_sz, 330), 255, thickness=2)
+    cv2.line(img, (210, 330 - l_sz), (210, 330 + l_sz), 255, thickness=2)
 
     # Add blur and noise
     img = cv2.GaussianBlur(img, (3, 3), 1.0)
