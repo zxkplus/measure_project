@@ -318,7 +318,7 @@ class SimilarityTransform:
 
     def apply_angle(self, angle: float) -> float:
         """Transform an angle (just adds the rotation)."""
-        return angle + self.rotation
+        return angle - self.rotation
 
     def to_dict(self) -> Dict[str, Any]:
         return {
