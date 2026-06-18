@@ -394,18 +394,23 @@ class LineMeasureObject:
                 (int(end[1]), int(end[0])),
                 color, thickness)
         
-        # 在直线两端绘制箭头
-        direction = np.array(self.result['direction'])
-        arrow_len = 20
-        
-        # 起点箭头
+        # 在直线终点绘制比例箭头
+        direction = self.result['direction']
+        dr, dc = direction[0], direction[1]
+        line_len = np.sqrt(dr**2 + dc**2)
+        # 箭头长度 = 线段长度的 ~15%，限制在 [12, 50] px
+        arrow_len = max(12.0, min(line_len * 0.15, 50.0))
+
+        # 起点用实心圆标注
         cv2.circle(img, (int(start[1]), int(start[0])), 4, (255, 255, 0), -1)
-        
-        # 终点箭头
-        end_point = (int(end[1] + direction[0] * arrow_len),
-                     int(end[0] + direction[1] * arrow_len))
-        cv2.arrowedLine(img, (int(end[1]), int(end[0])), end_point,
-                        color, thickness, tipLength=0.3)
+
+        # 终点比例箭头
+        if line_len > 1e-6:
+            udr, udc = dr / line_len, dc / line_len
+            tip = (int(end[1] + udc * arrow_len),
+                   int(end[0] + udr * arrow_len))
+            cv2.arrowedLine(img, (int(end[1]), int(end[0])), tip,
+                            color, thickness, tipLength=0.3)
     
     def _draw_info(self, img: np.ndarray):
         """绘制信息文本"""
