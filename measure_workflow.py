@@ -654,7 +654,7 @@ class EdgePointObject(MeasureObject):
         self._calibrated_angle = transform.apply_angle(self._teach_angle)
 
     def measure(self, image: np.ndarray) -> GeometricResult:
-        measure = Halcon1DMeasure(
+        self._cached_measure = Halcon1DMeasure(
             row=self._calibrated_row,
             col=self._calibrated_col,
             angle=self._calibrated_angle,
@@ -662,7 +662,7 @@ class EdgePointObject(MeasureObject):
             length2=self.length2,
             interpolation=self.interpolation,
         )
-        rows, cols, amps, _ = measure.measure_pos(
+        rows, cols, amps, _ = self._cached_measure.measure_pos(
             image,
             sigma=self.sigma,
             threshold=self.threshold,
@@ -735,15 +735,17 @@ class EdgePointObject(MeasureObject):
         else:
             vis = image.copy()
 
-        # Draw the caliper position
-        measure = Halcon1DMeasure(
-            row=self._calibrated_row,
-            col=self._calibrated_col,
-            angle=self._calibrated_angle,
-            length1=self.length1,
-            length2=self.length2,
-            interpolation=self.interpolation,
-        )
+        # Draw the caliper position (reuse cached object from measure() if available)
+        measure = getattr(self, "_cached_measure", None)
+        if measure is None:
+            measure = Halcon1DMeasure(
+                row=self._calibrated_row,
+                col=self._calibrated_col,
+                angle=self._calibrated_angle,
+                length1=self.length1,
+                length2=self.length2,
+                interpolation=self.interpolation,
+            )
         vis = measure.draw_roi_on_image(vis)
 
         # Draw detected edge point
@@ -809,7 +811,7 @@ class EdgePairObject(MeasureObject):
         self._calibrated_angle = transform.apply_angle(self._teach_angle)
 
     def measure(self, image: np.ndarray) -> GeometricResult:
-        measure = Halcon1DMeasure(
+        self._cached_measure = Halcon1DMeasure(
             row=self._calibrated_row,
             col=self._calibrated_col,
             angle=self._calibrated_angle,
@@ -828,7 +830,7 @@ class EdgePairObject(MeasureObject):
             centers_col,
             intra_dist,
             inter_dist,
-        ) = measure.measure_pairs(
+        ) = self._cached_measure.measure_pairs(
             image,
             sigma=self.sigma,
             threshold=self.threshold,
@@ -895,14 +897,16 @@ class EdgePairObject(MeasureObject):
             vis = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         else:
             vis = image.copy()
-        measure = Halcon1DMeasure(
-            row=self._calibrated_row,
-            col=self._calibrated_col,
-            angle=self._calibrated_angle,
-            length1=self.length1,
-            length2=self.length2,
-            interpolation=self.interpolation,
-        )
+        measure = getattr(self, "_cached_measure", None)
+        if measure is None:
+            measure = Halcon1DMeasure(
+                row=self._calibrated_row,
+                col=self._calibrated_col,
+                angle=self._calibrated_angle,
+                length1=self.length1,
+                length2=self.length2,
+                interpolation=self.interpolation,
+            )
         vis = measure.draw_roi_on_image(vis)
         if self.result is not None and self.result.valid:
             pt = (int(round(self.result.col)), int(round(self.result.row)))
@@ -961,7 +965,7 @@ class FitLineObject(MeasureObject):
         self._calibrated_end = (er, ec)
 
     def measure(self, image: np.ndarray) -> GeometricResult:
-        obj = LineMeasureObject(
+        self._cached_obj = LineMeasureObject(
             start=self._calibrated_start,
             end=self._calibrated_end,
             measure_length1=self.measure_length1,
@@ -971,7 +975,7 @@ class FitLineObject(MeasureObject):
             threshold=self.threshold,
             transition=self.transition,
         )
-        raw = obj.measure(image)
+        raw = self._cached_obj.measure(image)
         if raw is None:
             result = LineResult(
                 label=self.label,
@@ -1027,16 +1031,18 @@ class FitLineObject(MeasureObject):
         )
 
     def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:
-        obj = LineMeasureObject(
-            start=self._calibrated_start,
-            end=self._calibrated_end,
-            measure_length1=self.measure_length1,
-            measure_length2=self.measure_length2,
-            num_measures=self.num_measures,
-            sigma=self.sigma,
-            threshold=self.threshold,
-            transition=self.transition,
-        )
+        obj = getattr(self, "_cached_obj", None)
+        if obj is None:
+            obj = LineMeasureObject(
+                start=self._calibrated_start,
+                end=self._calibrated_end,
+                measure_length1=self.measure_length1,
+                measure_length2=self.measure_length2,
+                num_measures=self.num_measures,
+                sigma=self.sigma,
+                threshold=self.threshold,
+                transition=self.transition,
+            )
         # Set result on the temp object so visualize can use it
         if self.result is not None and self.result.valid:
             r = self.result
@@ -1110,7 +1116,7 @@ class FitCircleObject(MeasureObject):
         self._calibrated_radius = self._teach_radius * transform.scale
 
     def measure(self, image: np.ndarray) -> GeometricResult:
-        obj = CircleMeasureObject(
+        self._cached_obj = CircleMeasureObject(
             center=self._calibrated_center,
             radius=self._calibrated_radius,
             radius_min=self.radius_min * (self._calibrated_radius / max(self._teach_radius, 1e-6)),
@@ -1124,7 +1130,7 @@ class FitCircleObject(MeasureObject):
             start_phi=self.start_phi,
             end_phi=self.end_phi,
         )
-        raw = obj.measure(image)
+        raw = self._cached_obj.measure(image)
         if raw is None:
             result = CircleResult(
                 label=self.label,
@@ -1183,20 +1189,22 @@ class FitCircleObject(MeasureObject):
         )
 
     def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:
-        obj = CircleMeasureObject(
-            center=self._calibrated_center,
-            radius=self._calibrated_radius,
-            radius_min=self.radius_min,
-            radius_max=self.radius_max,
-            measure_length1=self.measure_length1,
-            measure_length2=self.measure_length2,
-            num_measures=self.num_measures,
-            sigma=self.sigma,
-            threshold=self.threshold,
-            transition=self.transition,
-            start_phi=self.start_phi,
-            end_phi=self.end_phi,
-        )
+        obj = getattr(self, "_cached_obj", None)
+        if obj is None:
+            obj = CircleMeasureObject(
+                center=self._calibrated_center,
+                radius=self._calibrated_radius,
+                radius_min=self.radius_min,
+                radius_max=self.radius_max,
+                measure_length1=self.measure_length1,
+                measure_length2=self.measure_length2,
+                num_measures=self.num_measures,
+                sigma=self.sigma,
+                threshold=self.threshold,
+                transition=self.transition,
+                start_phi=self.start_phi,
+                end_phi=self.end_phi,
+            )
         if self.result is not None and self.result.valid:
             obj.result = {
                 "center": (self.result.center_row, self.result.center_col),
