@@ -272,7 +272,16 @@ class TemplatePoint:
                  template_size: int = 80,
                  preprocessor: Optional[Preprocessor] = None,
                  match_score_threshold: float = 0.5,
-                 use_subpixel: bool = True):
+                 use_subpixel: bool = True,
+                 rotation_invariant: bool = False,
+                 angle_range: Tuple[float, float] = (-30.0, 30.0),
+                 angle_step: float = 1.0,
+                 scale_invariant: bool = False,
+                 scale_range: Tuple[float, float] = (0.9, 1.1),
+                 scale_step: float = 0.02,
+                 coarse_fine: bool = True,
+                 coarse_angle_step: float = 5.0,
+                 coarse_scale_step: float = 0.1):
         """
         Initialize a template point from a reference image.
 
@@ -288,6 +297,16 @@ class TemplatePoint:
                           Applied identically to template and inspection images.
             match_score_threshold: Minimum NCC score for valid match (default 0.5)
             use_subpixel: Enable subpixel refinement of the correlation peak (default True)
+            rotation_invariant: Enable multi-angle template matching.
+            angle_range: (min, max) search range in degrees (default -30 to 30).
+            angle_step: Step size in degrees for the fine angle grid (default 1.0).
+            scale_invariant: Enable multi-scale template matching.
+            scale_range: (min, max) scale factor range (default 0.9 to 1.1).
+            scale_step: Step size for the fine scale grid (default 0.02).
+            coarse_fine: Use two-stage search: coarse grid first, then refine
+                         around top candidates (default True).
+            coarse_angle_step: Step size for coarse angle search (default 5.0).
+            coarse_scale_step: Step size for coarse scale search (default 0.1).
         """
         self.click_row = click_row
         self.click_col = click_col
@@ -295,6 +314,15 @@ class TemplatePoint:
         self.preprocessor = preprocessor if preprocessor is not None else RawPreprocessor()
         self.match_score_threshold = match_score_threshold
         self.use_subpixel = use_subpixel
+        self.rotation_invariant = rotation_invariant
+        self.angle_range = angle_range
+        self.angle_step = angle_step
+        self.scale_invariant = scale_invariant
+        self.scale_range = scale_range
+        self.scale_step = scale_step
+        self.coarse_fine = coarse_fine
+        self.coarse_angle_step = coarse_angle_step
+        self.coarse_scale_step = coarse_scale_step
 
         # Crop the template region (clamped to image bounds)
         gray = self._to_gray(reference_image)
@@ -342,6 +370,9 @@ class TemplatePoint:
         The same preprocessor used for the template is applied to the
         inspection image before matching.
 
+        When rotation_invariant or scale_invariant is enabled, performs
+        a multi-angle / multi-scale search to find the best match.
+
         Args:
             inspection_image: Grayscale inspection image (uint8)
             search_region: Optional search bounds as (r1, r2, c1, c2).
@@ -358,15 +389,12 @@ class TemplatePoint:
                 - 'valid': bool, whether match_score >= match_score_threshold
                 - 'int_peak_y': int, integer peak row in the heatmap
                 - 'int_peak_x': int, integer peak col in the heatmap
+                - 'best_rotation_deg': float, detected rotation in degrees (only
+                  when rotation_invariant=True, else 0.0)
+                - 'best_scale': float, detected scale factor (only when
+                  scale_invariant=True, else 1.0)
         """
         gray = self._to_gray(inspection_image)
-
-        # Validate image is large enough
-        if gray.shape[0] < self._crop_h or gray.shape[1] < self._crop_w:
-            raise ValueError(
-                f"Inspection image size ({gray.shape[0]}x{gray.shape[1]}) "
-                f"is smaller than template size ({self._crop_h}x{self._crop_w})"
-            )
 
         # Prepare search image and apply preprocessor
         if search_region is not None:
@@ -382,13 +410,31 @@ class TemplatePoint:
 
         search_img = self.preprocessor(search_img)
 
-        # Template matching
+        # Validate image is large enough for template
+        if search_img.shape[0] < self._crop_h or search_img.shape[1] < self._crop_w:
+            raise ValueError(
+                f"Inspection image size ({search_img.shape[0]}x{search_img.shape[1]}) "
+                f"is smaller than template size ({self._crop_h}x{self._crop_w})"
+            )
+
+        # Dispatch: fast path vs multi-angle/scale
+        if not self.rotation_invariant and not self.scale_invariant:
+            result = self._match_translation_only(search_img, r1, c1)
+        else:
+            result = self._match_multi_angle_scale(search_img, r1, c1)
+
+        self.result = result
+        return self.result
+
+    def _match_translation_only(self, search_img: np.ndarray,
+                                 r1: int, c1: int) -> Dict[str, Any]:
+        """Fast path: single translation-only matchTemplate (existing logic)."""
         heatmap = cv2.matchTemplate(search_img, self.edge_template, cv2.TM_CCOEFF_NORMED)
 
         # Find integer peak
         _, max_val, _, max_loc = cv2.minMaxLoc(heatmap)
-        int_peak_x = max_loc[0]  # col in heatmap
-        int_peak_y = max_loc[1]  # row in heatmap
+        int_peak_x = max_loc[0]
+        int_peak_y = max_loc[1]
 
         # Subpixel refinement
         if self.use_subpixel:
@@ -398,27 +444,296 @@ class TemplatePoint:
             subpixel_y = float(int_peak_y)
 
         # Compute matched center in the full inspection image coordinates
-        # The heatmap position gives the top-left corner of the template match
-        offset_y = self._crop_h / 2.0
-        offset_x = self._crop_w / 2.0
-        matched_row = r1 + subpixel_y + offset_y
-        matched_col = c1 + subpixel_x + offset_x
+        matched_row = r1 + subpixel_y + self._crop_h / 2.0
+        matched_col = c1 + subpixel_x + self._crop_w / 2.0
 
-        # Compute displacement from original click position
-        dy = matched_row - self.click_row
-        dx = matched_col - self.click_col
-
-        self.result = {
+        return {
             'matched_row': matched_row,
             'matched_col': matched_col,
-            'dx': dx,
-            'dy': dy,
+            'dx': matched_col - self.click_col,
+            'dy': matched_row - self.click_row,
             'match_score': float(max_val),
             'valid': max_val >= self.match_score_threshold,
             'int_peak_y': int_peak_y,
             'int_peak_x': int_peak_x,
+            'best_rotation_deg': 0.0,
+            'best_scale': 1.0,
         }
-        return self.result
+
+    def _match_multi_angle_scale(self, search_img: np.ndarray,
+                                  r1: int, c1: int) -> Dict[str, Any]:
+        """
+        Multi-angle / multi-scale search via cv2.matchTemplate enumeration.
+
+        Enumerates (angle, scale) combinations, finding the global-best
+        correlation peak. Uses optional coarse-to-fine two-stage search.
+        Subpixel refinement is applied to position, angle, and scale.
+        """
+        H, W = search_img.shape
+        tmpl_h, tmpl_w = self.edge_template.shape
+
+        # ---- 1. Build search grids ----
+        def _build_grid(invariant, range_tuple, step):
+            if not invariant:
+                if range_tuple[0] == 0.0 and abs(range_tuple[1] - 1.0) < 1e-6:
+                    return [0.0] if range_tuple[0] == 0.0 else [1.0]
+                avg = (range_tuple[0] + range_tuple[1]) / 2.0
+                return [avg]
+            vals = []
+            v = range_tuple[0]
+            eps = step * 0.01
+            while v <= range_tuple[1] + eps:
+                vals.append(v)
+                v += step
+            return vals
+
+        if self.coarse_fine:
+            # Coarse grid
+            coarse_angles = _build_grid(self.rotation_invariant, self.angle_range, self.coarse_angle_step)
+            coarse_scales = _build_grid(self.scale_invariant, self.scale_range, self.coarse_scale_step)
+
+            # Step 1: Coarse search — collect all results
+            coarse_results = self._enumerate_angles_scales(
+                search_img, coarse_angles, coarse_scales, W, H, tmpl_w, tmpl_h
+            )
+            if not coarse_results:
+                return self._make_invalid_result()
+
+            # Step 2: Select top-K candidates (K=3)
+            coarse_results.sort(key=lambda x: x[0], reverse=True)
+            K = min(3, len(coarse_results))
+            top_candidates = coarse_results[:K]
+
+            # Step 3: Fine search around each candidate
+            fine_angles_set = set()
+            fine_scales_set = set()
+            for _, _, angle, scale, _, _ in top_candidates:
+                # Add candidate point
+                fine_angles_set.add(angle)
+                fine_scales_set.add(scale)
+                # Add neighbours at fine step
+                if self.rotation_invariant:
+                    for offset in [-1, 1]:
+                        na = angle + offset * self.angle_step
+                        if self.angle_range[0] - 1e-6 <= na <= self.angle_range[1] + 1e-6:
+                            fine_angles_set.add(na)
+                if self.scale_invariant:
+                    for offset in [-1, 1]:
+                        ns = scale + offset * self.scale_step
+                        if self.scale_range[0] - 1e-6 <= ns <= self.scale_range[1] + 1e-6:
+                            fine_scales_set.add(ns)
+
+            fine_angles = sorted(fine_angles_set) if self.rotation_invariant else [0.0]
+            fine_scales = sorted(fine_scales_set) if self.scale_invariant else [1.0]
+        else:
+            fine_angles = _build_grid(self.rotation_invariant, self.angle_range, self.angle_step)
+            fine_scales = _build_grid(self.scale_invariant, self.scale_range, self.scale_step)
+
+        # ---- 2. Fine enumeration ----
+        all_results = self._enumerate_angles_scales(
+            search_img, fine_angles, fine_scales, W, H, tmpl_w, tmpl_h
+        )
+        if not all_results:
+            return self._make_invalid_result()
+
+        best_score, best_loc, best_angle, best_scale, best_w, best_h = max(
+            all_results, key=lambda x: x[0]
+        )
+        best_heatmap = best_loc[2] if len(best_loc) > 2 else None
+
+        # ---- 3. Subpixel refinement ----
+        # 3a. Position (re-run matchTemplate at best angle/scale if we don't have the heatmap)
+        if best_heatmap is None and self.use_subpixel:
+            warped = self._rotate_scale_template(best_angle, best_scale)
+            if warped is not None:
+                best_heatmap = cv2.matchTemplate(search_img, warped, cv2.TM_CCOEFF_NORMED)
+
+        int_peak_y, int_peak_x = best_loc[0], best_loc[1]
+        if self.use_subpixel and best_heatmap is not None:
+            subpixel_x, subpixel_y = self._refine_subpixel_2d(
+                best_heatmap, int_peak_y, int_peak_x
+            )
+        else:
+            subpixel_x = float(int_peak_x)
+            subpixel_y = float(int_peak_y)
+
+        # 3b. Angle (1D quadratic interpolation across 3 grid points)
+        if self.rotation_invariant and len(fine_angles) >= 3:
+            refined_angle = self._refine_1d_subpixel(
+                all_results, best_angle, self.rotation_invariant, self.scale_invariant,
+                index_dim=2, value_dim=0
+            )
+        else:
+            refined_angle = best_angle
+
+        # 3c. Scale
+        if self.scale_invariant and len(fine_scales) >= 3:
+            refined_scale = self._refine_1d_subpixel(
+                all_results, best_scale, self.rotation_invariant, self.scale_invariant,
+                index_dim=3, value_dim=0
+            )
+        else:
+            refined_scale = best_scale
+
+        # ---- 4. Coordinate transform ----
+        # The warped template dimensions affect the center offset
+        matched_row = r1 + subpixel_y + best_h / 2.0
+        matched_col = c1 + subpixel_x + best_w / 2.0
+
+        return {
+            'matched_row': matched_row,
+            'matched_col': matched_col,
+            'dx': matched_col - self.click_col,
+            'dy': matched_row - self.click_row,
+            'match_score': float(best_score),
+            'valid': best_score >= self.match_score_threshold,
+            'int_peak_y': int_peak_y,
+            'int_peak_x': int_peak_x,
+            'best_rotation_deg': float(refined_angle),
+            'best_scale': float(refined_scale),
+        }
+
+    def _enumerate_angles_scales(self, search_img, angles, scales,
+                                  W, H, tmpl_w, tmpl_h):
+        """
+        Enumerate all (angle, scale) combinations, calling matchTemplate
+        for each valid combination.
+
+        Returns:
+            List of (score, (peak_y, peak_x, heatmap), angle, scale, warped_w, warped_h)
+        """
+        results = []
+        for angle in angles:
+            for scale in scales:
+                warped = self._rotate_scale_template(angle, scale)
+                if warped is None:
+                    continue
+                wh, ww = warped.shape
+                if wh > H or ww > W:
+                    continue
+                heatmap = cv2.matchTemplate(search_img, warped, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, max_loc = cv2.minMaxLoc(heatmap)
+                results.append((float(max_val), (max_loc[1], max_loc[0], heatmap),
+                                angle, scale, ww, wh))
+        return results
+
+    def _rotate_scale_template(self, angle_deg: float, scale: float) -> Optional[np.ndarray]:
+        """
+        Generate a rotated and scaled version of the template.
+
+        Rotation is applied around the template center. The output array
+        is sized to fully contain the rotated+scaled template with no clipping.
+
+        Returns:
+            Warped template array, or None if the template is empty or degenerate.
+        """
+        h_t, w_t = self.edge_template.shape
+        center = (w_t / 2.0, h_t / 2.0)
+
+        # Build affine matrix: rotation around center + scale
+        M = cv2.getRotationMatrix2D(center, angle_deg, scale)
+
+        # Compute bounding box of the warped template
+        corners = np.array([
+            [0, 0], [w_t, 0], [w_t, h_t], [0, h_t]
+        ], dtype=np.float32)
+        transformed = cv2.transform(corners.reshape(1, -1, 2), M).reshape(-1, 2)
+        min_x = np.floor(transformed[:, 0].min())
+        max_x = np.ceil(transformed[:, 0].max())
+        min_y = np.floor(transformed[:, 1].min())
+        max_y = np.ceil(transformed[:, 1].max())
+        new_w = int(max_x - min_x)
+        new_h = int(max_y - min_y)
+
+        if new_w <= 0 or new_h <= 0:
+            return None
+
+        # Adjust translation so all content fits in the output
+        M[0, 2] -= min_x
+        M[1, 2] -= min_y
+
+        # Use template mean as border value to avoid introducing artificial
+        # edges at rotated borders (which would bias NCC toward 0°).
+        border_value = float(np.mean(self.edge_template))
+
+        warped = cv2.warpAffine(self.edge_template, M, (new_w, new_h),
+                                flags=cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_CONSTANT,
+                                borderValue=border_value)
+        return warped
+
+    @staticmethod
+    def _refine_1d_subpixel(results, best_val, rotation_invariant, scale_invariant,
+                             index_dim, value_dim):
+        """
+        Refine angle or scale to sub-step accuracy via 1D quadratic interpolation.
+
+        Filters results to those matching best_val in the other dimension, then
+        fits a parabola through the best value and its two neighbours.
+
+        Args:
+            results: List of (score, loc, angle, scale, w, h) tuples.
+            best_val: The best angle (or scale) from the discrete search.
+            rotation_invariant, scale_invariant: Flags.
+            index_dim: 2 for angle, 3 for scale.
+            value_dim: 0 for score.
+
+        Returns:
+            Refined angle or scale value (clamped to the neighbour range).
+        """
+        other_dim = 3 if index_dim == 2 else 2
+
+        # Collect unique values of the target dimension and their best scores
+        val_scores = {}  # {angle_or_scale: max_score}
+        for r in results:
+            v = r[index_dim]
+            score = r[value_dim]
+            if v not in val_scores or score > val_scores[v]:
+                val_scores[v] = score
+
+        sorted_vals = sorted(val_scores.keys())
+        if len(sorted_vals) < 3:
+            return best_val
+
+        try:
+            idx = sorted_vals.index(best_val)
+        except ValueError:
+            return best_val
+
+        # Need at least one neighbour on each side
+        if idx == 0 or idx == len(sorted_vals) - 1:
+            return best_val
+
+        x = np.array([sorted_vals[idx - 1], sorted_vals[idx], sorted_vals[idx + 1]],
+                     dtype=np.float64)
+        y = np.array([val_scores[xi] for xi in sorted_vals[idx - 1:idx + 2]],
+                     dtype=np.float64)
+
+        try:
+            coeffs = np.polyfit(x, y, 2)
+            a = coeffs[0]
+            if abs(a) > 1e-12:
+                refined = -coeffs[1] / (2.0 * a)
+                refined = max(x[0], min(x[-1], refined))
+                return float(refined)
+        except Exception:
+            pass
+        return best_val
+
+    def _make_invalid_result(self) -> Dict[str, Any]:
+        """Return an invalid result dict when no valid template could be generated."""
+        return {
+            'matched_row': self.click_row,
+            'matched_col': self.click_col,
+            'dx': 0.0,
+            'dy': 0.0,
+            'match_score': -1.0,
+            'valid': False,
+            'int_peak_y': 0,
+            'int_peak_x': 0,
+            'best_rotation_deg': 0.0,
+            'best_scale': 1.0,
+        }
 
     # ------------------------------------------------------------------
     # Visualization
@@ -579,6 +894,15 @@ class TemplatePoint:
             crop_h=self._crop_h,
             crop_w=self._crop_w,
             actual_crop_bounds=np.array(self._actual_crop_bounds, dtype=np.int32),
+            rotation_invariant=self.rotation_invariant,
+            angle_range=np.array(self.angle_range, dtype=np.float64),
+            angle_step=self.angle_step,
+            scale_invariant=self.scale_invariant,
+            scale_range=np.array(self.scale_range, dtype=np.float64),
+            scale_step=self.scale_step,
+            coarse_fine=self.coarse_fine,
+            coarse_angle_step=self.coarse_angle_step,
+            coarse_scale_step=self.coarse_scale_step,
         )
 
     @classmethod
@@ -631,6 +955,25 @@ class TemplatePoint:
                 obj.preprocessor = RawPreprocessor()
         else:
             obj.preprocessor = RawPreprocessor()
+
+        # Restore rotation/scale invariant parameters (backward compatible)
+        obj.rotation_invariant = bool(data.get('rotation_invariant', False))
+        angle_range_arr = data.get('angle_range')
+        if angle_range_arr is not None:
+            obj.angle_range = tuple(float(x) for x in angle_range_arr)
+        else:
+            obj.angle_range = (-30.0, 30.0)
+        obj.angle_step = float(data.get('angle_step', 1.0))
+        obj.scale_invariant = bool(data.get('scale_invariant', False))
+        scale_range_arr = data.get('scale_range')
+        if scale_range_arr is not None:
+            obj.scale_range = tuple(float(x) for x in scale_range_arr)
+        else:
+            obj.scale_range = (0.9, 1.1)
+        obj.scale_step = float(data.get('scale_step', 0.02))
+        obj.coarse_fine = bool(data.get('coarse_fine', True))
+        obj.coarse_angle_step = float(data.get('coarse_angle_step', 5.0))
+        obj.coarse_scale_step = float(data.get('coarse_scale_step', 0.1))
 
         return obj
 

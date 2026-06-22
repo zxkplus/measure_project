@@ -318,7 +318,7 @@ class SimilarityTransform:
 
     def apply_angle(self, angle: float) -> float:
         """Transform an angle (just adds the rotation)."""
-        return angle - self.rotation
+        return angle + self.rotation
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -483,6 +483,15 @@ class TemplatePointObject(MeasureObject):
         use_subpixel: bool = True,
         is_localization: bool = False,
         search_region: Optional[Tuple[int, int, int, int]] = None,
+        rotation_invariant: bool = False,
+        angle_range: Tuple[float, float] = (-30.0, 30.0),
+        angle_step: float = 1.0,
+        scale_invariant: bool = False,
+        scale_range: Tuple[float, float] = (0.9, 1.1),
+        scale_step: float = 0.02,
+        coarse_fine: bool = True,
+        coarse_angle_step: float = 5.0,
+        coarse_scale_step: float = 0.1,
     ):
         super().__init__(label)
         self._template_point = TemplatePoint(
@@ -493,6 +502,15 @@ class TemplatePointObject(MeasureObject):
             preprocessor,
             match_score_threshold,
             use_subpixel,
+            rotation_invariant=rotation_invariant,
+            angle_range=angle_range,
+            angle_step=angle_step,
+            scale_invariant=scale_invariant,
+            scale_range=scale_range,
+            scale_step=scale_step,
+            coarse_fine=coarse_fine,
+            coarse_angle_step=coarse_angle_step,
+            coarse_scale_step=coarse_scale_step,
         )
         self._teach_row = click_row
         self._teach_col = click_col
@@ -504,6 +522,15 @@ class TemplatePointObject(MeasureObject):
         self.is_localization = is_localization
         self.search_region = search_region
         self._preprocessor = preprocessor
+        self._rotation_invariant = rotation_invariant
+        self._angle_range = angle_range
+        self._angle_step = angle_step
+        self._scale_invariant = scale_invariant
+        self._scale_range = scale_range
+        self._scale_step = scale_step
+        self._coarse_fine = coarse_fine
+        self._coarse_angle_step = coarse_angle_step
+        self._coarse_scale_step = coarse_scale_step
 
     def result_type(self) -> str:
         return "point"
@@ -526,6 +553,8 @@ class TemplatePointObject(MeasureObject):
                 "dy": raw["dy"],
                 "teach_row": self._teach_row,
                 "teach_col": self._teach_col,
+                "best_rotation_deg": raw.get("best_rotation_deg", 0.0),
+                "best_scale": raw.get("best_scale", 1.0),
             },
         )
         self.result = result
@@ -556,6 +585,15 @@ class TemplatePointObject(MeasureObject):
             "crop_w": tp._crop_w,
             "click_row": tp.click_row,
             "click_col": tp.click_col,
+            "rotation_invariant": self._rotation_invariant,
+            "angle_range": list(self._angle_range),
+            "angle_step": self._angle_step,
+            "scale_invariant": self._scale_invariant,
+            "scale_range": list(self._scale_range),
+            "scale_step": self._scale_step,
+            "coarse_fine": self._coarse_fine,
+            "coarse_angle_step": self._coarse_angle_step,
+            "coarse_scale_step": self._coarse_scale_step,
         }
 
     @classmethod
@@ -583,6 +621,17 @@ class TemplatePointObject(MeasureObject):
         tp.edge_template = data["edge_template"]
         tp._actual_crop_bounds = tuple(data["actual_crop_bounds"])
 
+        # Restore rotation/scale invariant parameters on the TemplatePoint
+        tp.rotation_invariant = data.get("rotation_invariant", False)
+        tp.angle_range = tuple(data.get("angle_range", (-30.0, 30.0)))
+        tp.angle_step = data.get("angle_step", 1.0)
+        tp.scale_invariant = data.get("scale_invariant", False)
+        tp.scale_range = tuple(data.get("scale_range", (0.9, 1.1)))
+        tp.scale_step = data.get("scale_step", 0.02)
+        tp.coarse_fine = data.get("coarse_fine", True)
+        tp.coarse_angle_step = data.get("coarse_angle_step", 5.0)
+        tp.coarse_scale_step = data.get("coarse_scale_step", 0.1)
+
         obj._template_point = tp
         obj._teach_row = data["teach_row"]
         obj._teach_col = data["teach_col"]
@@ -594,6 +643,15 @@ class TemplatePointObject(MeasureObject):
         obj.is_localization = data.get("is_localization", False)
         obj._preprocessor = tp.preprocessor
         obj.search_region = None
+        obj._rotation_invariant = data.get("rotation_invariant", False)
+        obj._angle_range = tuple(data.get("angle_range", (-30.0, 30.0)))
+        obj._angle_step = data.get("angle_step", 1.0)
+        obj._scale_invariant = data.get("scale_invariant", False)
+        obj._scale_range = tuple(data.get("scale_range", (0.9, 1.1)))
+        obj._scale_step = data.get("scale_step", 0.02)
+        obj._coarse_fine = data.get("coarse_fine", True)
+        obj._coarse_angle_step = data.get("coarse_angle_step", 5.0)
+        obj._coarse_scale_step = data.get("coarse_scale_step", 0.1)
         return obj
 
     def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:

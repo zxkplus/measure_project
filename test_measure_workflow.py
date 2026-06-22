@@ -39,6 +39,8 @@ from measure_workflow import (
     TwoPointsLineObject,
 )
 
+from measure_template import TemplatePoint
+
 
 # ===========================================================================
 # Synthetic image generators
@@ -1009,26 +1011,23 @@ class TestVisualDemo:
         wf.add(TwoLinesAngleObject("angle_A", "edge_AB", "edge_AD"))
 
         wf.add(EdgePointObject("p_a", row=120, col=285, angle=np.pi/2, length1=100, length2=20, transition="positive", select="first", threshold=5.))
-        #将 ref 保存起来
-        wf.measure(ref)
+        # ---------- 4. Resolve & measure ----------
+        results = wf.measure(inspection)
         ##单独展示ref 和测量对象
-        wf.visualize(ref, show_objects=["loc_A","loc_D", "angle_A"], wait_ms=0)  # "edge_AB", "edge_AD", "angle_A"
+        wf.visualize(inspection, show_objects=["loc_A","loc_D", "angle_A"], wait_ms=0)  # "edge_AB", "edge_AD", "angle_A"
         #保存 ref
-        cv2.imwrite("ref.png", ref)
+        cv2.imwrite("inspection.png", inspection)
 
-        # # ---------- 4. Resolve & measure ----------
-        # results = wf.measure(inspection)
+        # ---------- 5. 打印每个测量对象的数值结果 (teach vs match) ----------
+        _print_detailed_results(wf, results)
 
-        # # ---------- 5. 打印每个测量对象的数值结果 (teach vs match) ----------
-        # _print_detailed_results(wf, results)
+        # ---------- 6. 在原图上逐对象展示 teach → match ----------
+        _show_teach_vs_match_slideshow(wf, ref, inspection, wait_ms=1500)
 
-        # # ---------- 6. 在原图上逐对象展示 teach → match ----------
-        # _show_teach_vs_match_slideshow(wf, ref, inspection, wait_ms=1500)
-
-        # print("\n  Press any key to close...")
-        # cv2.waitKey(0)
-        # cv2.destroyAllWindows()
-        # print("=== Visual Demo Complete ===\n")
+        print("\n  Press any key to close...")
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+        print("=== Visual Demo Complete ===\n")
 
 
 def _print_detailed_results(wf, results):
@@ -1240,6 +1239,330 @@ def _create_parallelogram_image(height=500, width=550):
 
 
 # ===========================================================================
+# Rotation/Scale Invariant Template Matching Tests
+# ===========================================================================
+
+
+class TestRotationScaleTemplate:
+    """Tests for rotation and scale invariant template matching."""
+
+    @staticmethod
+    def _create_test_pattern(height=200, width=200):
+        """Create an asymmetric test pattern for rotation detection."""
+        img = np.ones((height, width), dtype=np.uint8) * 128
+        # Horizontal bar
+        img[80:90, 70:100] = 255
+        # Vertical bar (creates an L-shaped feature — asymmetric)
+        img[80:100, 70:80] = 255
+        # Small dot to break symmetry further
+        img[95, 95] = 0
+        return img
+
+    @staticmethod
+    def _rotate_image(img, angle_deg, scale=1.0):
+        """Rotate an image around its center by angle_deg."""
+        h, w = img.shape
+        center = (w / 2.0, h / 2.0)
+        M = cv2.getRotationMatrix2D(center, angle_deg, scale)
+        rotated = cv2.warpAffine(img, M, (w, h),
+                                 borderMode=cv2.BORDER_CONSTANT,
+                                 borderValue=int(np.mean(img)))
+        return rotated
+
+    # ------------------------------------------------------------------
+    # Translation-only (default) — no regression
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def test_translation_only_default():
+        """Default mode still works for pure translation (no rotation/scale)."""
+        ref = TestRotationScaleTemplate._create_test_pattern()
+        # Create inspection by translating
+        inspection = TestRotationScaleTemplate._rotate_image(ref, 0, 1.0)
+        # Add small translation
+        M = np.float32([[1, 0, 5], [0, 1, 3]])
+        inspection = cv2.warpAffine(inspection, M, (200, 200),
+                                    borderMode=cv2.BORDER_CONSTANT,
+                                    borderValue=128)
+
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=60,
+                           rotation_invariant=False, scale_invariant=False)
+        result = tp.measure(inspection)
+        assert result['valid'], f"Default translation match should succeed, got score={result['match_score']:.4f}"
+        # Should detect 0 rotation, 1.0 scale
+        assert abs(result['best_rotation_deg'] - 0.0) < 0.1
+        assert abs(result['best_scale'] - 1.0) < 0.01
+        print("  ✓ test_translation_only_default passed")
+
+    # ------------------------------------------------------------------
+    # Rotation detection
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def test_rotation_detection_5deg():
+        """Detect 5-degree rotation."""
+        ref = TestRotationScaleTemplate._create_test_pattern()
+        inspection = TestRotationScaleTemplate._rotate_image(ref, 5.0)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=60,
+                           rotation_invariant=True,
+                           angle_range=(-15, 15), angle_step=1.0)
+        result = tp.measure(inspection)
+        assert result['valid'], f"Should match rotated image, score={result['match_score']:.4f}"
+        angle_err = abs(result['best_rotation_deg'] - 5.0)
+        assert angle_err < 2.0, f"Detected angle {result['best_rotation_deg']:.2f}° off by {angle_err:.2f}°"
+        print(f"  ✓ test_rotation_detection_5deg passed (detected={result['best_rotation_deg']:.2f}°)")
+
+    @staticmethod
+    def test_rotation_detection_15deg():
+        """Detect 15-degree rotation."""
+        ref = TestRotationScaleTemplate._create_test_pattern()
+        inspection = TestRotationScaleTemplate._rotate_image(ref, 15.0)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=60,
+                           rotation_invariant=True,
+                           angle_range=(-30, 30), angle_step=1.0)
+        result = tp.measure(inspection)
+        assert result['valid'], f"Should match 15° rotated image, score={result['match_score']:.4f}"
+        angle_err = abs(result['best_rotation_deg'] - 15.0)
+        assert angle_err < 2.0, f"Detected angle {result['best_rotation_deg']:.2f}° off by {angle_err:.2f}°"
+        print(f"  ✓ test_rotation_detection_15deg passed (detected={result['best_rotation_deg']:.2f}°)")
+
+    @staticmethod
+    def test_rotation_detection_negative():
+        """Detect negative (counter-clockwise) rotation."""
+        ref = TestRotationScaleTemplate._create_test_pattern()
+        inspection = TestRotationScaleTemplate._rotate_image(ref, -10.0)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=60,
+                           rotation_invariant=True,
+                           angle_range=(-20, 20), angle_step=1.0)
+        result = tp.measure(inspection)
+        assert result['valid'], f"Should match -10° rotated image, score={result['match_score']:.4f}"
+        angle_err = abs(result['best_rotation_deg'] - (-10.0))
+        assert angle_err < 2.5, f"Detected angle {result['best_rotation_deg']:.2f}° off by {angle_err:.2f}°"
+        print(f"  ✓ test_rotation_detection_negative passed (detected={result['best_rotation_deg']:.2f}°)")
+
+    @staticmethod
+    def test_rotation_disabled_fails_on_rotated():
+        """Default (non-invariant) mode should fail or have lower score on rotated image."""
+        ref = TestRotationScaleTemplate._create_test_pattern()
+        inspection = TestRotationScaleTemplate._rotate_image(ref, 20.0)
+
+        tp_default = TemplatePoint(ref, click_row=85, click_col=85, template_size=60,
+                                   rotation_invariant=False)
+        result_default = tp_default.measure(inspection)
+
+        tp_rot = TemplatePoint(ref, click_row=85, click_col=85, template_size=60,
+                               rotation_invariant=True,
+                               angle_range=(-30, 30), angle_step=1.0)
+        result_rot = tp_rot.measure(inspection)
+
+        # Rotation-invariant score should be higher (or default may fail entirely)
+        assert result_rot['match_score'] >= result_default['match_score'] - 0.05, \
+            f"Rotation-invariant ({result_rot['match_score']:.4f}) should not be much worse " \
+            f"than default ({result_default['match_score']:.4f})"
+        print(f"  ✓ test_rotation_disabled_fails_on_rotated passed "
+              f"(default={result_default['match_score']:.4f}, rot-inv={result_rot['match_score']:.4f})")
+
+    # ------------------------------------------------------------------
+    # Scale detection
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def test_scale_detection_10pct():
+        """Detect 10% scale increase."""
+        ref = TestRotationScaleTemplate._create_test_pattern()
+        inspection = TestRotationScaleTemplate._rotate_image(ref, 0, 1.10)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=60,
+                           scale_invariant=True,
+                           scale_range=(0.85, 1.25), scale_step=0.02)
+        result = tp.measure(inspection)
+        assert result['valid'], f"Should match scaled image, score={result['match_score']:.4f}"
+        scale_err = abs(result['best_scale'] - 1.10)
+        assert scale_err < 0.03, f"Detected scale {result['best_scale']:.3f} off by {scale_err:.3f}"
+        print(f"  ✓ test_scale_detection_10pct passed (detected={result['best_scale']:.3f})")
+
+    @staticmethod
+    def test_scale_detection_shrink():
+        """Detect 15% scale reduction."""
+        ref = TestRotationScaleTemplate._create_test_pattern()
+        inspection = TestRotationScaleTemplate._rotate_image(ref, 0, 0.85)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=60,
+                           scale_invariant=True,
+                           scale_range=(0.7, 1.0), scale_step=0.02)
+        result = tp.measure(inspection)
+        assert result['valid'], f"Should match shrunk image, score={result['match_score']:.4f}"
+        scale_err = abs(result['best_scale'] - 0.85)
+        assert scale_err < 0.03, f"Detected scale {result['best_scale']:.3f} off by {scale_err:.3f}"
+        print(f"  ✓ test_scale_detection_shrink passed (detected={result['best_scale']:.3f})")
+
+    # ------------------------------------------------------------------
+    # Combined rotation + scale
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def test_rotation_and_scale_combined():
+        """Detect simultaneous rotation (15°) and scale (1.12x)."""
+        ref = TestRotationScaleTemplate._create_test_pattern()
+        inspection = TestRotationScaleTemplate._rotate_image(ref, 15.0, 1.12)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=60,
+                           rotation_invariant=True, scale_invariant=True,
+                           angle_range=(-30, 30), angle_step=1.0,
+                           scale_range=(0.9, 1.3), scale_step=0.02)
+        result = tp.measure(inspection)
+        assert result['valid'], f"Should match rotated+scaled image, score={result['match_score']:.4f}"
+        angle_err = abs(result['best_rotation_deg'] - 15.0)
+        scale_err = abs(result['best_scale'] - 1.12)
+        assert angle_err < 2.5, f"Angle off by {angle_err:.2f}°"
+        assert scale_err < 0.04, f"Scale off by {scale_err:.3f}"
+        print(f"  ✓ test_rotation_and_scale_combined passed "
+              f"(angle={result['best_rotation_deg']:.2f}°, scale={result['best_scale']:.3f})")
+
+    # ------------------------------------------------------------------
+    # Coarse-fine search
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def test_coarse_fine_accuracy():
+        """Coarse-fine two-stage search achieves similar accuracy to direct fine search."""
+        ref = TestRotationScaleTemplate._create_test_pattern()
+        inspection = TestRotationScaleTemplate._rotate_image(ref, 12.0, 1.05)
+
+        # Direct fine search
+        tp_fine = TemplatePoint(ref, click_row=85, click_col=85, template_size=50,
+                                rotation_invariant=True, scale_invariant=True,
+                                angle_range=(-25, 25), angle_step=1.0,
+                                scale_range=(0.9, 1.15), scale_step=0.02,
+                                coarse_fine=False)
+        result_fine = tp_fine.measure(inspection)
+
+        # Coarse-fine search
+        tp_cf = TemplatePoint(ref, click_row=85, click_col=85, template_size=50,
+                              rotation_invariant=True, scale_invariant=True,
+                              angle_range=(-25, 25), angle_step=1.0,
+                              scale_range=(0.9, 1.15), scale_step=0.02,
+                              coarse_fine=True,
+                              coarse_angle_step=5.0, coarse_scale_step=0.1)
+        result_cf = tp_cf.measure(inspection)
+
+        assert result_fine['valid'] and result_cf['valid']
+        # Coarse-fine should give similar results to direct fine search
+        angle_diff = abs(result_cf['best_rotation_deg'] - result_fine['best_rotation_deg'])
+        scale_diff = abs(result_cf['best_scale'] - result_fine['best_scale'])
+        assert angle_diff < 1.5, f"Coarse-fine angle {result_cf['best_rotation_deg']:.2f} vs fine {result_fine['best_rotation_deg']:.2f}"
+        assert scale_diff < 0.03, f"Coarse-fine scale {result_cf['best_scale']:.3f} vs fine {result_fine['best_scale']:.3f}"
+        print(f"  ✓ test_coarse_fine_accuracy passed")
+
+    # ------------------------------------------------------------------
+    # Search region with rotation/scale
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def test_rotation_with_search_region():
+        """Rotation-invariant matching respects search_region."""
+        ref = TestRotationScaleTemplate._create_test_pattern()
+        inspection = TestRotationScaleTemplate._rotate_image(ref, 10.0)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=50,
+                           rotation_invariant=True,
+                           angle_range=(-20, 20), angle_step=1.0)
+        # Provide a search region large enough for the rotated template
+        search_region = (40, 150, 40, 150)
+        result = tp.measure(inspection, search_region=search_region)
+        assert result['valid'], f"Should match within search region, score={result['match_score']:.4f}"
+        assert 40 <= result['matched_row'] <= 150, \
+            f"Row {result['matched_row']:.1f} outside search region [40, 150]"
+        assert 40 <= result['matched_col'] <= 150, \
+            f"Col {result['matched_col']:.1f} outside search region [40, 150]"
+        print(f"  ✓ test_rotation_with_search_region passed")
+
+    # ------------------------------------------------------------------
+    # Serialization roundtrip
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def test_serialization_roundtrip():
+        """Rotation/scale params survive save→load roundtrip."""
+        import tempfile, os
+        ref = TestRotationScaleTemplate._create_test_pattern()
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=60,
+                           rotation_invariant=True, scale_invariant=True,
+                           angle_range=(-20, 20), angle_step=2.0,
+                           scale_range=(0.85, 1.15), scale_step=0.05,
+                           coarse_fine=True,
+                           coarse_angle_step=5.0, coarse_scale_step=0.1)
+
+        with tempfile.NamedTemporaryFile(suffix='.npz', delete=False) as f:
+            fname = f.name
+        try:
+            tp.save(fname)
+            tp2 = TemplatePoint.from_file(fname)
+            # Verify params preserved (use approx for float tuples)
+            assert tp2.rotation_invariant == True
+            assert tp2.scale_invariant == True
+            assert tp2.angle_range == pytest.approx((-20, 20))
+            assert tp2.angle_step == 2.0
+            assert tp2.scale_range == pytest.approx((0.85, 1.15))
+            assert tp2.scale_step == 0.05
+            assert tp2.coarse_fine == True
+            assert tp2.coarse_angle_step == 5.0
+            assert tp2.coarse_scale_step == 0.1
+
+            # Verify match result is consistent
+            inspection = TestRotationScaleTemplate._rotate_image(ref, 10.0, 1.05)
+            r1 = tp.measure(inspection)
+            r2 = tp2.measure(inspection)
+            assert abs(r1['best_rotation_deg'] - r2['best_rotation_deg']) < 0.5
+            assert abs(r1['best_scale'] - r2['best_scale']) < 0.02
+        finally:
+            os.unlink(fname)
+        print(f"  ✓ test_serialization_roundtrip passed")
+
+    # ------------------------------------------------------------------
+    # Backward compatibility
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def test_backward_compat_no_params():
+        """Loading an old file without rotation/scale params uses safe defaults."""
+        import tempfile, os
+        ref = TestRotationScaleTemplate._create_test_pattern()
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=40,
+                           rotation_invariant=False, scale_invariant=False)
+
+        with tempfile.NamedTemporaryFile(suffix='.npz', delete=False) as f:
+            fname = f.name
+        try:
+            tp.save(fname)
+            tp2 = TemplatePoint.from_file(fname)
+            # Should default to disabled
+            assert tp2.rotation_invariant == False
+            assert tp2.scale_invariant == False
+            assert tp2.angle_range == pytest.approx((-30.0, 30.0))
+            assert tp2.scale_range == pytest.approx((0.9, 1.1))
+            assert tp2.coarse_fine == True
+        finally:
+            os.unlink(fname)
+        print(f"  ✓ test_backward_compat_no_params passed")
+
+    # ------------------------------------------------------------------
+    # Visualization smoke test
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def test_visualize_smoke():
+        """Visualize with rotation/scale params — just ensure no crash."""
+        ref = TestRotationScaleTemplate._create_test_pattern()
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=50,
+                           rotation_invariant=True, scale_invariant=True,
+                           angle_range=(-15, 15), angle_step=2.0,
+                           scale_range=(0.9, 1.1), scale_step=0.05)
+        inspection = TestRotationScaleTemplate._rotate_image(ref, 8.0, 1.03)
+        tp.measure(inspection)
+        vis = tp.visualize(inspection, wait_time=-1)
+        assert vis is not None
+        assert vis.shape[:2] == inspection.shape[:2]
+        print(f"  ✓ test_visualize_smoke passed")
+
+
+# ===========================================================================
 # Test runner
 # ===========================================================================
 
@@ -1256,6 +1579,7 @@ def run_all_tests():
         TestComposedObjects,
         TestMeasurementWorkflow,
         TestVisualDemo,
+        TestRotationScaleTemplate,
     ]
 
     total = 0

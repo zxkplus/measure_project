@@ -226,17 +226,18 @@ class TestTemplatePoint:
         inspection = create_synthetic_inspection(ref, offset_row=7.0, offset_col=3.0, noise_level=0.5)
 
         # Provide a generous search region around the expected position
-        search_region = (80, 140, 80, 140)
+        # Must be at least as large as the template (80x80)
+        search_region = (60, 160, 60, 160)
         result = pt.measure(inspection, search_region=search_region)
 
         assert result is not None
         assert result['valid'], f"Match in search region should be valid, got score={result['match_score']:.4f}"
 
         # Matched position should be within the search region
-        assert 80 <= result['matched_row'] <= 140, \
-            f"Row {result['matched_row']} outside search region [80, 140]"
-        assert 80 <= result['matched_col'] <= 140, \
-            f"Col {result['matched_col']} outside search region [80, 140]"
+        assert 60 <= result['matched_row'] <= 160, \
+            f"Row {result['matched_row']} outside search region [60, 160]"
+        assert 60 <= result['matched_col'] <= 160, \
+            f"Col {result['matched_col']} outside search region [60, 160]"
 
         print("  ✓ test_search_region passed")
 
