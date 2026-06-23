@@ -315,8 +315,14 @@ class TemplateView(tk.Frame):
             return
 
         h, w = self._template_image.shape[:2]
-        canvas_w = self._canvas.winfo_width() or self._width
-        canvas_h = self._canvas.winfo_height() or self._height
+        canvas_w = self._canvas.winfo_width()
+        canvas_h = self._canvas.winfo_height()
+        # winfo_width/height returns 1 when the widget isn't mapped yet —
+        # 1 is truthy so a plain `or` fallback never fires.  Use > 1.
+        if canvas_w <= 1:
+            canvas_w = self._width
+        if canvas_h <= 1:
+            canvas_h = self._height
 
         # Scale to fit canvas
         self._scale = min(canvas_w / w, canvas_h / h) * 0.95
@@ -437,14 +443,25 @@ class TemplateView(tk.Frame):
         return items
 
     def _draw_fit_line_overlay(self, params: dict, color: str) -> List[int]:
-        """Draw a fit line ROI."""
+        """Draw a fit line ROI with perpendicular measurement probes.
+
+        The fit line tool places ``num_measures`` equally-spaced measurement
+        rectangles perpendicular to the line segment.  Each rectangle runs
+        edge detection and the collected points are fitted to a line.  This
+        overlay draws the main line, endpoint markers, and small probe ticks
+        that represent those measurement rectangles so the user can see at a
+        glance how the tool will measure.
+        """
         items = []
         start = params["start"]
         end = params["end"]
+        num_measures = params.get("num_measures", 10)
+        measure_length2 = params.get("measure_length2", 25.0)  # half-width perpendicular to line
 
         sx, sy = self._tmpl_to_canvas(start[0], start[1])
         ex, ey = self._tmpl_to_canvas(end[0], end[1])
 
+        # Main line (dashed)
         line = self._canvas.create_line(sx, sy, ex, ey, fill=color, width=2,
                                         dash=(4, 2))
         items.append(line)
@@ -456,6 +473,48 @@ class TemplateView(tk.Frame):
         e_dot = self._canvas.create_oval(ex - r, ey - r, ex + r, ey + r,
                                          fill=color, outline="")
         items.extend([s_dot, e_dot])
+
+        # --- Perpendicular measurement probes ---
+        # Each probe is a short line segment perpendicular to the main line,
+        # centred at equally-spaced sample points.  It represents the
+        # measurement rectangle that will scan for edge points.
+        if num_measures >= 2:
+            sr, sc = start[0], start[1]
+            er, ec = end[0], end[1]
+            # Direction vector of the main line (row, col)
+            line_dr = er - sr
+            line_dc = ec - sc
+            line_len = np.sqrt(line_dr ** 2 + line_dc ** 2)
+            if line_len > 1e-6:
+                # Unit vector along the line
+                u_r = line_dr / line_len
+                u_c = line_dc / line_len
+                # Unit perpendicular vector (rotate 90° clockwise)
+                n_r = u_c
+                n_c = -u_r
+
+                # Scale probe half-length from template to canvas pixels
+                probe_half = measure_length2 * self._scale
+
+                # Draw probes with the main colour + stipple pattern so they
+                # are always visible regardless of the underlying image content.
+                for i in range(num_measures):
+                    # Parameter t ∈ [0, 1] along the line
+                    t = i / (num_measures - 1)
+                    pr = sr + t * line_dr
+                    pc = sc + t * line_dc
+                    p_cx, p_cy = self._tmpl_to_canvas(pr, pc)
+
+                    # Perpendicular endpoints
+                    c1x = p_cx - n_c * probe_half
+                    c1y = p_cy - n_r * probe_half
+                    c2x = p_cx + n_c * probe_half
+                    c2y = p_cy + n_r * probe_half
+
+                    tick = self._canvas.create_line(
+                        c1x, c1y, c2x, c2y,
+                        fill=color, width=1, stipple="gray25")
+                    items.append(tick)
 
         return items
 
@@ -480,7 +539,13 @@ class TemplateView(tk.Frame):
         return items
 
     def _draw_template_match_overlay(self, params: dict, color: str) -> List[int]:
-        """Draw a template match point region (square + crosshair)."""
+        """Draw a template match point region.
+
+        The bounding box shows the template patch that will be extracted.
+        Corner brackets face outward (┌┐ └┘) — a convention that signals
+        "this region will be searched/matched elsewhere."  The crosshair
+        marks the reference point.
+        """
         items = []
         row = params["row"]
         col = params["col"]
@@ -493,7 +558,22 @@ class TemplateView(tk.Frame):
             x1, y1, x2, y2, outline=color, width=1, dash=(4, 2))
         items.append(rect)
 
-        # Crosshair at center
+        # Outward-facing corner brackets (indicate "searched elsewhere")
+        bracket_len = 6  # canvas pixels
+        # ┌ top-left
+        items.append(self._canvas.create_line(x1, y1, x1 - bracket_len, y1, fill=color))
+        items.append(self._canvas.create_line(x1, y1, x1, y1 - bracket_len, fill=color))
+        # ┐ top-right
+        items.append(self._canvas.create_line(x2, y1, x2 + bracket_len, y1, fill=color))
+        items.append(self._canvas.create_line(x2, y1, x2, y1 - bracket_len, fill=color))
+        # └ bottom-left
+        items.append(self._canvas.create_line(x1, y2, x1 - bracket_len, y2, fill=color))
+        items.append(self._canvas.create_line(x1, y2, x1, y2 + bracket_len, fill=color))
+        # ┘ bottom-right
+        items.append(self._canvas.create_line(x2, y2, x2 + bracket_len, y2, fill=color))
+        items.append(self._canvas.create_line(x2, y2, x2, y2 + bracket_len, fill=color))
+
+        # Crosshair at center (reference point for matching)
         cx, cy = self._tmpl_to_canvas(row, col)
         cs = 6
         cross_h = self._canvas.create_line(cx - cs, cy, cx + cs, cy, fill=color)

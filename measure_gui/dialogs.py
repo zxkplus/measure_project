@@ -256,40 +256,19 @@ class TemplateMatchPointDialog(BaseParamDialog):
         main.pack(fill=tk.BOTH, expand=True)
 
         row = 0
-
-        # Template size
-        ttk.Label(main, text="模板尺寸 (px):").grid(
-            row=row, column=0, sticky=tk.W, padx=5, pady=2)
-        self._add_int_entry(main, "template_size", 10, 200, row, 1)
+        ttk.Label(main, text="算法参数", font=("TkDefaultFont", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 5))
         row += 1
 
-        # Preprocessor type
-        ttk.Label(main, text="预处理类型:").grid(
-            row=row, column=0, sticky=tk.W, padx=5, pady=2)
-        self._add_combo(main, "preprocessor_type",
+        self._add_int_entry(main, "模板尺寸 (px)", "template_size", 40, row, 10, 200); row += 1
+        self._add_combo(main, "预处理类型", "preprocessor_type",
                        ["raw", "canny", "sobel", "clahe", "threshold"],
-                       row, 1)
-        row += 1
+                       "raw", row); row += 1
+        self._add_float_entry(main, "匹配分数阈值", "match_score_threshold", 0.5, row, 0.1, 1.0); row += 1
+        self._add_float_entry(main, "角度搜索范围 (±度)", "angle_range_half", 15.0, row, 0.0, 180.0); row += 1
+        self._add_float_entry(main, "角度步长 (度)", "angle_step", 1.0, row, 0.1, 10.0); row += 1
 
-        # Match score threshold
-        ttk.Label(main, text="匹配分数阈值:").grid(
-            row=row, column=0, sticky=tk.W, padx=5, pady=2)
-        self._add_float_entry(main, "match_score_threshold", 0.1, 1.0, row, 1)
-        row += 1
-
-        # Search angle range
-        ttk.Label(main, text="角度搜索范围 (±度):").grid(
-            row=row, column=0, sticky=tk.W, padx=5, pady=2)
-        self._add_float_entry(main, "angle_range_half", 0.0, 180.0, row, 1)
-        row += 1
-
-        # Angle step
-        ttk.Label(main, text="角度步长 (度):").grid(
-            row=row, column=0, sticky=tk.W, padx=5, pady=2)
-        self._add_float_entry(main, "angle_step", 0.1, 10.0, row, 1)
-        row += 1
-
-        # Subpixel checkbox
+        # Subpixel checkbox (no _add_checkbox helper)
         ttk.Label(main, text="亚像素精度:").grid(
             row=row, column=0, sticky=tk.W, padx=5, pady=2)
         var = tk.BooleanVar(value=self._params.get("use_subpixel", True))
