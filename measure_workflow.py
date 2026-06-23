@@ -874,6 +874,139 @@ class EdgePointObject(MeasureObject):
         return vis
 
 
+class TemplateMatchPointObject(MeasureObject):
+    """
+    Template-matching point measurement.
+
+    Crops a small template patch around a taught position on the template
+    image and locates it on the inspection image using NCC template matching
+    with optional rotation search.  Returns the best match as a PointResult.
+
+    Unlike TemplatePointObject (which serves as a localization anchor for
+    the whole workflow), this is a local measurement element that finds a
+    specific feature within the straightened inspection patch.
+    """
+
+    def __init__(
+        self,
+        label: str,
+        row: float,
+        col: float,
+        template_size: int = 40,
+        preprocessor_type: str = "raw",
+        match_score_threshold: float = 0.5,
+        angle_range_half: float = 15.0,
+        angle_step: float = 1.0,
+        use_subpixel: bool = True,
+        _template_point: Any = None,  # pre-built TemplatePoint (internal)
+    ):
+        super().__init__(label)
+        self._teach_row = row
+        self._teach_col = col
+        self._calibrated_row = row
+        self._calibrated_col = col
+        self.template_size = template_size
+        self.preprocessor_type = preprocessor_type
+        self.match_score_threshold = match_score_threshold
+        self.angle_range_half = angle_range_half
+        self.angle_step = angle_step
+        self.use_subpixel = use_subpixel
+        self._rotation = (angle_range_half > 0)
+        self._angle_range = (-angle_range_half, angle_range_half)
+        self._template_point: Any = _template_point  # TemplatePoint instance
+
+    def result_type(self) -> str:
+        return "point"
+
+    def calibrate(self, transform: SimilarityTransform) -> None:
+        self._calibrated_row, self._calibrated_col = transform.apply(
+            self._teach_row, self._teach_col
+        )
+
+    def measure(self, image: np.ndarray) -> GeometricResult:
+        if self._template_point is None:
+            return PointResult(
+                label=self.label,
+                row=self._calibrated_row,
+                col=self._calibrated_col,
+                valid=False,
+                meta={"reason": "TemplateMatchPoint not taught"},
+            )
+        raw = self._template_point.measure(image)
+        result = PointResult(
+            label=self.label,
+            row=raw["matched_row"],
+            col=raw["matched_col"],
+            valid=raw["valid"],
+            meta={
+                "match_score": raw["match_score"],
+                "dx": raw["dx"],
+                "dy": raw["dy"],
+                "teach_row": self._teach_row,
+                "teach_col": self._teach_col,
+                "best_rotation_deg": raw.get("best_rotation_deg", 0.0),
+                "best_scale": raw.get("best_scale", 1.0),
+            },
+        )
+        self.result = result
+        return result
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "object_type": "TemplateMatchPointObject",
+            "teach_row": self._teach_row,
+            "teach_col": self._teach_col,
+            "template_size": self.template_size,
+            "preprocessor_type": self.preprocessor_type,
+            "match_score_threshold": self.match_score_threshold,
+            "angle_range_half": self.angle_range_half,
+            "angle_step": self.angle_step,
+            "use_subpixel": self.use_subpixel,
+        }
+
+    @classmethod
+    def from_dict(cls, label: str, data: Dict[str, Any]) -> "TemplateMatchPointObject":
+        return cls(
+            label=label,
+            row=data["teach_row"],
+            col=data["teach_col"],
+            template_size=data.get("template_size", 40),
+            preprocessor_type=data.get("preprocessor_type", "raw"),
+            match_score_threshold=data.get("match_score_threshold", 0.5),
+            angle_range_half=data.get("angle_range_half", 15.0),
+            angle_step=data.get("angle_step", 1.0),
+            use_subpixel=data.get("use_subpixel", True),
+        )
+
+    def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:
+        if len(image.shape) == 2:
+            vis = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        else:
+            vis = image.copy()
+
+        pos = (self._calibrated_col, self._calibrated_row)
+        if self.result is not None and self.result.valid:
+            pos = (self.result.col, self.result.row)
+
+        # Draw template bounding box
+        half = self.template_size / 2.0
+        pt1 = (int(pos[0] - half), int(pos[1] - half))
+        pt2 = (int(pos[0] + half), int(pos[1] + half))
+        cv2.rectangle(vis, pt1, pt2, (255, 200, 0), 1)
+
+        # Draw crosshair at matched position
+        cv2.drawMarker(
+            vis,
+            (int(round(pos[0])), int(round(pos[1]))),
+            (0, 255, 255),
+            markerType=cv2.MARKER_CROSS,
+            markerSize=10,
+            thickness=2,
+        )
+        _draw_label(vis, self.label, pos, color=(255, 200, 0), offset=(12, -12))
+        return vis
+
+
 class EdgePairObject(MeasureObject):
     """
     Edge-pair center point via 1D caliper.
@@ -1702,6 +1835,7 @@ class PointCircleDistanceObject(MeasureObject):
 # Registry of object types for deserialization
 _OBJECT_TYPE_REGISTRY: Dict[str, Type[MeasureObject]] = {
     "TemplatePointObject": TemplatePointObject,
+    "TemplateMatchPointObject": TemplateMatchPointObject,
     "EdgePointObject": EdgePointObject,
     "EdgePairObject": EdgePairObject,
     "FitLineObject": FitLineObject,
