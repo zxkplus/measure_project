@@ -143,6 +143,7 @@ class TestManifestSchema(TestCase):
                 "match_score_threshold": 0.5,
                 "angle_range_deg": 30.0,
                 "max_matches": 0,
+                "overlap": 0.3,
             },
             "roi": {
                 "center_row": 200.5, "center_col": 300.2,

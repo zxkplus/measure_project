@@ -220,6 +220,7 @@ class ProjectManager:
                 matching.get("match_score_threshold", 0.5),
                 matching.get("angle_range_deg", 30.0),
                 matching.get("max_matches", 0),
+                matching.get("overlap", 0.3),
             )
 
         # Restore inspection image if available
