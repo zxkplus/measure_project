@@ -233,3 +233,69 @@ class ComposedMeasureDialog(BaseParamDialog):
             row += 1
 
         self._add_buttons(main, row + 1)
+
+
+class TemplateMatchPointDialog(BaseParamDialog):
+    """Dialog for template-matching point measurement parameters."""
+
+    def __init__(self, parent, params=None):
+        defaults = {
+            "template_size": 40,
+            "preprocessor_type": "raw",
+            "match_score_threshold": 0.5,
+            "angle_range_half": 15.0,
+            "angle_step": 1.0,
+            "use_subpixel": True,
+        }
+        if params:
+            defaults.update(params)
+        super().__init__(parent, "模板匹配点参数", defaults)
+
+    def _build_ui(self):
+        main = ttk.Frame(self, padding=10)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        row = 0
+
+        # Template size
+        ttk.Label(main, text="模板尺寸 (px):").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=2)
+        self._add_int_entry(main, "template_size", 10, 200, row, 1)
+        row += 1
+
+        # Preprocessor type
+        ttk.Label(main, text="预处理类型:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=2)
+        self._add_combo(main, "preprocessor_type",
+                       ["raw", "canny", "sobel", "clahe", "threshold"],
+                       row, 1)
+        row += 1
+
+        # Match score threshold
+        ttk.Label(main, text="匹配分数阈值:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=2)
+        self._add_float_entry(main, "match_score_threshold", 0.1, 1.0, row, 1)
+        row += 1
+
+        # Search angle range
+        ttk.Label(main, text="角度搜索范围 (±度):").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=2)
+        self._add_float_entry(main, "angle_range_half", 0.0, 180.0, row, 1)
+        row += 1
+
+        # Angle step
+        ttk.Label(main, text="角度步长 (度):").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=2)
+        self._add_float_entry(main, "angle_step", 0.1, 10.0, row, 1)
+        row += 1
+
+        # Subpixel checkbox
+        ttk.Label(main, text="亚像素精度:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=2)
+        var = tk.BooleanVar(value=self._params.get("use_subpixel", True))
+        cb = ttk.Checkbutton(main, variable=var)
+        cb.grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
+        self._vars["use_subpixel"] = var
+        row += 1
+
+        self._add_buttons(main, row + 1)

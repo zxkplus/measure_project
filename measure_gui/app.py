@@ -178,6 +178,7 @@ class MeasureApp:
         self.tool_panel.on_score_threshold_changed = self._on_score_threshold_changed
         self.tool_panel.on_angle_range_changed = self._on_angle_range_changed
         self.tool_panel.on_max_matches_changed = self._on_max_matches_changed
+        self.tool_panel.on_overlap_changed = self._on_overlap_changed
         self.tool_panel.on_add_composed = self._on_add_composed
         self.tool_panel.on_tool_edit = self._on_tool_edit
         self.tool_panel.on_tool_delete = self._on_tool_delete
@@ -654,6 +655,7 @@ class MeasureApp:
             "match_score_threshold": self.tool_panel._score_var.get(),
             "angle_range_deg": self._parse_angle_range(),
             "max_matches": self.tool_panel._max_matches_var.get(),
+            "overlap": self.tool_panel._overlap_var.get(),
         }
 
     def get_tool_list_order(self) -> list:
@@ -816,6 +818,7 @@ class MeasureApp:
             angle_range=angle_range,
             angle_step=1.0,
             max_matches=self.tool_panel._max_matches_var.get(),
+            overlap=self.tool_panel._overlap_var.get(),
             coarse_fine=True,
             coarse_angle_step=5.0,
         )
@@ -900,6 +903,7 @@ class MeasureApp:
             return
         self._workflow.match_score_threshold = self.tool_panel._score_var.get()
         self._workflow.max_matches = self.tool_panel._max_matches_var.get()
+        self._workflow.overlap = self.tool_panel._overlap_var.get()
         angle_str = self.tool_panel._angle_var.get()
         angle_val = float(angle_str.replace("±", "").replace("°", ""))
         self._workflow.angle_range = (-angle_val, angle_val)
@@ -920,6 +924,10 @@ class MeasureApp:
     def _on_max_matches_changed(self, value: int):
         if self._workflow:
             self._workflow.max_matches = value
+
+    def _on_overlap_changed(self, value: float):
+        if self._workflow:
+            self._workflow.overlap = value
 
     def _on_export_csv(self):
         """Export results (handled by ResultPanel)."""

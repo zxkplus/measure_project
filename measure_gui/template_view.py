@@ -31,11 +31,12 @@ from .utils import cv2_to_tk
 
 class TemplateTool(Enum):
     """Tools that can be interactively placed on the template."""
-    SELECT = auto()          # Select/edit existing tools
-    EDGE_POINT = auto()      # Place an edge point probe
-    EDGE_PAIR = auto()       # Place an edge pair probe
-    FIT_LINE = auto()        # Place a line fitting ROI
-    FIT_CIRCLE = auto()      # Place a circle fitting ROI
+    SELECT = auto()              # Select/edit existing tools
+    EDGE_POINT = auto()          # Place an edge point probe
+    EDGE_PAIR = auto()           # Place an edge pair probe
+    FIT_LINE = auto()            # Place a line fitting ROI
+    FIT_CIRCLE = auto()          # Place a circle fitting ROI
+    TEMPLATE_MATCH_POINT = auto()  # Place a template-matching point
 
 
 class TemplateView(tk.Frame):
@@ -117,6 +118,11 @@ class TemplateView(tk.Frame):
                                           command=lambda: self.set_tool(TemplateTool.FIT_CIRCLE))
         self._btn_fit_circle.pack(side=tk.LEFT, padx=1)
 
+        self._btn_tmpl_match = ttk.Button(
+            toolbar, text="+模板匹配点",
+            command=lambda: self.set_tool(TemplateTool.TEMPLATE_MATCH_POINT))
+        self._btn_tmpl_match.pack(side=tk.LEFT, padx=1)
+
         self._btn_delete = ttk.Button(toolbar, text="删除", command=self._delete_selected)
         self._btn_delete.pack(side=tk.LEFT, padx=1)
 
@@ -180,6 +186,7 @@ class TemplateView(tk.Frame):
             TemplateTool.EDGE_PAIR: "边缘对",
             TemplateTool.FIT_LINE: "拟合直线",
             TemplateTool.FIT_CIRCLE: "拟合圆",
+            TemplateTool.TEMPLATE_MATCH_POINT: "模板匹配点",
         }
         self._tool_label.config(text=names.get(tool, ""))
 
@@ -190,6 +197,7 @@ class TemplateView(tk.Frame):
             (self._btn_edge_pair, TemplateTool.EDGE_PAIR),
             (self._btn_fit_line, TemplateTool.FIT_LINE),
             (self._btn_fit_circle, TemplateTool.FIT_CIRCLE),
+            (self._btn_tmpl_match, TemplateTool.TEMPLATE_MATCH_POINT),
         ]:
             if t == tool:
                 btn.state(["pressed"])
@@ -359,6 +367,8 @@ class TemplateView(tk.Frame):
             items = self._draw_fit_line_overlay(params, highlight)
         elif obj_type == "FitCircle":
             items = self._draw_fit_circle_overlay(params, highlight)
+        elif obj_type == "TemplateMatchPoint":
+            items = self._draw_template_match_overlay(params, highlight)
 
         # Label
         row = params.get("row", 0)
@@ -469,6 +479,29 @@ class TemplateView(tk.Frame):
 
         return items
 
+    def _draw_template_match_overlay(self, params: dict, color: str) -> List[int]:
+        """Draw a template match point region (square + crosshair)."""
+        items = []
+        row = params["row"]
+        col = params["col"]
+        half = params.get("template_size", 40) / 2.0
+
+        # Bounding box
+        x1, y1 = self._tmpl_to_canvas(row - half, col - half)
+        x2, y2 = self._tmpl_to_canvas(row + half, col + half)
+        rect = self._canvas.create_rectangle(
+            x1, y1, x2, y2, outline=color, width=1, dash=(4, 2))
+        items.append(rect)
+
+        # Crosshair at center
+        cx, cy = self._tmpl_to_canvas(row, col)
+        cs = 6
+        cross_h = self._canvas.create_line(cx - cs, cy, cx + cs, cy, fill=color)
+        cross_v = self._canvas.create_line(cx, cy - cs, cx, cy + cs, fill=color)
+        items.extend([cross_h, cross_v])
+
+        return items
+
     def _delete_tool_items(self, tool: Dict[str, Any]):
         """Remove canvas items for a tool."""
         for item_id in tool.get("canvas_items", []):
@@ -518,6 +551,13 @@ class TemplateView(tk.Frame):
             # Click center, drag radius
             self._draw_start = (row, col)
             self._drawing = True
+
+        elif self._current_tool == TemplateTool.TEMPLATE_MATCH_POINT:
+            # Single click: place template-matching point immediately
+            self._add_template_match_point(row, col)
+            self.set_status("已添加模板匹配点")
+            # Switch back to select
+            self._after(100, lambda: self.set_tool(TemplateTool.SELECT))
 
     def _on_drag(self, event):
         """Handle mouse drag."""
@@ -748,6 +788,51 @@ class TemplateView(tk.Frame):
             self.on_tool_added("FitCircle", label, params)
 
         self.set_status(f"已添加 {label} (FitCircle)")
+
+    def _add_template_match_point(self, row: float, col: float):
+        """Add a template-matching point at the clicked position."""
+        from .dialogs import TemplateMatchPointDialog
+
+        params = {
+            "row": row,
+            "col": col,
+            "template_size": 40,
+            "preprocessor_type": "raw",
+            "match_score_threshold": 0.5,
+            "angle_range_half": 15.0,
+            "angle_step": 1.0,
+            "use_subpixel": True,
+        }
+
+        dlg_params = TemplateMatchPointDialog.ask(self, params={
+            "template_size": 40,
+            "preprocessor_type": "raw",
+            "match_score_threshold": 0.5,
+            "angle_range_half": 15.0,
+            "angle_step": 1.0,
+            "use_subpixel": True,
+        })
+
+        if dlg_params is None:
+            return
+
+        params.update(dlg_params)
+        label = self._auto_label("tmpl")
+
+        tool = {
+            "object_type": "TemplateMatchPoint",
+            "label": label,
+            "params": params,
+            "canvas_items": [],
+            "_selected": False,
+        }
+        self._tools.append(tool)
+        self._redraw_tools()
+
+        if self.on_tool_added:
+            self.on_tool_added("TemplateMatchPoint", label, params)
+
+        self.set_status(f"已添加 {label} (TemplateMatchPoint)")
 
     # ------------------------------------------------------------------
     # Selection
