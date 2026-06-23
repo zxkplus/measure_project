@@ -283,7 +283,8 @@ class TemplatePoint:
                  coarse_angle_step: float = 5.0,
                  coarse_scale_step: float = 0.1,
                  multi_target: bool = False,
-                 max_matches: int = 0):
+                 max_matches: int = 0,
+                 overlap: float = 0.3):
         """
         Initialize a template point from a reference image.
 
@@ -314,6 +315,9 @@ class TemplatePoint:
                          instead of only the single best match (default False).
             max_matches: Maximum number of matches to return when
                         multi_target=True. 0 means unlimited (default 0).
+            overlap: Maximum allowed IoU overlap between detected targets in [0, 1].
+                     0 = no overlap at all (most aggressive NMS). Higher values
+                     allow more overlap between detected boxes (default 0.3).
         """
         self.click_row = click_row
         self.click_col = click_col
@@ -332,6 +336,7 @@ class TemplatePoint:
         self.coarse_scale_step = coarse_scale_step
         self.multi_target = multi_target
         self.max_matches = max_matches
+        self.overlap = float(overlap)
 
         # Crop the template region (clamped to image bounds)
         gray = self._to_gray(reference_image)
@@ -488,12 +493,11 @@ class TemplatePoint:
                                     cv2.TM_CCOEFF_NORMED)
 
         peaks = self._find_peaks(heatmap, self.match_score_threshold)
-        min_dist = min(self._crop_h, self._crop_w) / 2.0
 
         # Build NMS input: (score, row, col, angle=0, scale=1, w, h)
         candidates = [(s, r, c, 0.0, 1.0, self._crop_w, self._crop_h)
                       for s, r, c in peaks]
-        selected = self._spatial_nms(candidates, min_dist, self.max_matches)
+        selected = self._spatial_nms(candidates, self.overlap, self.max_matches)
 
         matches = []
         for score, py, px, angle, scale, ww, wh in selected:
@@ -567,8 +571,7 @@ class TemplatePoint:
                            for s, loc, a, sc, ww, wh in coarse_results]
 
             # Step 2: NMS on coarse results to find distinct candidate regions
-            min_dist = min(tmpl_h, tmpl_w) / 2.0
-            coarse_nms = self._spatial_nms(coarse_flat, min_dist, max_matches=0)
+            coarse_nms = self._spatial_nms(coarse_flat, self.overlap, max_matches=0)
             # Take top-K for fine refinement (K=5 to cover sparse targets well)
             coarse_nms.sort(key=lambda x: x[0], reverse=True)
             K = min(5, len(coarse_nms))
@@ -614,8 +617,7 @@ class TemplatePoint:
                      for s, loc, a, sc, ww, wh in all_results]
 
         # ---- 3. Global spatial NMS ----
-        min_dist = min(tmpl_h, tmpl_w) / 2.0
-        selected = self._spatial_nms(all_flat, min_dist, self.max_matches)
+        selected = self._spatial_nms(all_flat, self.overlap, self.max_matches)
 
         # ---- 4. Subpixel refinement per selected match ----
         matches = []
@@ -936,41 +938,82 @@ class TemplatePoint:
 
     @staticmethod
     def _spatial_nms(candidates: List[tuple],
-                     min_distance: float,
+                     overlap: float,
                      max_matches: int = 0) -> List[tuple]:
         """
-        Spatial non-maximum suppression for template match candidates.
+        IoU-based non-maximum suppression for template match candidates.
 
         Sorts candidates by score descending and greedily selects those
-        that are at least `min_distance` pixels away from every already
-        selected candidate.
+        whose axis-aligned bounding box IoU (Intersection over Union) with
+        every already selected candidate is <= overlap.
 
-        Candidates must be tuples where index 1 is the row and index 2
-        is the column in the search image.
+        overlap=0.0 means no overlap allowed between targets (most aggressive).
+        overlap=1.0 means any overlap is allowed (no NMS suppression).
+
+        Candidates must be tuples where:
+          index 1 = row (center y)
+          index 2 = col (center x)
+          index -2 = width (c[-2])
+          index -1 = height (c[-1])
 
         Args:
-            candidates: List of tuples, each with (score, row, col, ...).
-            min_distance: Minimum pixel distance between distinct targets.
-            max_matches: Maximum number of matches to return (0 = unlimited).
+            candidates: List of (score, row, col, ..., w, h) tuples.
+            overlap: Maximum allowed IoU in [0, 1]. 0 = no overlap at all.
+            max_matches: Maximum number of matches (0 = unlimited).
 
         Returns:
-            Filtered list of candidates, same tuple structure, sorted by
-            score descending.
+            Filtered list of candidates, sorted by score descending.
         """
+        if overlap >= 1.0:
+            # No NMS needed — just take top max_matches by score
+            selected = sorted(candidates, key=lambda x: x[0], reverse=True)
+            if max_matches > 0:
+                selected = selected[:max_matches]
+            return selected
+
         sorted_candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
         selected: List[tuple] = []
+
         for c in sorted_candidates:
             row, col = c[1], c[2]
-            too_close = False
+            w, h = c[-2], c[-1]  # width and height are always last two elements
+
+            # Axis-aligned bounding box for candidate c
+            x1 = col - w / 2.0
+            y1 = row - h / 2.0
+            x2 = col + w / 2.0
+            y2 = row + h / 2.0
+            area = w * h
+
+            keep = True
             for s in selected:
-                dist = np.sqrt((row - s[1]) ** 2 + (col - s[2]) ** 2)
-                if dist < min_distance:
-                    too_close = True
-                    break
-            if not too_close:
+                # Axis-aligned bounding box for selected s
+                sx1 = s[2] - s[-2] / 2.0
+                sy1 = s[1] - s[-1] / 2.0
+                sx2 = s[2] + s[-2] / 2.0
+                sy2 = s[1] + s[-1] / 2.0
+                sarea = s[-2] * s[-1]
+
+                # Intersection area
+                ix1 = max(x1, sx1)
+                iy1 = max(y1, sy1)
+                ix2 = min(x2, sx2)
+                iy2 = min(y2, sy2)
+                iw = max(0.0, ix2 - ix1)
+                ih = max(0.0, iy2 - iy1)
+                inter_area = iw * ih
+
+                if inter_area > 0:
+                    iou = inter_area / (area + sarea - inter_area)
+                    if iou > overlap:
+                        keep = False
+                        break
+
+            if keep:
                 selected.append(c)
                 if max_matches > 0 and len(selected) >= max_matches:
                     break
+
         return selected
 
     @staticmethod
@@ -1287,6 +1330,7 @@ class TemplatePoint:
             coarse_scale_step=self.coarse_scale_step,
             multi_target=self.multi_target,
             max_matches=self.max_matches,
+            overlap=self.overlap,
         )
 
     @classmethod
@@ -1360,6 +1404,7 @@ class TemplatePoint:
         obj.coarse_scale_step = float(data.get('coarse_scale_step', 0.1))
         obj.multi_target = bool(data.get('multi_target', False))
         obj.max_matches = int(data.get('max_matches', 0))
+        obj.overlap = float(data.get('overlap', 0.3))
 
         return obj
 
