@@ -39,14 +39,19 @@ from measure_workflow import (
     MeasurementWorkflow,
     PointCircleDistanceObject,
     PointLineDistanceObject,
+    TemplateMatchPointObject,
     TwoLinesAngleObject,
     TwoPointsDistanceObject,
     TwoPointsLineObject,
 )
 from measure_template import (
+    CannyPreprocessor,
+    CLAHEPreprocessor,
     Preprocessor,
     RawPreprocessor,
+    SobelPreprocessor,
     TemplatePoint,
+    ThresholdPreprocessor,
     _PREPROCESSOR_REGISTRY,
     _deserialize_preprocessor,
 )
@@ -211,6 +216,21 @@ def _make_fit_circle(label: str, **p) -> FitCircleObject:
     )
 
 
+def _make_template_match_point(label: str, **p) -> TemplateMatchPointObject:
+    return TemplateMatchPointObject(
+        label=label,
+        row=p["row"],
+        col=p["col"],
+        template_size=p.get("template_size", 40),
+        preprocessor_type=p.get("preprocessor_type", "raw"),
+        match_score_threshold=p.get("match_score_threshold", 0.5),
+        angle_range_half=p.get("angle_range_half", 15.0),
+        angle_step=p.get("angle_step", 1.0),
+        use_subpixel=p.get("use_subpixel", True),
+        _template_point=p.get("_template_point", None),
+    )
+
+
 def _make_two_points_line(label: str, **p) -> TwoPointsLineObject:
     return TwoPointsLineObject(
         label=label,
@@ -269,6 +289,11 @@ _OBJECT_FACTORIES = {
         "measure_length1", "measure_length2", "num_measures",
         "sigma", "threshold", "transition", "start_phi", "end_phi",
     ]),
+    "TemplateMatchPoint": (_make_template_match_point, [
+        "row", "col", "template_size", "preprocessor_type",
+        "match_score_threshold", "angle_range_half", "angle_step",
+        "use_subpixel",
+    ]),
     "TwoPointsLine": (_make_two_points_line, [
         "point_a_label", "point_b_label",
     ]),
@@ -322,6 +347,7 @@ class MultiTargetWorkflow:
         self._angle_range: Tuple[float, float] = (-30.0, 30.0)
         self._angle_step: float = 1.0
         self._max_matches: int = 0
+        self._overlap: float = 0.3
         self._coarse_fine: bool = True
         self._coarse_angle_step: float = 5.0
 
@@ -333,6 +359,9 @@ class MultiTargetWorkflow:
 
         # Measurement definitions (ordered list)
         self._measurement_defs: List[Dict[str, Any]] = []
+
+        # TemplateMatchPoint template cache: label -> TemplatePoint
+        self._template_match_points: Dict[str, Any] = {}
 
         # Saved reference image (needed for template creation on load)
         self._reference_image: Optional[np.ndarray] = None
@@ -394,6 +423,18 @@ class MultiTargetWorkflow:
     @max_matches.setter
     def max_matches(self, value: int):
         self._max_matches = value
+        if self._template_point is not None:
+            self._template_point.max_matches = value
+
+    @property
+    def overlap(self) -> float:
+        return self._overlap
+
+    @overlap.setter
+    def overlap(self, value: float):
+        self._overlap = float(value)
+        if self._template_point is not None:
+            self._template_point.overlap = float(value)
 
     @property
     def preprocessor_type(self) -> str:
@@ -416,6 +457,7 @@ class MultiTargetWorkflow:
         angle_range: Tuple[float, float] = (-30.0, 30.0),
         angle_step: float = 1.0,
         max_matches: int = 0,
+        overlap: float = 0.3,
         coarse_fine: bool = True,
         coarse_angle_step: float = 5.0,
     ):
@@ -432,6 +474,8 @@ class MultiTargetWorkflow:
             angle_range: (min, max) search range in degrees.
             angle_step: Step size for fine angle search.
             max_matches: Max matches to return (0 = unlimited).
+            overlap: Maximum allowed IoU overlap in [0, 1] for NMS.
+                     0 = no overlap at all (default 0.3).
             coarse_fine: Use two-stage coarse-to-fine search.
             coarse_angle_step: Step size for coarse angle search.
         """
@@ -444,6 +488,7 @@ class MultiTargetWorkflow:
         self._angle_range = angle_range
         self._angle_step = angle_step
         self._max_matches = max_matches
+        self._overlap = float(overlap)
         self._coarse_fine = coarse_fine
         self._coarse_angle_step = coarse_angle_step
 
@@ -471,7 +516,51 @@ class MultiTargetWorkflow:
             coarse_angle_step=coarse_angle_step,
             multi_target=True,
             max_matches=max_matches,
+            overlap=overlap,
         )
+
+        # Build TemplateMatchPoint instances from the newly created template image
+        self._build_template_match_points()
+
+    def _build_template_match_points(self):
+        """Create TemplatePoint instances for all TemplateMatchPoint definitions.
+
+        Must be called after teach_template() when self._template_image is available.
+        Uses the straightened template image as the reference for cropping.
+        """
+        preproc_map = {
+            "raw": RawPreprocessor(),
+            "canny": CannyPreprocessor(50.0, 150.0),
+            "sobel": SobelPreprocessor(3),
+            "clahe": CLAHEPreprocessor(2.0),
+            "threshold": ThresholdPreprocessor(128.0),
+        }
+
+        self._template_match_points.clear()
+        for d in self._measurement_defs:
+            if d["object_type"] == "TemplateMatchPoint":
+                label = d["label"]
+                params = d["params"]
+                preprocessor = preproc_map.get(
+                    params.get("preprocessor_type", "raw"), RawPreprocessor()
+                )
+                angle_range_half = float(params.get("angle_range_half", 15.0))
+                tp = TemplatePoint(
+                    self._template_image,
+                    click_row=float(params["row"]),
+                    click_col=float(params["col"]),
+                    template_size=int(params.get("template_size", 40)),
+                    preprocessor=preprocessor,
+                    match_score_threshold=float(
+                        params.get("match_score_threshold", 0.5)
+                    ),
+                    use_subpixel=bool(params.get("use_subpixel", True)),
+                    rotation_invariant=(angle_range_half > 0),
+                    angle_range=(-angle_range_half, angle_range_half),
+                    angle_step=float(params.get("angle_step", 1.0)),
+                    multi_target=False,
+                )
+                self._template_match_points[label] = tp
 
     def add_measurement(self, object_type: str, label: str, **params):
         """
@@ -508,6 +597,12 @@ class MultiTargetWorkflow:
             "label": label,
             "params": full_params,
         })
+
+        # If adding a TemplateMatchPoint and template image is available,
+        # immediately build its TemplatePoint instance.
+        if object_type == "TemplateMatchPoint" and self._template_image is not None:
+            self._build_template_match_points()
+
         return self
 
     def remove_measurement(self, label: str):
@@ -515,6 +610,8 @@ class MultiTargetWorkflow:
         self._measurement_defs = [
             d for d in self._measurement_defs if d["label"] != label
         ]
+        # Also remove cached TemplateMatchPoint
+        self._template_match_points.pop(label, None)
         # Also remove any composed measurements that reference this label
         self._measurement_defs = [
             d for d in self._measurement_defs
@@ -524,6 +621,7 @@ class MultiTargetWorkflow:
     def clear_measurements(self):
         """Remove all measurement definitions."""
         self._measurement_defs = []
+        self._template_match_points.clear()
 
     def move_measurement_up(self, label: str):
         """Move a measurement up in the execution order."""
@@ -648,6 +746,40 @@ class MultiTargetWorkflow:
                     factory, _ = _OBJECT_FACTORIES[obj_type]
                     obj = factory(label, **params)
                     result = obj.measure(patch)
+                    raw_results[label] = result
+                    if not result.valid:
+                        all_valid = False
+
+                elif obj_type == "TemplateMatchPoint":
+                    # Template-matching point: use pre-built TemplatePoint
+                    tp = self._template_match_points.get(label)
+                    if tp is not None:
+                        match_result = tp.measure(patch)
+                        from measure_workflow import PointResult
+                        result = PointResult(
+                            label=label,
+                            row=match_result["matched_row"],
+                            col=match_result["matched_col"],
+                            valid=match_result["valid"],
+                            meta={
+                                "match_score": match_result["match_score"],
+                                "dx": match_result["dx"],
+                                "dy": match_result["dy"],
+                                "teach_row": params["row"],
+                                "teach_col": params["col"],
+                                "best_rotation_deg": match_result.get(
+                                    "best_rotation_deg", 0.0
+                                ),
+                            },
+                        )
+                    else:
+                        result = PointResult(
+                            label=label,
+                            row=params["row"],
+                            col=params["col"],
+                            valid=False,
+                            meta={"reason": "TemplateMatchPoint not taught"},
+                        )
                     raw_results[label] = result
                     if not result.valid:
                         all_valid = False
@@ -910,6 +1042,7 @@ class MultiTargetWorkflow:
             "angle_range": list(self._angle_range),
             "angle_step": self._angle_step,
             "max_matches": self._max_matches,
+            "overlap": self._overlap,
             "coarse_fine": self._coarse_fine,
             "coarse_angle_step": self._coarse_angle_step,
             "preprocessor_data": tp.preprocessor.serialize(),
@@ -967,6 +1100,7 @@ class MultiTargetWorkflow:
         wf._angle_range = tuple(meta["angle_range"])
         wf._angle_step = meta["angle_step"]
         wf._max_matches = meta["max_matches"]
+        wf._overlap = float(meta.get("overlap", 0.3))
         wf._coarse_fine = meta["coarse_fine"]
         wf._coarse_angle_step = meta["coarse_angle_step"]
 
@@ -1006,11 +1140,16 @@ class MultiTargetWorkflow:
         tp.coarse_scale_step = 0.1
         tp.multi_target = True
         tp.max_matches = wf._max_matches
+        tp.overlap = wf._overlap
         tp.result = None
         wf._template_point = tp
 
         # Restore measurement definitions
         wf._measurement_defs = meta.get("measurement_defs", [])
+
+        # Rebuild TemplateMatchPoint instances from restored template image
+        if wf._template_image is not None:
+            wf._build_template_match_points()
 
         return wf
 
@@ -1079,6 +1218,10 @@ def _get_defaults(object_type: str) -> Dict[str, Any]:
                      "transition": "all"},
         "FitCircle": {"num_measures": 12, "sigma": 1.0, "threshold": 30.0,
                        "transition": "all", "start_phi": 0.0, "end_phi": 2 * np.pi},
+        "TemplateMatchPoint": {"template_size": 40, "preprocessor_type": "raw",
+                                "match_score_threshold": 0.5,
+                                "angle_range_half": 15.0, "angle_step": 1.0,
+                                "use_subpixel": True},
     }
     return defaults.get(object_type, {})
 

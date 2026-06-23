@@ -55,6 +55,7 @@ class ToolPanel(ttk.Frame):
         self.on_score_threshold_changed: Optional[Callable] = None
         self.on_angle_range_changed: Optional[Callable] = None
         self.on_max_matches_changed: Optional[Callable] = None
+        self.on_overlap_changed: Optional[Callable] = None
         self.on_add_composed: Optional[Callable] = None
         self.on_tool_edit: Optional[Callable] = None
         self.on_tool_delete: Optional[Callable] = None
@@ -168,6 +169,24 @@ class ToolPanel(ttk.Frame):
         max_spin.bind("<FocusOut>",
                      lambda e: self._fire(self.on_max_matches_changed,
                                          self._max_matches_var.get()))
+
+        # Overlap (NMS)
+        ttk.Label(tmpl_frame, text="最大重叠比例 (NMS)").pack(anchor=tk.W, **pad)
+        self._overlap_var = tk.DoubleVar(value=0.3)
+        overlap_scale = ttk.Scale(
+            tmpl_frame, from_=0.0, to=1.0, variable=self._overlap_var,
+            orient=tk.HORIZONTAL,
+            command=lambda v: self._fire(self.on_overlap_changed,
+                                        float(v)),
+        )
+        overlap_scale.pack(fill=tk.X, **pad)
+        self._overlap_label = ttk.Label(tmpl_frame, text="30%")
+        self._overlap_label.pack(anchor=tk.E, **pad)
+        # Update label as slider moves
+        def _update_overlap_label(*args):
+            pct = int(self._overlap_var.get() * 100)
+            self._overlap_label.config(text=f"{pct}%")
+        self._overlap_var.trace_add("write", _update_overlap_label)
 
         # ROI display (read-only)
         self._roi_label = ttk.Label(tmpl_frame, text="ROI: (未设置)", foreground="gray")
@@ -320,7 +339,8 @@ class ToolPanel(ttk.Frame):
     def set_matching_params(self, preprocessor_type: str,
                             score_threshold: float,
                             angle_range_half: float,
-                            max_matches: int):
+                            max_matches: int,
+                            overlap: float = 0.3):
         """Set matching parameter widgets programmatically (for project restore).
 
         Args:
@@ -328,11 +348,13 @@ class ToolPanel(ttk.Frame):
             score_threshold: Match score threshold (0.1–1.0).
             angle_range_half: Half-range in degrees (e.g. 30 for ±30°).
             max_matches: Max number of matches (0 = unlimited).
+            overlap: Max allowed IoU overlap in [0, 1] (default 0.3).
         """
         self._preproc_var.set(preprocessor_type)
         self._score_var.set(score_threshold)
         self._angle_var.set(f"±{int(angle_range_half)}°")
         self._max_matches_var.set(max_matches)
+        self._overlap_var.set(overlap)
 
     def set_progress(self, running: bool):
         """Start/stop the progress bar."""
