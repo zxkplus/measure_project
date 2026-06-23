@@ -23,6 +23,7 @@ Halcon 1D Measure - Python 实现
 快速开始
 核心概念
 API 文档
+GUI 应用
 示例代码
 项目结构
 常见问题
@@ -47,6 +48,14 @@ Metrology 模型 - 统一管理多个测量对象
 在参考图上点击选点 → 创建模板 → 在新图上自动匹配定位 → 计算两点距离
 可配置预处理器 (Raw, Canny, Sobel, CLAHE, Threshold) 适应不同图像特征
 支持模板序列化 (.npz) 跨会话复用
+支持旋转/缩放不变匹配与多目标检测
+🖥️ GUI 图形界面
+
+Tkinter 原生桌面应用，零额外 GUI 依赖
+交互式旋转 ROI 绘制：画框 → 裁图摆正 → 自动创建模板
+摆正模板上交互添加测量工具 (边缘点/边缘对/拟合直线/拟合圆/距离/角度)
+多目标自动匹配 → 逐个摆正 → 执行全部测量步骤
+结果表格展示 + 汇总文本输出 + CSV 导出
 🛠️ 调试与可视化
 
 
@@ -79,6 +88,7 @@ NumPy	≥ 1.16	✓	数值计算
 OpenCV	≥ 4.0	✓	图像处理
 SciPy	≥ 1.2	✓	科学计算
 Matplotlib	≥ 3.0	可选	可视化
+Pillow	≥ 8.0	GUI	图像格式转换
 
 
 🚀 快速开始
@@ -189,6 +199,31 @@ print(f"距离: {result["distance"]:.2f} px")
 vis = dm.visualize(new_img)
 cv2.imwrite("result.jpg", vis)
 ```
+
+
+5. GUI 图形界面
+
+```bash
+# 启动 GUI 应用
+python run_gui.py
+```
+
+**教学流程：**
+
+1. 加载参考图 → 在图上**画旋转目标框**（点击中心 → 拖拽大小 → 滚轮调角度 → 双击确认）
+2. 软件自动裁图摆正作为模板，在右侧预览
+3. 在摆正模板上**交互添加测量工具**（选择工具类型 → 点击拖拽放置 → 弹出对话框调参数）
+4. 可通过面板添加组合测量（距离/角度等）
+5. 保存项目文件 (.npz)
+
+**检测流程：**
+
+1. 加载检测图 → 点击执行测量
+2. 自动多目标匹配 → 每个目标独立摆正 → 执行全部测量
+3. 底部面板展示：目标列表 | 测量结果表 | 汇总文本
+4. 可导出 CSV
+
+详细说明见下方 [🖥️ GUI 应用](#-gui-应用) 章节。
 
 
 📚 核心概念
@@ -424,7 +459,13 @@ TemplatePoint(
     template_size: int = 80,      # 模板正方形边长 (px)
     preprocessor: Preprocessor = None,  # 预处理器 (None=原始像素)
     match_score_threshold: float = 0.5, # 匹配置信度阈值
-    use_subpixel: bool = True     # 亚像素精炼
+    use_subpixel: bool = True,    # 亚像素精炼
+    rotation_invariant: bool = False,   # 旋转不变匹配
+    angle_range: Tuple[float,float] = (-30, 30),  # 角度搜索范围 (度)
+    scale_invariant: bool = False,       # 缩放不变匹配
+    scale_range: Tuple[float,float] = (0.9, 1.1), # 缩放范围
+    multi_target: bool = False,          # 多目标检测
+    max_matches: int = 0,               # 最大匹配数 (0=无限制)
 )
 
 # 主要方法
@@ -450,6 +491,130 @@ dm = DistanceMeasure(point_a: TemplatePoint, point_b: TemplatePoint)
 result = dm.measure(image)  # -> {"point_a": ..., "point_b": ..., "distance": float, "valid": bool}
 vis = dm.visualize(image)
 ```
+
+### 工作流 (Workflow)
+
+**MeasurementWorkflow 类** — 统一可组合测量工作流
+
+```python
+from measure_workflow import MeasurementWorkflow, TemplatePointObject, EdgePointObject, FitLineObject, TwoPointsDistanceObject
+
+wf = MeasurementWorkflow()
+
+# 定位模板
+wf.add(TemplatePointObject("loc_A", ref_img, 120, 150, template_size=40, is_localization=True))
+wf.add(TemplatePointObject("loc_B", ref_img, 330, 210, template_size=40, is_localization=True))
+
+# 边缘探测
+wf.add(EdgePointObject("edge", row=150, col=190, angle=0.0, length1=30, length2=10, transition="positive", select="first"))
+
+# 拟合直线
+wf.add(FitLineObject("line", start=(120, 180), end=(120, 400), measure_length1=5, measure_length2=25, num_measures=8))
+
+# 组合测量
+wf.add(TwoPointsDistanceObject("gap", "loc_A", "loc_B"))
+
+# 执行
+results = wf.measure(inspection_img)
+vis = wf.visualize(inspection_img)
+wf.save("project.npz")
+```
+
+
+🖥️ GUI 应用
+
+启动方式
+
+```bash
+python run_gui.py
+```
+
+依赖: `pip install Pillow` (Tkinter 为 Python 内置，无需额外安装)
+
+核心工作流
+
+GUI 实现了一个完整的「教学 → 检测」视觉测量流程：
+
+```
+[教学模式]
+参考图 → 画旋转目标框 → 裁图摆正 → 模板预览
+       → 在摆正模板上交互添加测量工具
+       → 保存项目 (.npz)
+
+[检测模式]
+检测图 → 加载项目 → 多目标模板匹配
+       → 每个目标: 独立摆正 → 执行全部测量
+       → 结果表格 + 汇总文本 + 可视化
+```
+
+教学步骤
+
+1. **加载参考图** — Ctrl+O 或 菜单「文件 → 加载参考图」
+2. **画旋转目标框**:
+   - 点击确定中心点 → 拖拽定义框的宽高 → 鼠标滚轮调整旋转角度
+   - 右侧实时显示摆正后的模板预览
+   - 双击框内确认 ROI
+3. **添加测量工具** — 在右侧模板预览上:
+   - 选择工具类型 (边缘点/边缘对/拟合直线/拟合圆)
+   - 点击拖拽放置工具 → 弹出对话框调整算法参数 (sigma, threshold 等)
+4. **添加组合测量** — 在左侧面板点击组合测量按钮 (距离/角度/点线距等)
+5. **保存项目** — Ctrl+S
+
+检测步骤
+
+1. **加载检测图** — Ctrl+I 或 菜单「文件 → 加载检测图」
+2. **执行测量** — Ctrl+E 或 点击「▶ 执行测量」按钮
+3. **查看结果**:
+   - **目标列表**: 显示所有匹配到的目标 (ID / 分数 / 旋转角度 / 位置 / 状态)
+   - **测量结果表**: 选中目标后显示各测量项的详细值
+   - **汇总文本框**: 所有目标测量结果的纯文本汇总 (可复制)
+4. **导出 CSV** — 结果面板「导出 CSV」按钮
+
+GUI 布局
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ [菜单] 文件 视图 帮助                                     │
+│ [工具条] 📁参考 📁检测 💾保存 📂加载 │ ▶执行 │ 教学模式    │
+├──────────┬───────────────────────────┬───────────────────┤
+│ ToolPanel│ [参考图] [检测图]         │  摆正模板预览      │
+│          │ ┌───────────────────────┐ │  ┌───────────┐    │
+│ 文件操作  │ │  主图像 (Canvas)       │ │  │ +边缘点    │    │
+│ 模板设置  │ │  + ROI 旋转矩形       │ │  │ +边缘对    │    │
+│ 测量工具  │ │  + 匹配结果           │ │  │ +拟合直线  │    │
+│ 组合测量  │ │                       │ │  │ +拟合圆    │    │
+│ 执行     │ └───────────────────────┘ │  └───────────┘    │
+├──────────┴───────────────────────────┴───────────────────┤
+│ ResultPanel: 目标列表 │ 测量结果表                        │
+│ === 汇总文本 === ...                                     │
+└──────────────────────────────────────────────────────────┘
+```
+
+支持的测量工具
+
+| 类型 | 交互方式 | 说明 |
+|------|---------|------|
+| EdgePoint (边缘点) | 点击中心 + 拖拽方向 | 1D 边缘检测，返回单个亚像素边缘点 |
+| EdgePair (边缘对) | 点击中心 + 拖拽方向 | 1D 边缘对检测，返回边缘对中心 |
+| FitLine (拟合直线) | 点击起点 + 点击终点 | 沿线段放置多组测量矩形，拟合直线 |
+| FitCircle (拟合圆) | 点击圆心 + 拖拽半径 | 沿圆弧放置多组测量矩形，拟合圆 |
+| TwoPointsDistance | 选择两点 | 两点间欧氏距离 |
+| TwoLinesAngle | 选择两线 | 两直线夹角 |
+| PointLineDistance | 选择点+线 | 点到直线垂直距离 |
+| PointCircleDistance | 选择点+圆 | 点到圆周的最短距离 |
+
+快捷键
+
+| 快捷键 | 功能 |
+|--------|------|
+| Ctrl+O | 加载参考图 |
+| Ctrl+I | 加载检测图 |
+| Ctrl+S | 保存项目 |
+| Ctrl+E | 执行测量 |
+| Escape | 取消当前操作 |
+| 鼠标滚轮 | 缩放图像 / 调整 ROI 角度 |
+| 双击 ROI | 确认旋转框 |
+| 双击图像 | 适应窗口 |
 💡 示例代码
 示例 1：基本边缘检测
 
@@ -544,30 +709,31 @@ cv2.imwrite('example3_result.png', vis_img)
 
 
 plaintext
-halcon_1d_measure_python/
-├── halcon_1d_measure/           # 核心代码包
-│   ├── __init__.py             # 包初始化
-│   ├── measure.py              # 一维测量核心类
-│   └── metrology.py            # 几何测量类
+measure_project/
+├── measure1D.py                  # 一维边缘检测核心
+├── measure2D.py                  # 几何测量 (直线/圆拟合)
+├── measure_template.py           # 模板匹配 + 预处理器
+├── measure_workflow.py           # 统一可组合测量工作流
 │
-├── examples/                    # 示例代码
-│   ├── quick_start.py          # 快速开始
-│   ├── demo_measure_pos_debug.py
-│   ├── demo_draw_roi.py
-│   └── demo_gradient_scaling.py
+├── measure_gui/                  # GUI 图形界面包 (Tkinter)
+│   ├── utils.py                  # 几何变换工具 (裁图摆正/坐标映射)
+│   ├── multi_target.py           # 多目标测量编排器
+│   ├── app.py                    # 主窗口 (整合所有组件)
+│   ├── image_canvas.py           # 图像查看器 + 旋转 ROI 交互绘制
+│   ├── template_view.py          # 摆正模板预览 + 测量工具交互添加
+│   ├── tool_panel.py             # 左侧测量工具栏
+│   ├── result_panel.py           # 底部结果展示面板
+│   └── dialogs.py                # 参数编辑对话框
 │
-├── tests/                       # 测试代码
-│   ├── test_halcon_1d_measure_simplified.py
-│   ├── test_metrology.py
-│   └── ...
+├── test_1d_measure.py            # 一维测量测试
+├── test_2d_measure.py            # 二维测量测试
+├── test_template_measure.py      # 模板匹配测试
+├── test_measure_workflow.py      # 工作流测试
 │
-├── docs/                        # 文档和说明
-│   ├── measure_pos_vs_measure_pairs.py
-│   └── explain_gradient_scaling.py
-│
-├── README.md                    # 项目文档
-├── PROJECT_OVERVIEW.md          # 项目概览
-└── requirements.txt             # 依赖列表
+├── data/sample/                  # 样例图片 (gitignored)
+├── run_gui.py                    # GUI 启动脚本
+├── README.md                     # 项目文档
+└── CLAUDE.md                     # 开发指南
 
 
 
