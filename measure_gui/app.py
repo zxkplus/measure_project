@@ -33,6 +33,7 @@ import numpy as np
 
 from .image_canvas import CanvasMode, ImageCanvas
 from .multi_target import MultiTargetWorkflow, TargetResult
+from .project_manager import ProjectManager
 from .result_panel import ResultPanel
 from .template_view import TemplateTool, TemplateView
 from .tool_panel import ToolPanel
@@ -52,6 +53,12 @@ class MeasureApp:
         self._reference_image: Optional[np.ndarray] = None
         self._inspection_image: Optional[np.ndarray] = None
         self._current_project_path: Optional[str] = None
+        self._current_project_dir: Optional[str] = None
+
+        # File path tracking
+        self._reference_image_path: Optional[str] = None
+        self._inspection_image_path: Optional[str] = None
+        self._created_at: Optional[str] = None
 
         # State
         self._teaching: bool = True  # True = teaching mode, False = inspection mode
@@ -66,9 +73,11 @@ class MeasureApp:
         self._setup_styles()
 
         # Bind keyboard shortcuts
-        self.root.bind("<Control-o>", lambda e: self._load_reference())
+        self.root.bind("<Control-o>", lambda e: self._load_project())
+        self.root.bind("<Control-Shift-O>", lambda e: self._load_reference())
         self.root.bind("<Control-i>", lambda e: self._load_inspection())
         self.root.bind("<Control-s>", lambda e: self._save_project())
+        self.root.bind("<Control-Shift-S>", lambda e: self._save_project_as())
         self.root.bind("<Control-e>", lambda e: self._execute())
         self.root.bind("<Escape>", lambda e: self._cancel_drawing())
 
@@ -88,11 +97,27 @@ class MeasureApp:
         # File menu
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="文件", menu=file_menu)
-        file_menu.add_command(label="加载参考图 (Ctrl+O)", command=self._load_reference)
-        file_menu.add_command(label="加载检测图 (Ctrl+I)", command=self._load_inspection)
+
+        # Project operations
+        file_menu.add_command(label="新建项目...", command=self._new_project)
+        file_menu.add_command(label="打开项目... (Ctrl+O)", command=self._load_project)
         file_menu.add_separator()
         file_menu.add_command(label="保存项目 (Ctrl+S)", command=self._save_project)
-        file_menu.add_command(label="加载项目", command=self._load_project)
+        file_menu.add_command(label="另存项目... (Ctrl+Shift+S)", command=self._save_project_as)
+        file_menu.add_separator()
+
+        # Image loading
+        file_menu.add_command(label="加载参考图... (Ctrl+Shift+O)",
+                              command=self._load_reference)
+        file_menu.add_command(label="加载检测图... (Ctrl+I)",
+                              command=self._load_inspection)
+        file_menu.add_separator()
+
+        # Recent projects submenu
+        self._recent_menu = tk.Menu(file_menu, tearoff=0)
+        file_menu.add_cascade(label="最近项目", menu=self._recent_menu)
+        self._rebuild_recent_menu()
+
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self.root.quit)
 
@@ -135,12 +160,12 @@ class MeasureApp:
 
     def _build_main_area(self):
         # Horizontal PanedWindow
-        main_pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        main_pane.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        self._main_pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        self._main_pane.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
         # Left: ToolPanel
-        self.tool_panel = ToolPanel(main_pane)
-        main_pane.add(self.tool_panel, weight=0)
+        self.tool_panel = ToolPanel(self._main_pane)
+        self._main_pane.add(self.tool_panel, weight=0)
 
         # Connect tool panel callbacks
         self.tool_panel.on_load_reference = self._load_reference
@@ -159,20 +184,20 @@ class MeasureApp:
         self.tool_panel.on_export_csv = self._on_export_csv
 
         # Right side: vertical paned window
-        right_pane = ttk.PanedWindow(main_pane, orient=tk.VERTICAL)
-        main_pane.add(right_pane, weight=1)
+        self._right_pane = ttk.PanedWindow(self._main_pane, orient=tk.VERTICAL)
+        self._main_pane.add(self._right_pane, weight=1)
 
         # Center: Notebook for reference/inspection + template preview
-        center_frame = ttk.Frame(right_pane)
-        right_pane.add(center_frame, weight=3)
+        center_frame = ttk.Frame(self._right_pane)
+        self._right_pane.add(center_frame, weight=3)
 
         # Center sub-pane: image notebook + template preview
-        center_pane = ttk.PanedWindow(center_frame, orient=tk.HORIZONTAL)
-        center_pane.pack(fill=tk.BOTH, expand=True)
+        self._center_pane = ttk.PanedWindow(center_frame, orient=tk.HORIZONTAL)
+        self._center_pane.pack(fill=tk.BOTH, expand=True)
 
         # Image notebook (reference / inspection tabs)
-        self._notebook = ttk.Notebook(center_pane)
-        center_pane.add(self._notebook, weight=3)
+        self._notebook = ttk.Notebook(self._center_pane)
+        self._center_pane.add(self._notebook, weight=3)
 
         # Reference image tab
         self._ref_frame = ttk.Frame(self._notebook)
@@ -192,16 +217,16 @@ class MeasureApp:
         self._notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         # Template preview (right side)
-        self.template_view = TemplateView(center_pane, width=350, height=350)
-        center_pane.add(self.template_view, weight=1)
+        self.template_view = TemplateView(self._center_pane, width=350, height=350)
+        self._center_pane.add(self.template_view, weight=1)
 
         # Connect template view callbacks
         self.template_view.on_tool_added = self._on_template_tool_added
         self.template_view.on_tool_removed = self._on_template_tool_removed
 
         # Bottom: ResultPanel
-        self.result_panel = ResultPanel(right_pane)
-        right_pane.add(self.result_panel, weight=1)
+        self.result_panel = ResultPanel(self._right_pane)
+        self._right_pane.add(self.result_panel, weight=1)
 
         # Connect result panel callback
         self.result_panel.on_target_selected = self._on_target_selected
@@ -243,6 +268,7 @@ class MeasureApp:
                 raise ValueError("无法读取图像")
 
             self._reference_image = img
+            self._reference_image_path = filepath
             self._ref_canvas.load_image(img)
             self._ref_canvas.set_mode(CanvasMode.DRAW_ROI)
             self._ref_canvas.reset_roi()
@@ -279,6 +305,7 @@ class MeasureApp:
                 raise ValueError("无法读取图像")
 
             self._inspection_image = img
+            self._inspection_image_path = filepath
             self._insp_canvas.load_image(img)
             self._status_text.set(f"检测图: {os.path.basename(filepath)} ({img.shape[1]}×{img.shape[0]})")
 
@@ -289,75 +316,219 @@ class MeasureApp:
             messagebox.showerror("加载失败", str(e))
 
     def _save_project(self):
-        """Save the current project."""
+        """Save the current project. Uses current project dir or prompts for one."""
         if self._workflow is None or self._workflow._template_point is None:
             messagebox.showwarning("提示", "请先创建模板")
             return
 
-        filepath = filedialog.asksaveasfilename(
-            parent=self.root,
-            title="保存项目",
-            defaultextension=".npz",
-            filetypes=[("Project files", "*.npz"), ("All files", "*.*")],
-        )
-        if not filepath:
-            return
+        # Determine project directory
+        if self._current_project_dir and os.path.isdir(self._current_project_dir):
+            project_dir = self._current_project_dir
+        else:
+            project_dir = filedialog.askdirectory(
+                parent=self.root,
+                title="选择项目保存目录",
+                mustexist=False,
+            )
+            if not project_dir:
+                return
+            os.makedirs(project_dir, exist_ok=True)
 
         try:
-            self._workflow.save(filepath)
-            self._current_project_path = filepath
-            self._status_text.set(f"项目已保存: {os.path.basename(filepath)}")
+            ProjectManager.save_project(project_dir, self)
+            self._current_project_dir = project_dir
+            self._current_project_path = None
+            project_name = os.path.basename(project_dir)
+            self.root.title(f"工业视觉测量系统 — {project_name}")
+            self._status_text.set(f"项目已保存: {project_dir}")
+            self._rebuild_recent_menu()
         except Exception as e:
             messagebox.showerror("保存失败", str(e))
 
-    def _load_project(self):
-        """Load a saved project."""
-        filepath = filedialog.askopenfilename(
-            parent=self.root,
-            title="加载项目",
-            filetypes=[("Project files", "*.npz"), ("All files", "*.*")],
-        )
-        if not filepath:
+    def _save_project_as(self):
+        """Save project to a new directory (always prompts)."""
+        if self._workflow is None or self._workflow._template_point is None:
+            messagebox.showwarning("提示", "请先创建模板")
             return
 
+        project_dir = filedialog.askdirectory(
+            parent=self.root,
+            title="选择项目保存目录",
+            mustexist=False,
+        )
+        if not project_dir:
+            return
+
+        os.makedirs(project_dir, exist_ok=True)
+
         try:
-            self._workflow = MultiTargetWorkflow.load(filepath)
-            self._current_project_path = filepath
+            ProjectManager.save_project(project_dir, self)
+            self._current_project_dir = project_dir
+            self._current_project_path = None
+            project_name = os.path.basename(project_dir)
+            self.root.title(f"工业视觉测量系统 — {project_name}")
+            self._status_text.set(f"项目已另存为: {project_dir}")
+            self._rebuild_recent_menu()
+        except Exception as e:
+            messagebox.showerror("保存失败", str(e))
 
-            # Restore reference image
-            ref_img = self._workflow._reference_image
-            if ref_img is not None:
-                self._reference_image = ref_img
-                self._ref_canvas.load_image(ref_img)
+    def _load_project(self, project_path: str = None):
+        """Load a project. Supports both new project directories and legacy .npz files.
 
-                # Restore ROI
-                self._ref_canvas.set_roi(
-                    self._workflow.box_center,
-                    self._workflow.box_size,
-                    self._workflow.box_angle_deg,
+        Args:
+            project_path: If given, load this specific path directly
+                          (used by recent projects menu).
+        """
+        if project_path:
+            filepath = project_path
+        else:
+            filepath = filedialog.askopenfilename(
+                parent=self.root,
+                title="加载项目",
+                filetypes=[
+                    ("Project files", "*.npz"),
+                    ("All files", "*.*"),
+                ],
+            )
+            if not filepath:
+                return
+
+        try:
+            # Detect whether this is a project directory or legacy .npz
+            parent_dir = os.path.dirname(filepath)
+            manifest_path = os.path.join(parent_dir, "project.json")
+
+            if os.path.exists(manifest_path):
+                # Full project load
+                ProjectManager.load_project(parent_dir, self)
+                self._rebuild_recent_menu()
+            else:
+                # Legacy .npz — prompt for migration
+                result = messagebox.askyesnocancel(
+                    "旧格式项目",
+                    "这是一个旧格式的 .npz 项目文件。\n\n"
+                    "选择「是」→ 迁移到新项目目录格式（推荐，可保存完整编辑状态）\n"
+                    "选择「否」→ 以旧格式打开（部分状态无法恢复）\n"
+                    "选择「取消」→ 不打开",
                 )
-                self._ref_canvas.confirm_roi()
+                if result is True:
+                    # Migrate
+                    project_dir = filedialog.askdirectory(
+                        parent=self.root,
+                        title="选择迁移目标目录",
+                        mustexist=False,
+                    )
+                    if not project_dir:
+                        return
+                    os.makedirs(project_dir, exist_ok=True)
 
-            # Restore template
-            tmpl = self._workflow.template_image
-            if tmpl is not None:
-                self.template_view.load_template(tmpl)
+                    # Copy the .npz to the project dir as workflow.npz
+                    import shutil
+                    dst_npz = os.path.join(project_dir, "workflow.npz")
+                    shutil.copy2(filepath, dst_npz)
 
-            # Restore measurement tools
-            self.tool_panel.clear_tool_list()
-            self.template_view.clear_tools()
-            for d in self._workflow.measurement_defs:
-                self.tool_panel.add_tool_to_list(d["label"], d["object_type"])
-                # Note: TemplateView tool overlays are not fully restored —
-                # the user would need to re-draw them for visual feedback
+                    # Load workflow from the copy
+                    self._workflow = MultiTargetWorkflow.load(dst_npz)
+                    self._current_project_dir = project_dir
+                    self._current_project_path = None
+                    self._created_at = datetime.now().isoformat()
 
-            self.tool_panel.set_template_created(True)
-            self._exec_btn.state(["!disabled"])
-            self._status_text.set(f"项目已加载: {os.path.basename(filepath)}")
-            self._notebook.select(0)
+                    # Restore reference image
+                    ref_img = self._workflow._reference_image
+                    if ref_img is not None:
+                        self._reference_image = ref_img
+                        self._ref_canvas.load_image(ref_img)
+                        self._ref_canvas.set_roi(
+                            self._workflow.box_center,
+                            self._workflow.box_size,
+                            self._workflow.box_angle_deg,
+                        )
+                        self._ref_canvas.confirm_roi()
+
+                    # Restore template
+                    tmpl = self._workflow.template_image
+                    if tmpl is not None:
+                        self.template_view.load_template(tmpl)
+
+                    # Restore measurement tools (tool panel only, no overlays)
+                    self.tool_panel.clear_tool_list()
+                    self.template_view.clear_tools()
+                    for d in self._workflow.measurement_defs:
+                        self.tool_panel.add_tool_to_list(d["label"], d["object_type"])
+
+                    self.tool_panel.set_template_created(True)
+                    self._exec_btn.state(["!disabled"])
+
+                    # Save as full project now
+                    ProjectManager.save_project(project_dir, self)
+                    self._rebuild_recent_menu()
+
+                    project_name = os.path.basename(project_dir)
+                    self.root.title(f"工业视觉测量系统 — {project_name}")
+                    self._status_text.set(f"项目已迁移并保存: {project_dir}")
+                    self._notebook.select(0)
+
+                elif result is False:
+                    # Open as legacy
+                    ProjectManager.load_legacy_npz(filepath, self)
+                # else: cancelled — do nothing
 
         except Exception as e:
             messagebox.showerror("加载失败", str(e))
+
+    def _new_project(self):
+        """Create a new empty project directory."""
+        project_dir = filedialog.askdirectory(
+            parent=self.root,
+            title="选择/创建项目目录",
+            mustexist=False,
+        )
+        if not project_dir:
+            return
+
+        os.makedirs(project_dir, exist_ok=True)
+        self._current_project_dir = project_dir
+        self._current_project_path = None
+        self._created_at = datetime.now().isoformat()
+
+        # Reset all state
+        self._workflow = None
+        self._reference_image = None
+        self._inspection_image = None
+        self._reference_image_path = None
+        self._inspection_image_path = None
+        self._ref_canvas.reset_roi()
+        self.template_view.clear_tools()
+        self.tool_panel.clear_tool_list()
+        self.result_panel.clear_results()
+        self._exec_btn.state(["disabled"])
+
+        project_name = os.path.basename(project_dir)
+        self.root.title(f"工业视觉测量系统 — {project_name}")
+        self._status_text.set(f"新项目已创建: {project_dir}")
+
+    def _recent_project_opened(self, path: str):
+        """Open a project from the recent projects list."""
+        if not os.path.exists(path):
+            messagebox.showwarning("提示", f"项目目录不存在:\n{path}")
+            ProjectManager.remove_recent_project(path)
+            self._rebuild_recent_menu()
+            return
+        self._load_project(path)
+
+    def _rebuild_recent_menu(self):
+        """Rebuild the recent projects submenu."""
+        self._recent_menu.delete(0, tk.END)
+        projects = ProjectManager.get_recent_projects()
+        if not projects:
+            self._recent_menu.add_command(label="(无最近项目)", state=tk.DISABLED)
+        else:
+            for p in projects:
+                label = f"{p['name']} — {p['path']}"
+                self._recent_menu.add_command(
+                    label=label,
+                    command=lambda path=p["path"]: self._recent_project_opened(path),
+                )
 
     def _execute(self):
         """Execute multi-target measurement on the inspection image."""
@@ -398,6 +569,17 @@ class MeasureApp:
             # Switch to inspection tab
             self._notebook.select(1)
 
+            # Popup notification
+            n_valid = sum(1 for t in results if t.valid)
+            n_total = len(results)
+            messagebox.showinfo(
+                "测量完成",
+                f"多目标测量执行完毕！\n\n"
+                f"检测到 {n_total} 个目标\n"
+                f"其中 {n_valid} 个测量有效\n\n"
+                f"详情请查看底部结果面板。",
+            )
+
         except Exception as e:
             messagebox.showerror("测量失败", str(e))
         finally:
@@ -406,6 +588,144 @@ class MeasureApp:
     def _export_csv(self):
         """Export results (delegated to ResultPanel)."""
         pass  # Handled by ResultPanel._export_csv internally
+
+    # ------------------------------------------------------------------
+    # State getters (for project serialization)
+    # ------------------------------------------------------------------
+
+    def get_gui_state(self) -> dict:
+        """Collect GUI layout state for project manifest."""
+        try:
+            geometry = self.root.geometry()  # "1600x900+100+50"
+        except Exception:
+            geometry = "1600x900"
+        try:
+            window_state = self.root.state()  # "normal" or "zoomed"
+        except Exception:
+            window_state = "normal"
+
+        # Collect sash positions from PanedWindows
+        main_sash = []
+        try:
+            for i in range(10):  # arbitrary safe max
+                coord = self._main_pane.sash_coord(i)
+                if coord:
+                    main_sash.append(coord[0] if isinstance(coord, tuple) else coord)
+                else:
+                    break
+        except Exception:
+            pass
+
+        right_sash = []
+        try:
+            for i in range(10):
+                coord = self._right_pane.sash_coord(i)
+                if coord:
+                    right_sash.append(coord[0] if isinstance(coord, tuple) else coord)
+                else:
+                    break
+        except Exception:
+            pass
+
+        center_sash = []
+        try:
+            for i in range(10):
+                coord = self._center_pane.sash_coord(i)
+                if coord:
+                    center_sash.append(coord[0] if isinstance(coord, tuple) else coord)
+                else:
+                    break
+        except Exception:
+            pass
+
+        return {
+            "active_notebook_tab": self._notebook.index(self._notebook.select()),
+            "window_geometry": geometry,
+            "window_state": window_state,
+            "main_pane_sash_positions": main_sash,
+            "right_pane_sash_positions": right_sash,
+            "center_pane_sash_positions": center_sash,
+        }
+
+    def get_matching_state(self) -> dict:
+        """Collect template matching settings for project manifest."""
+        return {
+            "preprocessor_type": self.tool_panel._preproc_var.get(),
+            "match_score_threshold": self.tool_panel._score_var.get(),
+            "angle_range_deg": self._parse_angle_range(),
+            "max_matches": self.tool_panel._max_matches_var.get(),
+        }
+
+    def get_tool_list_order(self) -> list:
+        """Get ordered list of tool labels from the tool panel treeview."""
+        return self.tool_panel.get_tool_list_order()
+
+    def _get_roi_state(self) -> dict:
+        """Collect current ROI state from reference canvas."""
+        if self._ref_canvas.roi_center is None:
+            return {}
+        return {
+            "center_row": self._ref_canvas.roi_center[0],
+            "center_col": self._ref_canvas.roi_center[1],
+            "height": self._ref_canvas.roi_size[0],
+            "width": self._ref_canvas.roi_size[1],
+            "angle_deg": self._ref_canvas.roi_angle,
+            "confirmed": self._ref_canvas.roi_confirmed,
+        }
+
+    def _parse_angle_range(self) -> float:
+        """Parse angle range half-value from the tool panel combo string."""
+        angle_str = self.tool_panel._angle_var.get()
+        return float(angle_str.replace("±", "").replace("°", ""))
+
+    # ------------------------------------------------------------------
+    # State setters (for project deserialization)
+    # ------------------------------------------------------------------
+
+    def restore_gui_state(self, gui_state: dict):
+        """Restore window geometry, notebook tab, and sash positions."""
+        # Restore window geometry
+        geometry = gui_state.get("window_geometry", "")
+        if geometry:
+            try:
+                self.root.geometry(geometry)
+            except Exception:
+                pass
+
+        # Restore window state (normal/zoomed)
+        window_state = gui_state.get("window_state", "normal")
+        if window_state == "zoomed":
+            try:
+                self.root.state("zoomed")
+            except Exception:
+                pass
+
+        # Restore notebook tab
+        tab = gui_state.get("active_notebook_tab", 0)
+        try:
+            self._notebook.select(tab)
+        except Exception:
+            pass
+
+        # Restore sash positions (deferred via after_idle to let layout settle)
+        def _restore_sashes():
+            for i, pos in enumerate(gui_state.get("main_pane_sash_positions", [])):
+                try:
+                    self._main_pane.sashpos(i, int(pos))
+                except Exception:
+                    pass
+            for i, pos in enumerate(gui_state.get("right_pane_sash_positions", [])):
+                try:
+                    self._right_pane.sashpos(i, int(pos))
+                except Exception:
+                    pass
+            for i, pos in enumerate(gui_state.get("center_pane_sash_positions", [])):
+                try:
+                    self._center_pane.sashpos(i, int(pos))
+                except Exception:
+                    pass
+
+        self.root.after(200, _restore_sashes)
 
     # ------------------------------------------------------------------
     # ROI callbacks
@@ -512,6 +832,16 @@ class MeasureApp:
         self.tool_panel.set_template_created(True)
         self._exec_btn.state(["!disabled"])
         self._status_text.set(f"模板已创建: {width:.0f}×{height:.0f} @ {angle_deg:.1f}°")
+
+        # Popup notification
+        messagebox.showinfo(
+            "模板创建完成",
+            f"模板已成功创建！\n\n"
+            f"尺寸: {width:.0f} × {height:.0f} px\n"
+            f"角度: {angle_deg:.1f}°\n"
+            f"预处理: {preproc_name}\n\n"
+            f"现在可以在右侧模板预览上添加测量工具。",
+        )
 
     # ------------------------------------------------------------------
     # Template tool callbacks
@@ -659,8 +989,16 @@ class MeasureApp:
     def _show_help(self):
         help_text = """工业视觉测量系统 — 使用说明
 
+【项目工程】
+  - 新建项目: 文件 → 新建项目... 创建项目目录
+  - 打开项目: 文件 → 打开项目... (Ctrl+O) 加载已有项目
+  - 保存项目: 文件 → 保存项目 (Ctrl+S) 保存到项目目录
+  - 另存为:   文件 → 另存项目... (Ctrl+Shift+S)
+  - 最近项目: 文件 → 最近项目 → 快速打开
+项目目录包含 project.json (设置+状态) + workflow.npz (模板数据) + 图片副本
+
 【教学模式】
-1. 加载参考图 (Ctrl+O)
+1. 加载参考图 (Ctrl+Shift+O)
 2. 在参考图上画旋转目标框:
    - 点击确定中心点
    - 拖拽定义框的宽高
@@ -680,9 +1018,11 @@ class MeasureApp:
 4. 可导出 CSV
 
 【快捷键】
-Ctrl+O: 加载参考图
-Ctrl+I: 加载检测图
+Ctrl+O: 打开项目
 Ctrl+S: 保存项目
+Ctrl+Shift+S: 另存项目
+Ctrl+Shift+O: 加载参考图
+Ctrl+I: 加载检测图
 Ctrl+E: 执行测量
 Escape: 取消当前操作
 """

@@ -284,6 +284,56 @@ class ToolPanel(ttk.Frame):
         """Get all tool labels currently visible."""
         return list(self._tool_tree.get_children())
 
+    def get_tool_list_order(self) -> List[str]:
+        """Get ordered list of tool labels (for project manifest)."""
+        return self.get_tool_list_labels()
+
+    def restore_tool_list(self, tools: List[dict], order: List[str]):
+        """Restore the tool list treeview from saved state.
+
+        Args:
+            tools: List of {object_type, label, params} from workflow.measurement_defs.
+            order: Ordered list of labels from project manifest.
+        """
+        self.clear_tool_list()
+        # Build lookup by label
+        tool_map = {}
+        for t in tools:
+            label = t.get("label", "")
+            obj_type = t.get("object_type", "?")
+            if label:
+                tool_map[label] = obj_type
+
+        # Insert in saved order
+        for label in order:
+            obj_type = tool_map.pop(label, "?")
+            if not self._tool_tree.exists(label):
+                self._tool_tree.insert("", tk.END, iid=label,
+                                       values=(label, obj_type))
+
+        # Insert any remaining tools not in order
+        for label, obj_type in tool_map.items():
+            if not self._tool_tree.exists(label):
+                self._tool_tree.insert("", tk.END, iid=label,
+                                       values=(label, obj_type))
+
+    def set_matching_params(self, preprocessor_type: str,
+                            score_threshold: float,
+                            angle_range_half: float,
+                            max_matches: int):
+        """Set matching parameter widgets programmatically (for project restore).
+
+        Args:
+            preprocessor_type: One of raw/canny/sobel/clahe/threshold.
+            score_threshold: Match score threshold (0.1–1.0).
+            angle_range_half: Half-range in degrees (e.g. 30 for ±30°).
+            max_matches: Max number of matches (0 = unlimited).
+        """
+        self._preproc_var.set(preprocessor_type)
+        self._score_var.set(score_threshold)
+        self._angle_var.set(f"±{int(angle_range_half)}°")
+        self._max_matches_var.set(max_matches)
+
     def set_progress(self, running: bool):
         """Start/stop the progress bar."""
         if running:

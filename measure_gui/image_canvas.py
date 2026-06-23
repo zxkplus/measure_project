@@ -203,6 +203,29 @@ class ImageCanvas(tk.Frame):
         self._clear_roi_items()
         self._notify_roi_changed()
 
+    def get_view_state(self) -> dict:
+        """Serialize zoom/pan state for project saving.
+
+        Returns:
+            dict with keys: zoom (float), offset_x (float), offset_y (float).
+        """
+        return {
+            "zoom": self._zoom,
+            "offset_x": self._offset_x,
+            "offset_y": self._offset_y,
+        }
+
+    def set_view_state(self, state: dict):
+        """Restore zoom/pan state from a saved project.
+
+        Args:
+            state: dict with zoom, offset_x, offset_y keys.
+        """
+        self._zoom = state.get("zoom", 1.0)
+        self._offset_x = state.get("offset_x", 0.0)
+        self._offset_y = state.get("offset_y", 0.0)
+        self._redraw()
+
     def clear_overlays(self):
         """Remove all result overlay items."""
         for item_id in self._overlay_items:

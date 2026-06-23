@@ -71,6 +71,8 @@ class TemplateView(tk.Frame):
 
         # Display scale (template usually small, may need to upscale)
         self._scale: float = 1.0
+        self._offset_x: float = 0.0
+        self._offset_y: float = 0.0
 
         # Callbacks
         self.on_tool_added: Optional[Callable] = None
@@ -147,11 +149,19 @@ class TemplateView(tk.Frame):
     # Public API
     # ------------------------------------------------------------------
 
-    def load_template(self, image: np.ndarray):
-        """Load a straightened template image."""
+    def load_template(self, image: np.ndarray, clear_tools: bool = True):
+        """Load a straightened template image.
+
+        Args:
+            image: Grayscale or BGR template image.
+            clear_tools: If True (default), reset all tools and counters.
+                         Set to False when restoring from a saved project
+                         (tools will be restored separately via set_state).
+        """
         self._template_image = image
-        self._tools = []
-        self._tool_counters = {}
+        if clear_tools:
+            self._tools = []
+            self._tool_counters = {}
         self._redraw()
 
     @property
@@ -210,6 +220,62 @@ class TemplateView(tk.Frame):
             self._delete_tool_items(t)
         self._tools = []
         self._tool_counters = {}
+        self._redraw_tools()
+
+    def get_state(self) -> dict:
+        """Serialize complete template view state for project saving.
+
+        Returns a dict with:
+            scale, offset_x, offset_y — display transform
+            tools — list of {object_type, label, params, _selected}
+            tool_counters — dict[str, int] auto-label counters
+        """
+        tools_data = []
+        for t in self._tools:
+            tools_data.append({
+                "object_type": t["object_type"],
+                "label": t["label"],
+                "params": dict(t["params"]),  # shallow copy; values are JSON-serializable
+                "_selected": t.get("_selected", False),
+            })
+        return {
+            "scale": self._scale,
+            "offset_x": self._offset_x,
+            "offset_y": self._offset_y,
+            "tools": tools_data,
+            "tool_counters": dict(self._tool_counters),
+        }
+
+    def set_state(self, state: dict) -> None:
+        """Restore template view state from a saved project.
+
+        Recreates all canvas tool overlays from the serialized state.
+        Does NOT fire on_tool_added callbacks — the workflow already has
+        the measurement definitions from the .npz load.
+        """
+        # Restore display params
+        self._scale = state.get("scale", 1.0)
+        self._offset_x = state.get("offset_x", 0.0)
+        self._offset_y = state.get("offset_y", 0.0)
+
+        # Restore tool counters
+        self._tool_counters = {}
+        for prefix, count in state.get("tool_counters", {}).items():
+            self._tool_counters[prefix] = count
+
+        # Restore tools list (rebuilding canvas items via _redraw_tools)
+        self._tools = []
+        for tool_data in state.get("tools", []):
+            tool = {
+                "object_type": tool_data["object_type"],
+                "label": tool_data["label"],
+                "params": dict(tool_data["params"]),
+                "canvas_items": [],
+                "_selected": tool_data.get("_selected", False),
+            }
+            self._tools.append(tool)
+
+        # Redraw all tool overlays on the canvas
         self._redraw_tools()
 
     def set_status(self, text: str):
