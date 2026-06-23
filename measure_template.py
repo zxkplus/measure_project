@@ -36,7 +36,7 @@ Usage:
 import json
 import cv2
 import numpy as np
-from typing import Tuple, Optional, Dict, Any, Protocol
+from typing import Tuple, Optional, Dict, Any, List, Protocol
 
 
 # =========================================================================
@@ -281,7 +281,9 @@ class TemplatePoint:
                  scale_step: float = 0.02,
                  coarse_fine: bool = True,
                  coarse_angle_step: float = 5.0,
-                 coarse_scale_step: float = 0.1):
+                 coarse_scale_step: float = 0.1,
+                 multi_target: bool = False,
+                 max_matches: int = 0):
         """
         Initialize a template point from a reference image.
 
@@ -307,6 +309,11 @@ class TemplatePoint:
                          around top candidates (default True).
             coarse_angle_step: Step size for coarse angle search (default 5.0).
             coarse_scale_step: Step size for coarse scale search (default 0.1).
+            multi_target: Enable multi-target detection. When True, finds ALL
+                         instances of the template above match_score_threshold
+                         instead of only the single best match (default False).
+            max_matches: Maximum number of matches to return when
+                        multi_target=True. 0 means unlimited (default 0).
         """
         self.click_row = click_row
         self.click_col = click_col
@@ -323,6 +330,8 @@ class TemplatePoint:
         self.coarse_fine = coarse_fine
         self.coarse_angle_step = coarse_angle_step
         self.coarse_scale_step = coarse_scale_step
+        self.multi_target = multi_target
+        self.max_matches = max_matches
 
         # Crop the template region (clamped to image bounds)
         gray = self._to_gray(reference_image)
@@ -417,11 +426,17 @@ class TemplatePoint:
                 f"is smaller than template size ({self._crop_h}x{self._crop_w})"
             )
 
-        # Dispatch: fast path vs multi-angle/scale
+        # Dispatch: fast path vs multi-angle/scale vs multi-target
         if not self.rotation_invariant and not self.scale_invariant:
-            result = self._match_translation_only(search_img, r1, c1)
+            if self.multi_target:
+                result = self._match_translation_multi(search_img, r1, c1)
+            else:
+                result = self._match_translation_only(search_img, r1, c1)
         else:
-            result = self._match_multi_angle_scale(search_img, r1, c1)
+            if self.multi_target:
+                result = self._match_multi_angle_scale_multi(search_img, r1, c1)
+            else:
+                result = self._match_multi_angle_scale(search_img, r1, c1)
 
         self.result = result
         return self.result
@@ -459,6 +474,222 @@ class TemplatePoint:
             'best_rotation_deg': 0.0,
             'best_scale': 1.0,
         }
+
+    def _match_translation_multi(self, search_img: np.ndarray,
+                                  r1: int, c1: int) -> Dict[str, Any]:
+        """
+        Multi-target translation-only matching.
+
+        Finds ALL local maxima in the NCC heatmap above the score threshold,
+        applies spatial NMS, and returns a list of matches plus backward-
+        compatible top-level best-match fields.
+        """
+        heatmap = cv2.matchTemplate(search_img, self.edge_template,
+                                    cv2.TM_CCOEFF_NORMED)
+
+        peaks = self._find_peaks(heatmap, self.match_score_threshold)
+        min_dist = min(self._crop_h, self._crop_w) / 2.0
+
+        # Build NMS input: (score, row, col, angle=0, scale=1, w, h)
+        candidates = [(s, r, c, 0.0, 1.0, self._crop_w, self._crop_h)
+                      for s, r, c in peaks]
+        selected = self._spatial_nms(candidates, min_dist, self.max_matches)
+
+        matches = []
+        for score, py, px, angle, scale, ww, wh in selected:
+            if self.use_subpixel:
+                spx, spy = self._refine_subpixel_2d(heatmap, py, px)
+            else:
+                spx, spy = float(px), float(py)
+            matched_row = r1 + spy + wh / 2.0
+            matched_col = c1 + spx + ww / 2.0
+            matches.append({
+                'matched_row': matched_row,
+                'matched_col': matched_col,
+                'dx': matched_col - self.click_col,
+                'dy': matched_row - self.click_row,
+                'match_score': float(score),
+                'valid': True,
+                'int_peak_y': py,
+                'int_peak_x': px,
+                'best_rotation_deg': 0.0,
+                'best_scale': 1.0,
+            })
+
+        return self._build_multi_result(matches)
+
+    def _match_multi_angle_scale_multi(self, search_img: np.ndarray,
+                                        r1: int, c1: int) -> Dict[str, Any]:
+        """
+        Multi-target multi-angle / multi-scale matching.
+
+        Enumerates (angle, scale) combinations, finds ALL local maxima in
+        each heatmap, pools all candidates, applies global spatial NMS to
+        deduplicate across angles/scales, then subpixel-refines each
+        surviving match.
+        """
+        H, W = search_img.shape
+        tmpl_h, tmpl_w = self.edge_template.shape
+
+        # ---- 1. Build search grids (reuse _build_grid helper) ----
+        def _build_grid(invariant, range_tuple, step):
+            if not invariant:
+                if range_tuple[0] == 0.0 and abs(range_tuple[1] - 1.0) < 1e-6:
+                    return [0.0]
+                avg = (range_tuple[0] + range_tuple[1]) / 2.0
+                return [avg]
+            vals = []
+            v = range_tuple[0]
+            eps = step * 0.01
+            while v <= range_tuple[1] + eps:
+                vals.append(v)
+                v += step
+            return vals
+
+        if self.coarse_fine:
+            # Coarse grid
+            coarse_angles = _build_grid(self.rotation_invariant, self.angle_range,
+                                        self.coarse_angle_step)
+            coarse_scales = _build_grid(self.scale_invariant, self.scale_range,
+                                        self.coarse_scale_step)
+
+            # Step 1: Coarse search — collect all peaks from all heatmaps
+            coarse_results = self._enumerate_angles_scales(
+                search_img, coarse_angles, coarse_scales, W, H, tmpl_w, tmpl_h,
+                multi_peak=True, score_threshold=self.match_score_threshold
+            )
+            if not coarse_results:
+                return self._build_multi_result([])
+
+            # Normalise candidates: (score, (py,px,hm), angle, scale, w, h)
+            #                -> (score, py, px, angle, scale, w, h)
+            coarse_flat = [(s, loc[0], loc[1], a, sc, ww, wh)
+                           for s, loc, a, sc, ww, wh in coarse_results]
+
+            # Step 2: NMS on coarse results to find distinct candidate regions
+            min_dist = min(tmpl_h, tmpl_w) / 2.0
+            coarse_nms = self._spatial_nms(coarse_flat, min_dist, max_matches=0)
+            # Take top-K for fine refinement (K=5 to cover sparse targets well)
+            coarse_nms.sort(key=lambda x: x[0], reverse=True)
+            K = min(5, len(coarse_nms))
+            top_candidates = coarse_nms[:K]
+
+            # Step 3: Fine search around each candidate's angle/scale
+            fine_angles_set = set()
+            fine_scales_set = set()
+            for _, _, _, angle, scale, _, _ in top_candidates:
+                fine_angles_set.add(angle)
+                fine_scales_set.add(scale)
+                if self.rotation_invariant:
+                    for offset in [-1, 1]:
+                        na = angle + offset * self.angle_step
+                        if self.angle_range[0] - 1e-6 <= na <= self.angle_range[1] + 1e-6:
+                            fine_angles_set.add(na)
+                if self.scale_invariant:
+                    for offset in [-1, 1]:
+                        ns = scale + offset * self.scale_step
+                        if self.scale_range[0] - 1e-6 <= ns <= self.scale_range[1] + 1e-6:
+                            fine_scales_set.add(ns)
+
+            fine_angles = sorted(fine_angles_set) if self.rotation_invariant else [0.0]
+            fine_scales = sorted(fine_scales_set) if self.scale_invariant else [1.0]
+        else:
+            fine_angles = _build_grid(self.rotation_invariant, self.angle_range,
+                                      self.angle_step)
+            fine_scales = _build_grid(self.scale_invariant, self.scale_range,
+                                      self.scale_step)
+
+        # ---- 2. Fine enumeration (multi-peak) ----
+        all_results = self._enumerate_angles_scales(
+            search_img, fine_angles, fine_scales, W, H, tmpl_w, tmpl_h,
+            multi_peak=True, score_threshold=self.match_score_threshold
+        )
+        if not all_results:
+            return self._build_multi_result([])
+
+        # Normalise: (score, (py,px,hm), angle, scale, w, h)
+        #        -> (score, py, px, hm, angle, scale, w, h)
+        all_flat = [(s, loc[0], loc[1], loc[2] if len(loc) > 2 else None,
+                      a, sc, ww, wh)
+                     for s, loc, a, sc, ww, wh in all_results]
+
+        # ---- 3. Global spatial NMS ----
+        min_dist = min(tmpl_h, tmpl_w) / 2.0
+        selected = self._spatial_nms(all_flat, min_dist, self.max_matches)
+
+        # ---- 4. Subpixel refinement per selected match ----
+        matches = []
+        for score, py, px, heatmap, angle, scale, ww, wh in selected:
+            # Position refinement
+            if self.use_subpixel and heatmap is not None:
+                spx, spy = self._refine_subpixel_2d(heatmap, py, px)
+            else:
+                spx, spy = float(px), float(py)
+
+            # Angle refinement via 1D quadratic interpolation
+            if self.rotation_invariant and len(fine_angles) >= 3:
+                refined_angle = self._refine_1d_subpixel(
+                    all_results, angle, self.rotation_invariant, self.scale_invariant,
+                    index_dim=2, value_dim=0
+                )
+            else:
+                refined_angle = angle
+
+            # Scale refinement
+            if self.scale_invariant and len(fine_scales) >= 3:
+                refined_scale = self._refine_1d_subpixel(
+                    all_results, scale, self.rotation_invariant, self.scale_invariant,
+                    index_dim=3, value_dim=0
+                )
+            else:
+                refined_scale = scale
+
+            matched_row = r1 + spy + wh / 2.0
+            matched_col = c1 + spx + ww / 2.0
+
+            matches.append({
+                'matched_row': matched_row,
+                'matched_col': matched_col,
+                'dx': matched_col - self.click_col,
+                'dy': matched_row - self.click_row,
+                'match_score': float(score),
+                'valid': True,
+                'int_peak_y': py,
+                'int_peak_x': px,
+                'best_rotation_deg': float(refined_angle),
+                'best_scale': float(refined_scale),
+            })
+
+        return self._build_multi_result(matches)
+
+    def _build_multi_result(self, matches: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Build the result dict for multi-target mode.
+
+        The top-level fields contain the best match (for backward compatibility).
+        The 'matches' key holds all matches sorted by score descending.
+        """
+        if matches:
+            best = matches[0]
+            return {
+                'matched_row': best['matched_row'],
+                'matched_col': best['matched_col'],
+                'dx': best['dx'],
+                'dy': best['dy'],
+                'match_score': best['match_score'],
+                'valid': True,
+                'int_peak_y': best['int_peak_y'],
+                'int_peak_x': best['int_peak_x'],
+                'best_rotation_deg': best['best_rotation_deg'],
+                'best_scale': best['best_scale'],
+                'matches': matches,
+                'num_matches': len(matches),
+            }
+        else:
+            result = self._make_invalid_result()
+            result['matches'] = []
+            result['num_matches'] = 0
+            return result
 
     def _match_multi_angle_scale(self, search_img: np.ndarray,
                                   r1: int, c1: int) -> Dict[str, Any]:
@@ -594,10 +825,18 @@ class TemplatePoint:
         }
 
     def _enumerate_angles_scales(self, search_img, angles, scales,
-                                  W, H, tmpl_w, tmpl_h):
+                                  W, H, tmpl_w, tmpl_h,
+                                  multi_peak: bool = False,
+                                  score_threshold: float = 0.0):
         """
         Enumerate all (angle, scale) combinations, calling matchTemplate
         for each valid combination.
+
+        Args:
+            multi_peak: If True, find ALL local maxima above score_threshold
+                       for each heatmap (multi-target mode). If False, only
+                       the single global peak (backward compatible).
+            score_threshold: Minimum score for peaks when multi_peak=True.
 
         Returns:
             List of (score, (peak_y, peak_x, heatmap), angle, scale, warped_w, warped_h)
@@ -612,9 +851,16 @@ class TemplatePoint:
                 if wh > H or ww > W:
                     continue
                 heatmap = cv2.matchTemplate(search_img, warped, cv2.TM_CCOEFF_NORMED)
-                _, max_val, _, max_loc = cv2.minMaxLoc(heatmap)
-                results.append((float(max_val), (max_loc[1], max_loc[0], heatmap),
-                                angle, scale, ww, wh))
+
+                if multi_peak:
+                    peaks = self._find_peaks(heatmap, score_threshold)
+                    for score, py, px in peaks:
+                        results.append((score, (py, px, heatmap),
+                                        angle, scale, ww, wh))
+                else:
+                    _, max_val, _, max_loc = cv2.minMaxLoc(heatmap)
+                    results.append((float(max_val), (max_loc[1], max_loc[0], heatmap),
+                                    angle, scale, ww, wh))
         return results
 
     def _rotate_scale_template(self, angle_deg: float, scale: float) -> Optional[np.ndarray]:
@@ -661,6 +907,71 @@ class TemplatePoint:
                                 borderMode=cv2.BORDER_CONSTANT,
                                 borderValue=border_value)
         return warped
+
+    @staticmethod
+    def _find_peaks(heatmap: np.ndarray,
+                    threshold: float) -> List[Tuple[float, int, int]]:
+        """
+        Find all local maxima in a correlation heatmap above a threshold.
+
+        Uses 3×3 dilation to detect pixel-level local maxima: a pixel is a
+        peak if it equals the dilated value (no larger neighbour) AND its
+        score >= threshold.
+
+        Args:
+            heatmap: 2D correlation heatmap (e.g. from cv2.matchTemplate).
+            threshold: Minimum score for a peak to be included.
+
+        Returns:
+            List of (score, row, col) tuples, sorted by score descending.
+        """
+        kernel = np.ones((3, 3), dtype=heatmap.dtype)
+        dilated = cv2.dilate(heatmap, kernel)
+        mask = (heatmap == dilated) & (heatmap >= threshold)
+        peak_ys, peak_xs = np.where(mask)
+        peaks = [(float(heatmap[py, px]), int(py), int(px))
+                 for py, px in zip(peak_ys, peak_xs)]
+        peaks.sort(key=lambda x: x[0], reverse=True)
+        return peaks
+
+    @staticmethod
+    def _spatial_nms(candidates: List[tuple],
+                     min_distance: float,
+                     max_matches: int = 0) -> List[tuple]:
+        """
+        Spatial non-maximum suppression for template match candidates.
+
+        Sorts candidates by score descending and greedily selects those
+        that are at least `min_distance` pixels away from every already
+        selected candidate.
+
+        Candidates must be tuples where index 1 is the row and index 2
+        is the column in the search image.
+
+        Args:
+            candidates: List of tuples, each with (score, row, col, ...).
+            min_distance: Minimum pixel distance between distinct targets.
+            max_matches: Maximum number of matches to return (0 = unlimited).
+
+        Returns:
+            Filtered list of candidates, same tuple structure, sorted by
+            score descending.
+        """
+        sorted_candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
+        selected: List[tuple] = []
+        for c in sorted_candidates:
+            row, col = c[1], c[2]
+            too_close = False
+            for s in selected:
+                dist = np.sqrt((row - s[1]) ** 2 + (col - s[2]) ** 2)
+                if dist < min_distance:
+                    too_close = True
+                    break
+            if not too_close:
+                selected.append(c)
+                if max_matches > 0 and len(selected) >= max_matches:
+                    break
+        return selected
 
     @staticmethod
     def _refine_1d_subpixel(results, best_val, rotation_invariant, scale_invariant,
@@ -750,12 +1061,15 @@ class TemplatePoint:
                   point_radius: int = 6,
                   wait_time: int = -1) -> np.ndarray:
         """
-        Visualize the template region and matched point on an image.
+        Visualize the template region and matched point(s) on an image.
+
+        In multi-target mode, all detected matches are drawn with individual
+        index labels and varying colours.
 
         Args:
             image: Input image (grayscale or BGR)
             show_template_box: Draw the template crop region
-            show_matched_point: Draw the matched center crosshair
+            show_matched_point: Draw the matched center crosshair(s)
             show_labels: Show text labels with coordinates and score
             template_color: Color for the template box (B, G, R)
             matched_color: Color for the matched point (B, G, R)
@@ -772,7 +1086,15 @@ class TemplatePoint:
             self._draw_template_box(vis_img, template_color, line_thickness)
 
         if show_matched_point and self.result is not None:
-            self._draw_matched_point(vis_img, matched_color, point_radius, show_labels)
+            matches = self.result.get('matches', None)
+            if matches and len(matches) > 1:
+                # Multi-target mode: draw each match with its own colour + index
+                self._draw_multi_matches(vis_img, matches, point_radius,
+                                         show_labels, line_thickness)
+            else:
+                # Single-target mode (backward compatible)
+                self._draw_matched_point(vis_img, matched_color, point_radius,
+                                         show_labels)
 
         self._draw_info(vis_img)
 
@@ -783,6 +1105,58 @@ class TemplatePoint:
                 cv2.destroyWindow("Template Point")
 
         return vis_img
+
+    def _draw_multi_matches(self, img: np.ndarray,
+                            matches: List[Dict[str, Any]],
+                            radius: int,
+                            show_labels: bool,
+                            thickness: int):
+        """Draw all detected matches with distinct colours and index numbers."""
+        # Colour palette for up to ~20 targets (cycles if more)
+        palette = [
+            (0, 0, 255),     # red
+            (0, 255, 0),     # green
+            (255, 0, 0),     # blue
+            (0, 255, 255),   # yellow
+            (255, 0, 255),   # magenta
+            (255, 255, 0),   # cyan
+            (128, 0, 255),   # orange
+            (255, 128, 0),   # sky blue
+            (0, 128, 255),   # orange-yellow
+            (128, 255, 0),   # lime
+        ]
+        for i, m in enumerate(matches):
+            color = palette[i % len(palette)]
+            r, c = m['matched_row'], m['matched_col']
+            score = m['match_score']
+            angle = m.get('best_rotation_deg', 0.0)
+            scale = m.get('best_scale', 1.0)
+
+            # Crosshair
+            cv2.line(img, (int(c) - radius, int(r)), (int(c) + radius, int(r)),
+                     (0, 0, 0), thickness + 1)
+            cv2.line(img, (int(c) - radius, int(r)), (int(c) + radius, int(r)),
+                     color, thickness)
+            cv2.line(img, (int(c), int(r) - radius), (int(c), int(r) + radius),
+                     (0, 0, 0), thickness + 1)
+            cv2.line(img, (int(c), int(r) - radius), (int(c), int(r) + radius),
+                     color, thickness)
+
+            # Index circle
+            cv2.circle(img, (int(c), int(r)), radius + 4, (0, 0, 0), thickness + 1)
+            cv2.circle(img, (int(c), int(r)), radius + 4, color, thickness)
+            cv2.putText(img, str(i), (int(c) - 4, int(r) + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 2)
+            cv2.putText(img, str(i), (int(c) - 4, int(r) + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
+
+            if show_labels:
+                label = (f'#{i} ({c:.1f},{r:.1f}) '
+                         f's:{score:.3f} a:{angle:.1f}deg sc:{scale:.2f}')
+                cv2.putText(img, label, (int(c) + radius + 8, int(r) - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
+                cv2.putText(img, label, (int(c) + radius + 8, int(r) - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
 
     def _draw_template_box(self, img: np.ndarray,
                            color: Tuple[int, int, int],
@@ -842,6 +1216,14 @@ class TemplatePoint:
 
         if self.result is not None:
             y += 20
+            num_matches = self.result.get('num_matches', 0)
+            if num_matches > 1:
+                count_text = f'Matches: {num_matches}'
+                cv2.putText(img, count_text, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
+                           0.45, (0, 0, 0), 2)
+                cv2.putText(img, count_text, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
+                           0.45, (200, 200, 200), 1)
+                y += 20
             score_text = f'Score: {self.result["match_score"]:.4f}'
             cv2.putText(img, score_text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 2)
             cv2.putText(img, score_text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
@@ -903,6 +1285,8 @@ class TemplatePoint:
             coarse_fine=self.coarse_fine,
             coarse_angle_step=self.coarse_angle_step,
             coarse_scale_step=self.coarse_scale_step,
+            multi_target=self.multi_target,
+            max_matches=self.max_matches,
         )
 
     @classmethod
@@ -974,6 +1358,8 @@ class TemplatePoint:
         obj.coarse_fine = bool(data.get('coarse_fine', True))
         obj.coarse_angle_step = float(data.get('coarse_angle_step', 5.0))
         obj.coarse_scale_step = float(data.get('coarse_scale_step', 0.1))
+        obj.multi_target = bool(data.get('multi_target', False))
+        obj.max_matches = int(data.get('max_matches', 0))
 
         return obj
 
