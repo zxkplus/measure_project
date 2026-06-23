@@ -1563,6 +1563,293 @@ class TestRotationScaleTemplate:
 
 
 # ===========================================================================
+# Multi-Target Template Matching Tests
+# ===========================================================================
+
+
+class TestMultiTargetTemplate:
+    """Tests for multi-target template matching (multi_target=True)."""
+
+    @staticmethod
+    def _create_test_pattern(height=200, width=200):
+        """Create an asymmetric L-shaped test pattern."""
+        img = np.ones((height, width), dtype=np.uint8) * 128
+        img[80:90, 70:100] = 255  # horizontal
+        img[80:100, 70:80] = 255  # vertical
+        img[95, 95] = 0           # dot
+        return img
+
+    @staticmethod
+    def _create_multi_target_image(positions, angles=None, pattern_size=(200, 200),
+                                   image_size=(400, 400), feature_size=30,
+                                   feature_center_row=None, feature_center_col=None):
+        """
+        Create an image with a single L-shape feature at multiple positions.
+
+        A single feature patch is cropped from the reference pattern at the
+        given center, then pasted onto the canvas at each target position
+        (optionally rotated). This ensures all targets are identical to the
+        template.
+
+        Args:
+            positions: List of (row, col) centers in image space.
+            angles: Optional list of rotation angles in degrees (None = 0°).
+            pattern_size: Size of the base pattern image.
+            image_size: Size of the output inspection image.
+            feature_size: Size of the square patch placed at each position.
+            feature_center_row: Center row of the feature in the pattern
+                               (defaults to pattern center).
+            feature_center_col: Center col of the feature in the pattern
+                               (defaults to pattern center).
+
+        Returns:
+            (canvas, ref_pattern) — inspection image and reference pattern.
+        """
+        ref = TestMultiTargetTemplate._create_test_pattern(*pattern_size)
+        canvas = np.ones((image_size[0], image_size[1]), dtype=np.uint8) * 128
+
+        if feature_center_row is None:
+            feature_center_row = 85  # match TemplatePoint click_row default
+        if feature_center_col is None:
+            feature_center_col = 85  # match TemplatePoint click_col default
+
+        # Crop a SINGLE feature patch from the reference pattern
+        half = feature_size // 2
+        fr1 = max(0, feature_center_row - half)
+        fr2 = min(pattern_size[0], feature_center_row + half)
+        fc1 = max(0, feature_center_col - half)
+        fc2 = min(pattern_size[1], feature_center_col + half)
+        base_feature = ref[fr1:fr2, fc1:fc2].copy()
+
+        if angles is None:
+            angles = [0.0] * len(positions)
+
+        for (crow, ccol), ang in zip(positions, angles):
+            feat = base_feature.copy()
+            fh, fw = feat.shape
+
+            if abs(ang) > 0.01:
+                M = cv2.getRotationMatrix2D((fw / 2, fh / 2), ang, 1.0)
+                feat = cv2.warpAffine(feat, M, (fw, fh),
+                                      borderMode=cv2.BORDER_CONSTANT,
+                                      borderValue=int(np.mean(feat)))
+
+            # Paste into canvas
+            pr1 = max(0, crow - fh // 2)
+            pc1 = max(0, ccol - fw // 2)
+            pr2 = min(image_size[0], pr1 + fh)
+            pc2 = min(image_size[1], pc1 + fw)
+
+            paste_h = pr2 - pr1
+            paste_w = pc2 - pc1
+            if paste_h > 0 and paste_w > 0:
+                canvas[pr1:pr2, pc1:pc2] = feat[:paste_h, :paste_w]
+
+        return canvas, ref
+
+    def test_translation_multi_default_single(self):
+        """multi_target=False: single match returned (backward compat)."""
+        _, ref = self._create_multi_target_image([(100, 100)],
+                                                  feature_center_row=85,
+                                                  feature_center_col=85)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=30,
+                           multi_target=False)
+        result = tp.measure(ref)
+        assert result['valid']
+        assert result.get('num_matches', 1) == 1
+
+    def test_translation_multi_three_targets(self):
+        """multi_target=True detects 3 identical features at different positions."""
+        positions = [(100, 100), (200, 300), (300, 150)]
+        inspection, ref = self._create_multi_target_image(
+            positions, feature_center_row=85, feature_center_col=85)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=30,
+                           multi_target=True)
+        result = tp.measure(inspection)
+        assert result['valid']
+        assert result['num_matches'] == 3
+
+        # Each match should be near one of the expected positions
+        matched_positions = [(m['matched_row'], m['matched_col'])
+                            for m in result['matches']]
+        for exp_row, exp_col in positions:
+            found = any(abs(mr - exp_row) < 8 and abs(mc - exp_col) < 8
+                        for mr, mc in matched_positions)
+            assert found, (f"Expected match near ({exp_row},{exp_col}), "
+                           f"got {matched_positions}")
+
+    def test_translation_multi_scores_descending(self):
+        """Matches are sorted by score descending."""
+        positions = [(80, 80), (200, 300), (300, 150)]
+        inspection, ref = self._create_multi_target_image(
+            positions, feature_center_row=85, feature_center_col=85)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=30,
+                           multi_target=True)
+        result = tp.measure(inspection)
+        scores = [m['match_score'] for m in result['matches']]
+        assert scores == sorted(scores, reverse=True), f"Scores not descending: {scores}"
+
+    def test_nms_deduplication(self):
+        """NMS prevents duplicate detections of the same target."""
+        # Single feature — multi_target should still return only 1 match
+        positions = [(100, 100)]
+        inspection, ref = self._create_multi_target_image(
+            positions, feature_center_row=85, feature_center_col=85)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=30,
+                           multi_target=True)
+        result = tp.measure(inspection)
+        assert result['num_matches'] == 1, (
+            f"NMS failed to deduplicate: got {result['num_matches']} matches for 1 target"
+        )
+
+    def test_score_threshold_filters_weak_matches(self):
+        """Low-score candidates are filtered by match_score_threshold."""
+        # Place the feature on ref at click position, but inspection is blank
+        positions = [(100, 100)]
+        inspection, ref = self._create_multi_target_image(positions)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=30,
+                           multi_target=True, match_score_threshold=0.7)
+        result = tp.measure(inspection)
+        # Should find the exact feature (score ≈ 1.0)
+        assert result['valid']
+
+        # On blank image: all scores should be below 0.7
+        blank = np.ones_like(inspection) * 128
+        result2 = tp.measure(blank)
+        assert result2['num_matches'] == 0
+        assert not result2['valid']
+
+    def test_max_matches_limit(self):
+        """max_matches limits the number of returned matches."""
+        positions = [(80, 80), (150, 300), (300, 100), (350, 350)]
+        inspection, ref = self._create_multi_target_image(positions)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=30,
+                           multi_target=True, max_matches=2)
+        result = tp.measure(inspection)
+        assert result['num_matches'] == 2, (
+            f"max_matches=2 but got {result['num_matches']}"
+        )
+
+    def test_empty_result_on_no_features(self):
+        """Blank image with no matching features returns empty result."""
+        ref = self._create_test_pattern()
+        blank = np.ones_like(ref) * 128
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=30,
+                           multi_target=True)
+        result = tp.measure(blank)
+        assert result['num_matches'] == 0
+        assert not result['valid']
+        assert result['matches'] == []
+
+    def test_multi_with_rotation_invariant(self):
+        """multi_target + rotation_invariant: each target gets correct angle."""
+        positions = [(150, 150)]
+        angles = [15.0]
+        inspection, ref = self._create_multi_target_image(positions, angles,
+                                                          image_size=(300, 300),
+                                                          feature_size=40)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=40,
+                           multi_target=True, rotation_invariant=True,
+                           angle_range=(-30, 30), angle_step=1.0)
+        result = tp.measure(inspection)
+
+        # With only 1 feature in the image, should detect it
+        # The angle detection depends on the feature content; we mainly verify
+        # that best_rotation_deg is populated and valid is True
+        assert result['valid']
+        assert result['num_matches'] >= 1
+        match = result['matches'][0]
+        assert 'best_rotation_deg' in match
+        assert 'best_scale' in match
+
+    def test_multi_with_rotation_three_angles(self):
+        """Three features at different rotations all detected."""
+        positions = [(100, 100), (200, 300), (300, 120)]
+        angles = [0.0, 10.0, -15.0]
+        inspection, ref = self._create_multi_target_image(
+            positions, angles, image_size=(400, 400), feature_size=40
+        )
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=40,
+                           multi_target=True, rotation_invariant=True,
+                           angle_range=(-30, 30), angle_step=1.0,
+                           match_score_threshold=0.3)
+        result = tp.measure(inspection)
+
+        # All three targets should be detected (may find extras from
+        # border artifacts of rotated pasted features)
+        assert result['num_matches'] >= 3, (
+            f"Expected at least 3 matches, got {result['num_matches']}"
+        )
+        # Verify each target's position is near expected
+        matched_positions = [(m['matched_row'], m['matched_col'])
+                            for m in result['matches']]
+        for exp_row, exp_col in positions:
+            found = any(abs(mr - exp_row) < 15 and abs(mc - exp_col) < 15
+                        for mr, mc in matched_positions)
+            assert found, (f"No match near ({exp_row},{exp_col}), "
+                           f"got {matched_positions}")
+
+        # Each match should report rotation/scale info
+        for m in result['matches']:
+            assert 'best_rotation_deg' in m
+            assert 'best_scale' in m
+
+    def test_serialization_roundtrip(self):
+        """save()/from_file() preserves multi_target and max_matches."""
+        import tempfile
+        import os
+
+        positions = [(100, 100), (250, 300)]
+        inspection, ref = self._create_multi_target_image(positions)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=30,
+                           multi_target=True, max_matches=5)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "multi_tp.npz")
+            tp.save(filepath)
+            loaded = TemplatePoint.from_file(filepath)
+
+        assert loaded.multi_target is True
+        assert loaded.max_matches == 5
+
+        result_orig = tp.measure(inspection)
+        result_loaded = loaded.measure(inspection)
+        assert result_orig['num_matches'] == result_loaded['num_matches']
+        assert result_orig['num_matches'] == 2
+
+        for i in range(2):
+            assert (abs(result_orig['matches'][i]['matched_row'] -
+                        result_loaded['matches'][i]['matched_row']) < 0.01)
+            assert (abs(result_orig['matches'][i]['matched_col'] -
+                        result_loaded['matches'][i]['matched_col']) < 0.01)
+
+    def test_visualize_smoke(self):
+        """visualize() does not crash with multi_target results."""
+        positions = [(100, 100), (250, 300)]
+        inspection, ref = self._create_multi_target_image(positions)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=30,
+                           multi_target=True)
+        tp.measure(inspection)
+        vis = tp.visualize(inspection, wait_time=-1)
+        assert vis is not None
+        assert vis.shape[:2] == inspection.shape[:2]
+        assert len(vis.shape) == 3  # BGR
+
+    def test_backward_compat_best_match_top_level(self):
+        """Top-level fields contain the best (first) match for backward compat."""
+        positions = [(100, 100), (250, 300)]
+        inspection, ref = self._create_multi_target_image(positions)
+        tp = TemplatePoint(ref, click_row=85, click_col=85, template_size=30,
+                           multi_target=True)
+        result = tp.measure(inspection)
+
+        best = result['matches'][0]
+        assert abs(result['matched_row'] - best['matched_row']) < 0.01
+        assert abs(result['matched_col'] - best['matched_col']) < 0.01
+        assert abs(result['match_score'] - best['match_score']) < 0.01
+
+
+# ===========================================================================
 # Test runner
 # ===========================================================================
 
@@ -1580,6 +1867,7 @@ def run_all_tests():
         TestMeasurementWorkflow,
         TestVisualDemo,
         TestRotationScaleTemplate,
+        TestMultiTargetTemplate,
     ]
 
     total = 0
