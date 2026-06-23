@@ -492,6 +492,8 @@ class TemplatePointObject(MeasureObject):
         coarse_fine: bool = True,
         coarse_angle_step: float = 5.0,
         coarse_scale_step: float = 0.1,
+        multi_target: bool = False,
+        max_matches: int = 0,
     ):
         super().__init__(label)
         self._template_point = TemplatePoint(
@@ -511,6 +513,8 @@ class TemplatePointObject(MeasureObject):
             coarse_fine=coarse_fine,
             coarse_angle_step=coarse_angle_step,
             coarse_scale_step=coarse_scale_step,
+            multi_target=multi_target,
+            max_matches=max_matches,
         )
         self._teach_row = click_row
         self._teach_col = click_col
@@ -531,6 +535,8 @@ class TemplatePointObject(MeasureObject):
         self._coarse_fine = coarse_fine
         self._coarse_angle_step = coarse_angle_step
         self._coarse_scale_step = coarse_scale_step
+        self._multi_target = multi_target
+        self._max_matches = max_matches
 
     def result_type(self) -> str:
         return "point"
@@ -559,6 +565,46 @@ class TemplatePointObject(MeasureObject):
         )
         self.result = result
         return result
+
+    def measure_all(self, image: np.ndarray) -> list:
+        """
+        Multi-target mode: return all detected matches as PointResult list.
+
+        In single-target mode (multi_target=False), returns a list containing
+        the single best match (same as measure()).
+
+        Returns:
+            List of PointResult, one per detected target, sorted by
+            match_score descending.  Returns an empty list if no match
+            is found.
+        """
+        raw = self._template_point.measure(image, self.search_region)
+        matches = raw.get('matches', [])
+        if not matches:
+            return []
+        if len(matches) == 1:
+            single = self.measure(image)
+            return [single]
+
+        results = []
+        for i, m in enumerate(matches):
+            label = f"{self.label}_{i}" if i > 0 else self.label
+            results.append(PointResult(
+                label=label,
+                row=m['matched_row'],
+                col=m['matched_col'],
+                valid=m['valid'],
+                meta={
+                    'match_score': m['match_score'],
+                    'dx': m['dx'],
+                    'dy': m['dy'],
+                    'teach_row': self._teach_row,
+                    'teach_col': self._teach_col,
+                    'best_rotation_deg': m.get('best_rotation_deg', 0.0),
+                    'best_scale': m.get('best_scale', 1.0),
+                },
+            ))
+        return results
 
     def to_dict(self) -> Dict[str, Any]:
         tp = self._template_point
@@ -594,6 +640,8 @@ class TemplatePointObject(MeasureObject):
             "coarse_fine": self._coarse_fine,
             "coarse_angle_step": self._coarse_angle_step,
             "coarse_scale_step": self._coarse_scale_step,
+            "multi_target": self._multi_target,
+            "max_matches": self._max_matches,
         }
 
     @classmethod
@@ -631,6 +679,8 @@ class TemplatePointObject(MeasureObject):
         tp.coarse_fine = data.get("coarse_fine", True)
         tp.coarse_angle_step = data.get("coarse_angle_step", 5.0)
         tp.coarse_scale_step = data.get("coarse_scale_step", 0.1)
+        tp.multi_target = data.get("multi_target", False)
+        tp.max_matches = data.get("max_matches", 0)
 
         obj._template_point = tp
         obj._teach_row = data["teach_row"]
@@ -652,6 +702,8 @@ class TemplatePointObject(MeasureObject):
         obj._coarse_fine = data.get("coarse_fine", True)
         obj._coarse_angle_step = data.get("coarse_angle_step", 5.0)
         obj._coarse_scale_step = data.get("coarse_scale_step", 0.1)
+        obj._multi_target = data.get("multi_target", False)
+        obj._max_matches = data.get("max_matches", 0)
         return obj
 
     def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:
