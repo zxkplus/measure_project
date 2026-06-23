@@ -1,0 +1,1298 @@
+"""
+Multi-target measurement workflow orchestrator.
+
+Wraps the existing TemplatePoint (multi-target matching) and
+MeasurementWorkflow (composable measurements) into a unified
+"teach once, measure many targets" workflow.
+
+Architecture:
+  Teaching phase:
+    1. User draws rotated box on reference image
+    2. crop_and_straighten() -> template image
+    3. User defines measurement tools on the straightened template
+    4. Save template + measurement defs + matching params to .npz
+
+  Inspection phase:
+    1. Load project
+    2. Run multi-target template matching on inspection image
+    3. For each matched target:
+       a. crop_and_straighten() the target from inspection image
+       b. Run all measurement tools on the straightened patch
+       c. Map results back to inspection coordinates
+    4. Aggregate and return all results
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+import cv2
+import numpy as np
+
+from measure_workflow import (
+    EdgePairObject,
+    EdgePointObject,
+    FitCircleObject,
+    FitLineObject,
+    MeasurementWorkflow,
+    PointCircleDistanceObject,
+    PointLineDistanceObject,
+    TwoLinesAngleObject,
+    TwoPointsDistanceObject,
+    TwoPointsLineObject,
+)
+from measure_template import (
+    Preprocessor,
+    RawPreprocessor,
+    TemplatePoint,
+    _PREPROCESSOR_REGISTRY,
+    _deserialize_preprocessor,
+)
+
+from .utils import crop_and_straighten, map_point_to_original
+
+
+# ===========================================================================
+# TargetResult — per-target measurement results
+# ===========================================================================
+
+
+@dataclass
+class TargetResult:
+    """Aggregated measurement results for a single matched target."""
+
+    id: int
+    score: float
+    rotation_deg: float
+    scale: float
+    center_row: float
+    center_col: float
+    valid: bool
+    measurements: Dict[str, Any] = field(default_factory=dict)
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "score": self.score,
+            "rotation_deg": self.rotation_deg,
+            "scale": self.scale,
+            "center_row": self.center_row,
+            "center_col": self.center_col,
+            "valid": self.valid,
+            "measurements": {
+                label: _result_to_dict(r)
+                for label, r in self.measurements.items()
+            },
+            "meta": self.meta,
+        }
+
+    def summary_text(self) -> str:
+        """Single-line summary for target list display."""
+        return (
+            f"[Target #{self.id}] score={self.score:.3f}, "
+            f"rot={self.rotation_deg:.1f}°, "
+            f"center=({self.center_row:.1f}, {self.center_col:.1f}), "
+            f"{'✓' if self.valid else '✗'}"
+        )
+
+
+def _result_to_dict(result) -> Dict[str, Any]:
+    """Convert a GeometricResult to a plain dict."""
+    if result is None:
+        return {"valid": False}
+    d = {
+        "type": result.type,
+        "label": result.label,
+        "valid": result.valid,
+    }
+    # Add type-specific values
+    if hasattr(result, "row") and hasattr(result, "col"):
+        d["row"] = result.row
+        d["col"] = result.col
+    if hasattr(result, "value"):
+        d["value"] = result.value
+    if hasattr(result, "a") and hasattr(result, "b") and hasattr(result, "c"):
+        d["a"] = result.a
+        d["b"] = result.b
+        d["c"] = result.c
+    if hasattr(result, "start_row"):
+        d["start_row"] = result.start_row
+        d["start_col"] = result.start_col
+        d["end_row"] = result.end_row
+        d["end_col"] = result.end_col
+    if hasattr(result, "radius"):
+        d["radius"] = result.radius
+        d["center_row"] = result.center_row
+        d["center_col"] = result.center_col
+    if hasattr(result, "value_deg"):
+        d["value_deg"] = result.value_deg
+    if result.meta:
+        d["meta"] = result.meta
+    return d
+
+
+# ===========================================================================
+# Known object types for serialization
+# ===========================================================================
+
+# Maps object_type string -> (constructor_fn, params_from_dict_fn)
+_OBJECT_FACTORIES: Dict[str, Tuple] = {}
+
+
+def _register_factory(type_name: str, factory, param_keys: List[str]):
+    _OBJECT_FACTORIES[type_name] = (factory, param_keys)
+
+
+# Primitive factories: each takes (label, **params) and returns a MeasureObject
+def _make_edge_point(label: str, **p) -> EdgePointObject:
+    return EdgePointObject(
+        label=label,
+        row=p["row"],
+        col=p["col"],
+        angle=p["angle"],
+        length1=p["length1"],
+        length2=p["length2"],
+        sigma=p.get("sigma", 1.0),
+        threshold=p.get("threshold", 30.0),
+        transition=p.get("transition", "all"),
+        select=p.get("select", "first"),
+        interpolation=p.get("interpolation", "linear"),
+    )
+
+
+def _make_edge_pair(label: str, **p) -> EdgePairObject:
+    return EdgePairObject(
+        label=label,
+        row=p["row"],
+        col=p["col"],
+        angle=p["angle"],
+        length1=p["length1"],
+        length2=p["length2"],
+        sigma=p.get("sigma", 1.0),
+        threshold=p.get("threshold", 30.0),
+        transition=p.get("transition", "negative"),
+        select=p.get("select", "first"),
+        interpolation=p.get("interpolation", "linear"),
+    )
+
+
+def _make_fit_line(label: str, **p) -> FitLineObject:
+    return FitLineObject(
+        label=label,
+        start=p["start"],
+        end=p["end"],
+        measure_length1=p["measure_length1"],
+        measure_length2=p["measure_length2"],
+        num_measures=p.get("num_measures", 10),
+        sigma=p.get("sigma", 1.0),
+        threshold=p.get("threshold", 30.0),
+        transition=p.get("transition", "all"),
+    )
+
+
+def _make_fit_circle(label: str, **p) -> FitCircleObject:
+    return FitCircleObject(
+        label=label,
+        center=p["center"],
+        radius=p["radius"],
+        radius_min=p["radius_min"],
+        radius_max=p["radius_max"],
+        measure_length1=p["measure_length1"],
+        measure_length2=p["measure_length2"],
+        num_measures=p.get("num_measures", 12),
+        sigma=p.get("sigma", 1.0),
+        threshold=p.get("threshold", 30.0),
+        transition=p.get("transition", "all"),
+        start_phi=p.get("start_phi", 0.0),
+        end_phi=p.get("end_phi", 2 * np.pi),
+    )
+
+
+def _make_two_points_line(label: str, **p) -> TwoPointsLineObject:
+    return TwoPointsLineObject(
+        label=label,
+        point_a_label=p["point_a_label"],
+        point_b_label=p["point_b_label"],
+    )
+
+
+def _make_two_points_distance(label: str, **p) -> TwoPointsDistanceObject:
+    return TwoPointsDistanceObject(
+        label=label,
+        point_a_label=p["point_a_label"],
+        point_b_label=p["point_b_label"],
+    )
+
+
+def _make_point_line_distance(label: str, **p) -> PointLineDistanceObject:
+    return PointLineDistanceObject(
+        label=label,
+        point_label=p["point_label"],
+        line_label=p["line_label"],
+    )
+
+
+def _make_two_lines_angle(label: str, **p) -> TwoLinesAngleObject:
+    return TwoLinesAngleObject(
+        label=label,
+        line_a_label=p["line_a_label"],
+        line_b_label=p["line_b_label"],
+    )
+
+
+def _make_point_circle_distance(label: str, **p) -> PointCircleDistanceObject:
+    return PointCircleDistanceObject(
+        label=label,
+        point_label=p["point_label"],
+        circle_label=p["circle_label"],
+    )
+
+
+_OBJECT_FACTORIES = {
+    "EdgePoint": (_make_edge_point, [
+        "row", "col", "angle", "length1", "length2",
+        "sigma", "threshold", "transition", "select", "interpolation",
+    ]),
+    "EdgePair": (_make_edge_pair, [
+        "row", "col", "angle", "length1", "length2",
+        "sigma", "threshold", "transition", "select", "interpolation",
+    ]),
+    "FitLine": (_make_fit_line, [
+        "start", "end", "measure_length1", "measure_length2",
+        "num_measures", "sigma", "threshold", "transition",
+    ]),
+    "FitCircle": (_make_fit_circle, [
+        "center", "radius", "radius_min", "radius_max",
+        "measure_length1", "measure_length2", "num_measures",
+        "sigma", "threshold", "transition", "start_phi", "end_phi",
+    ]),
+    "TwoPointsLine": (_make_two_points_line, [
+        "point_a_label", "point_b_label",
+    ]),
+    "TwoPointsDistance": (_make_two_points_distance, [
+        "point_a_label", "point_b_label",
+    ]),
+    "PointLineDistance": (_make_point_line_distance, [
+        "point_label", "line_label",
+    ]),
+    "TwoLinesAngle": (_make_two_lines_angle, [
+        "line_a_label", "line_b_label",
+    ]),
+    "PointCircleDistance": (_make_point_circle_distance, [
+        "point_label", "circle_label",
+    ]),
+}
+
+
+# ===========================================================================
+# MultiTargetWorkflow
+# ===========================================================================
+
+
+class MultiTargetWorkflow:
+    """
+    Multi-target measurement workflow.
+
+    Teaching:
+        wf = MultiTargetWorkflow()
+        wf.teach_template(ref_img, center=(200, 300), size=(120, 180), angle_deg=15)
+        wf.add_measurement("EdgePoint", "edge_top", row=10, col=60, angle=0, length1=50, length2=5)
+        wf.add_measurement("EdgePoint", "edge_bot", row=110, col=60, angle=0, length1=50, length2=5)
+        wf.add_measurement("TwoPointsDistance", "gap", point_a_label="edge_top", point_b_label="edge_bot")
+        wf.save("project.mtwf")
+
+    Inspection:
+        wf = MultiTargetWorkflow.load("project.mtwf")
+        results = wf.measure(insp_img)
+        for r in results:
+            print(r.summary_text())
+            for label, m in r.measurements.items():
+                print(f"  {label}: {m}")
+        vis = wf.visualize(insp_img)
+    """
+
+    def __init__(self):
+        # Template matching
+        self._template_point: Optional[TemplatePoint] = None
+        self._preprocessor: Optional[Preprocessor] = None
+        self._match_score_threshold: float = 0.5
+        self._angle_range: Tuple[float, float] = (-30.0, 30.0)
+        self._angle_step: float = 1.0
+        self._max_matches: int = 0
+        self._coarse_fine: bool = True
+        self._coarse_angle_step: float = 5.0
+
+        # Rotated box params (for crop_and_straighten)
+        self._box_center: Tuple[float, float] = (0.0, 0.0)
+        self._box_size: Tuple[float, float] = (0.0, 0.0)
+        self._box_angle_deg: float = 0.0
+        self._template_size: int = 80
+
+        # Measurement definitions (ordered list)
+        self._measurement_defs: List[Dict[str, Any]] = []
+
+        # Saved reference image (needed for template creation on load)
+        self._reference_image: Optional[np.ndarray] = None
+        self._template_image: Optional[np.ndarray] = None
+
+        # Last results
+        self._results: List[TargetResult] = []
+        self._last_inspection_image: Optional[np.ndarray] = None
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
+    @property
+    def template_image(self) -> Optional[np.ndarray]:
+        """The straightened template image (for display in GUI)."""
+        return self._template_image
+
+    @property
+    def box_center(self) -> Tuple[float, float]:
+        return self._box_center
+
+    @property
+    def box_size(self) -> Tuple[float, float]:
+        return self._box_size
+
+    @property
+    def box_angle_deg(self) -> float:
+        return self._box_angle_deg
+
+    @property
+    def measurement_defs(self) -> List[Dict[str, Any]]:
+        return list(self._measurement_defs)
+
+    @property
+    def results(self) -> List[TargetResult]:
+        return list(self._results)
+
+    @property
+    def angle_range(self) -> Tuple[float, float]:
+        return self._angle_range
+
+    @angle_range.setter
+    def angle_range(self, value: Tuple[float, float]):
+        self._angle_range = value
+
+    @property
+    def match_score_threshold(self) -> float:
+        return self._match_score_threshold
+
+    @match_score_threshold.setter
+    def match_score_threshold(self, value: float):
+        self._match_score_threshold = value
+
+    @property
+    def max_matches(self) -> int:
+        return self._max_matches
+
+    @max_matches.setter
+    def max_matches(self, value: int):
+        self._max_matches = value
+
+    @property
+    def preprocessor_type(self) -> str:
+        if self._preprocessor is None:
+            return "raw"
+        return self._preprocessor.name
+
+    # ------------------------------------------------------------------
+    # Teaching
+    # ------------------------------------------------------------------
+
+    def teach_template(
+        self,
+        reference_image: np.ndarray,
+        center: Tuple[float, float],
+        size: Tuple[float, float],
+        angle_deg: float,
+        preprocessor: Optional[Preprocessor] = None,
+        match_score_threshold: float = 0.5,
+        angle_range: Tuple[float, float] = (-30.0, 30.0),
+        angle_step: float = 1.0,
+        max_matches: int = 0,
+        coarse_fine: bool = True,
+        coarse_angle_step: float = 5.0,
+    ):
+        """
+        Define the template from a rotated bounding box on the reference image.
+
+        Args:
+            reference_image: Grayscale reference image.
+            center: (row, col) center of the rotated box.
+            size: (height, width) of the box (in unrotated space).
+            angle_deg: Rotation angle of the box in degrees.
+            preprocessor: Preprocessor for template matching (default RawPreprocessor).
+            match_score_threshold: Minimum NCC score for valid match.
+            angle_range: (min, max) search range in degrees.
+            angle_step: Step size for fine angle search.
+            max_matches: Max matches to return (0 = unlimited).
+            coarse_fine: Use two-stage coarse-to-fine search.
+            coarse_angle_step: Step size for coarse angle search.
+        """
+        self._reference_image = reference_image.copy()
+        self._box_center = (float(center[0]), float(center[1]))
+        self._box_size = (float(size[0]), float(size[1]))
+        self._box_angle_deg = float(angle_deg)
+        self._preprocessor = preprocessor
+        self._match_score_threshold = match_score_threshold
+        self._angle_range = angle_range
+        self._angle_step = angle_step
+        self._max_matches = max_matches
+        self._coarse_fine = coarse_fine
+        self._coarse_angle_step = coarse_angle_step
+
+        # Crop and straighten to create the template image
+        template_size = int(max(size))
+        self._template_size = template_size
+        self._template_image, _ = crop_and_straighten(
+            reference_image, center, size, angle_deg
+        )
+
+        # Create TemplatePoint for multi-target matching
+        # Use the box center as the click point
+        self._template_point = TemplatePoint(
+            reference_image,
+            click_row=center[0],
+            click_col=center[1],
+            template_size=template_size,
+            preprocessor=preprocessor,
+            match_score_threshold=match_score_threshold,
+            use_subpixel=True,
+            rotation_invariant=True,
+            angle_range=angle_range,
+            angle_step=angle_step,
+            coarse_fine=coarse_fine,
+            coarse_angle_step=coarse_angle_step,
+            multi_target=True,
+            max_matches=max_matches,
+        )
+
+    def add_measurement(self, object_type: str, label: str, **params):
+        """
+        Add a measurement definition.
+
+        Args:
+            object_type: One of 'EdgePoint', 'EdgePair', 'FitLine', 'FitCircle',
+                        'TwoPointsLine', 'TwoPointsDistance', 'PointLineDistance',
+                        'TwoLinesAngle', 'PointCircleDistance'.
+            label: Unique label for this measurement.
+            **params: Parameters for the measurement object constructor.
+                     Coordinates should be in the **straightened template** space.
+        """
+        if object_type not in _OBJECT_FACTORIES:
+            raise ValueError(
+                f"Unknown object_type: {object_type}. "
+                f"Known types: {list(_OBJECT_FACTORIES.keys())}"
+            )
+
+        # Validate params completeness
+        _, expected_keys = _OBJECT_FACTORIES[object_type]
+        for key in expected_keys:
+            if key not in params and key not in _get_defaults(object_type):
+                raise ValueError(
+                    f"Missing required parameter '{key}' for {object_type}"
+                )
+
+        # Merge defaults
+        full_params = _get_defaults(object_type).copy()
+        full_params.update(params)
+
+        self._measurement_defs.append({
+            "object_type": object_type,
+            "label": label,
+            "params": full_params,
+        })
+        return self
+
+    def remove_measurement(self, label: str):
+        """Remove a measurement definition by label."""
+        self._measurement_defs = [
+            d for d in self._measurement_defs if d["label"] != label
+        ]
+        # Also remove any composed measurements that reference this label
+        self._measurement_defs = [
+            d for d in self._measurement_defs
+            if not _references_label(d, label)
+        ]
+
+    def clear_measurements(self):
+        """Remove all measurement definitions."""
+        self._measurement_defs = []
+
+    def move_measurement_up(self, label: str):
+        """Move a measurement up in the execution order."""
+        for i, d in enumerate(self._measurement_defs):
+            if d["label"] == label and i > 0:
+                self._measurement_defs[i], self._measurement_defs[i - 1] = (
+                    self._measurement_defs[i - 1],
+                    self._measurement_defs[i],
+                )
+                break
+
+    def move_measurement_down(self, label: str):
+        """Move a measurement down in the execution order."""
+        for i, d in enumerate(self._measurement_defs):
+            if d["label"] == label and i < len(self._measurement_defs) - 1:
+                self._measurement_defs[i], self._measurement_defs[i + 1] = (
+                    self._measurement_defs[i + 1],
+                    self._measurement_defs[i],
+                )
+                break
+
+    # ------------------------------------------------------------------
+    # Inspection
+    # ------------------------------------------------------------------
+
+    def measure(self, inspection_image: np.ndarray) -> List[TargetResult]:
+        """
+        Execute multi-target measurement on an inspection image.
+
+        Steps:
+        1. Multi-target template matching
+        2. For each match: crop+straighten, run measurements, map results back
+
+        Args:
+            inspection_image: Grayscale inspection image.
+
+        Returns:
+            List of TargetResult, one per detected target.
+        """
+        self._last_inspection_image = inspection_image.copy()
+        self._results = []
+
+        if self._template_point is None:
+            raise RuntimeError("No template defined. Call teach_template() first.")
+
+        # Step 1: Multi-target matching
+        match_result = self._template_point.measure(inspection_image)
+        matches = match_result.get("matches", [])
+
+        if not matches:
+            # Try single-target result
+            if match_result.get("valid", False):
+                matches = [match_result]
+            else:
+                return []
+
+        # Step 2: Process each match
+        for i, m in enumerate(matches):
+            target_result = self._measure_one_target(inspection_image, m, i)
+            self._results.append(target_result)
+
+        return self._results
+
+    def _measure_one_target(
+        self,
+        inspection_image: np.ndarray,
+        match: Dict[str, Any],
+        index: int,
+    ) -> TargetResult:
+        """Run all measurements on a single matched target.
+
+        Rather than using MeasurementWorkflow (which requires localization
+        calibration and complex dependency resolution), we directly:
+        1. Create and run each measurement object on the straightened patch
+        2. Compute composed measurements from the collected results
+        3. Map point results back to inspection image coordinates
+        """
+        matched_row = match["matched_row"]
+        matched_col = match["matched_col"]
+        match_score = match.get("match_score", 0.0)
+        rotation_deg = match.get("best_rotation_deg", 0.0)
+        scale = match.get("best_scale", 1.0)
+        valid_match = match.get("valid", True)
+
+        if not valid_match:
+            return TargetResult(
+                id=index,
+                score=match_score,
+                rotation_deg=rotation_deg,
+                scale=scale,
+                center_row=matched_row,
+                center_col=matched_col,
+                valid=False,
+                meta={"reason": "match below threshold"},
+            )
+
+        # Crop and straighten the target from the inspection image
+        # The match rotation_deg represents the target's rotation relative
+        # to the unrotated template (which was straightened from box_angle).
+        # So the target's absolute rotation in the inspection image is rotation_deg.
+        target_angle = rotation_deg
+
+        patch, M_inv = crop_and_straighten(
+            inspection_image,
+            (matched_row, matched_col),
+            self._box_size,
+            target_angle,
+        )
+
+        # Run measurements directly on the straightened patch
+        raw_results: Dict[str, Any] = {}  # label -> GeometricResult
+        all_valid = True
+
+        try:
+            for d in self._measurement_defs:
+                obj_type = d["object_type"]
+                label = d["label"]
+                params = d["params"]
+
+                if obj_type in ("EdgePoint", "EdgePair", "FitLine", "FitCircle"):
+                    # Primitive: create object and measure on patch
+                    factory, _ = _OBJECT_FACTORIES[obj_type]
+                    obj = factory(label, **params)
+                    result = obj.measure(patch)
+                    raw_results[label] = result
+                    if not result.valid:
+                        all_valid = False
+
+                elif obj_type == "TwoPointsLine":
+                    p1 = raw_results.get(params["point_a_label"])
+                    p2 = raw_results.get(params["point_b_label"])
+                    if p1 and p2 and p1.valid and p2.valid:
+                        dr = p2.row - p1.row
+                        dc = p2.col - p1.col
+                        norm = np.sqrt(dr**2 + dc**2)
+                        if norm > 1e-10:
+                            from measure_workflow import LineResult
+                            a = dc / norm
+                            b = -dr / norm
+                            c = -(a * p1.row + b * p1.col)
+                            result = LineResult(
+                                label=label, a=a, b=b, c=c,
+                                start_row=p1.row, start_col=p1.col,
+                                end_row=p2.row, end_col=p2.col,
+                                valid=True,
+                                meta={"point_a_label": params["point_a_label"],
+                                      "point_b_label": params["point_b_label"],
+                                      "length": norm},
+                            )
+                        else:
+                            from measure_workflow import LineResult
+                            result = LineResult(label=label, valid=False,
+                                               meta={"reason": "coincident points"})
+                    else:
+                        from measure_workflow import LineResult
+                        result = LineResult(label=label, valid=False,
+                                           meta={"reason": "input points invalid"})
+                    raw_results[label] = result
+
+                elif obj_type == "TwoPointsDistance":
+                    p1 = raw_results.get(params["point_a_label"])
+                    p2 = raw_results.get(params["point_b_label"])
+                    if p1 and p2 and p1.valid and p2.valid:
+                        dr = p2.row - p1.row
+                        dc = p2.col - p1.col
+                        dist = np.sqrt(dr**2 + dc**2)
+                        from measure_workflow import DistanceResult
+                        result = DistanceResult(label=label, value=dist, valid=True)
+                    else:
+                        from measure_workflow import DistanceResult
+                        result = DistanceResult(label=label, value=0.0, valid=False)
+                    raw_results[label] = result
+
+                elif obj_type == "PointLineDistance":
+                    pt = raw_results.get(params["point_label"])
+                    line = raw_results.get(params["line_label"])
+                    if (pt and line and pt.valid and line.valid and
+                        hasattr(line, "a") and hasattr(line, "b") and hasattr(line, "c")):
+                        dist = abs(line.a * pt.row + line.b * pt.col + line.c) / \
+                               np.sqrt(line.a**2 + line.b**2 + 1e-10)
+                        from measure_workflow import DistanceResult
+                        result = DistanceResult(label=label, value=dist, valid=True)
+                    else:
+                        from measure_workflow import DistanceResult
+                        result = DistanceResult(label=label, value=0.0, valid=False)
+                    raw_results[label] = result
+
+                elif obj_type == "TwoLinesAngle":
+                    l1 = raw_results.get(params["line_a_label"])
+                    l2 = raw_results.get(params["line_b_label"])
+                    if (l1 and l2 and l1.valid and l2.valid and
+                        hasattr(l1, "start_row") and hasattr(l2, "start_row")):
+                        # Compute angle between two lines
+                        dr1 = l1.end_row - l1.start_row
+                        dc1 = l1.end_col - l1.start_col
+                        dr2 = l2.end_row - l2.start_row
+                        dc2 = l2.end_col - l2.start_col
+                        a1 = np.arctan2(dc1, dr1)
+                        a2 = np.arctan2(dc2, dr2)
+                        angle_rad = a2 - a1
+                        # Normalize to [-pi/2, pi/2]
+                        while angle_rad > np.pi / 2:
+                            angle_rad -= np.pi
+                        while angle_rad < -np.pi / 2:
+                            angle_rad += np.pi
+                        from measure_workflow import AngleResult
+                        result = AngleResult(label=label,
+                                            value_rad=abs(angle_rad), valid=True)
+                    else:
+                        from measure_workflow import AngleResult
+                        result = AngleResult(label=label, value_rad=0.0, valid=False)
+                    raw_results[label] = result
+
+                elif obj_type == "PointCircleDistance":
+                    pt = raw_results.get(params["point_label"])
+                    circ = raw_results.get(params["circle_label"])
+                    if (pt and circ and pt.valid and circ.valid and
+                        hasattr(circ, "center_row") and hasattr(circ, "radius")):
+                        dr = pt.row - circ.center_row
+                        dc = pt.col - circ.center_col
+                        dist = abs(np.sqrt(dr**2 + dc**2) - circ.radius)
+                        from measure_workflow import DistanceResult
+                        result = DistanceResult(label=label, value=dist, valid=True)
+                    else:
+                        from measure_workflow import DistanceResult
+                        result = DistanceResult(label=label, value=0.0, valid=False)
+                    raw_results[label] = result
+
+        except Exception as e:
+            all_valid = False
+            raw_results["_error"] = str(e)
+
+        # Map point results back to original image coordinates
+        measurements = {}
+        for label, result in raw_results.items():
+            if label == "_error":
+                measurements["_error"] = result
+            else:
+                measurements[label] = _map_result_to_original(result, M_inv)
+
+        return TargetResult(
+            id=index + 1,
+            score=match_score,
+            rotation_deg=rotation_deg,
+            scale=scale,
+            center_row=matched_row,
+            center_col=matched_col,
+            valid=valid_match and all_valid,
+            measurements=measurements,
+            meta={
+                "match_score": match_score,
+                "patch_shape": patch.shape,
+                "M_inv": M_inv,  # Not JSON-serializable, used internally
+            },
+        )
+
+    def _build_workflow(self) -> MeasurementWorkflow:
+        """Build a MeasurementWorkflow from stored definitions."""
+        wf = MeasurementWorkflow()
+        for d in self._measurement_defs:
+            obj_type = d["object_type"]
+            label = d["label"]
+            params = d["params"]
+
+            factory, _ = _OBJECT_FACTORIES[obj_type]
+            obj = factory(label, **params)
+            wf.add(obj)
+
+        return wf
+
+    # ------------------------------------------------------------------
+    # Visualization
+    # ------------------------------------------------------------------
+
+    def visualize(
+        self,
+        inspection_image: Optional[np.ndarray] = None,
+        color_palette: Optional[List[Tuple[int, int, int]]] = None,
+    ) -> np.ndarray:
+        """
+        Render all matched targets and their measurements on the inspection image.
+
+        Args:
+            inspection_image: Inspection image. Uses last measure() image if None.
+            color_palette: List of BGR colors for each target.
+
+        Returns:
+            Annotated BGR image.
+        """
+        if inspection_image is None:
+            if self._last_inspection_image is None:
+                raise ValueError("No inspection image available.")
+            inspection_image = self._last_inspection_image
+
+        if len(inspection_image.shape) == 2:
+            vis = cv2.cvtColor(inspection_image, cv2.COLOR_GRAY2BGR)
+        else:
+            vis = inspection_image.copy()
+
+        if color_palette is None:
+            color_palette = [
+                (0, 255, 0),     # green
+                (0, 255, 255),   # yellow
+                (255, 0, 255),   # magenta
+                (255, 255, 0),   # cyan
+                (0, 165, 255),   # orange
+                (255, 0, 0),     # blue
+                (128, 0, 128),   # dark magenta
+                (0, 128, 128),   # dark yellow
+            ]
+
+        for target in self._results:
+            color = color_palette[target.id % len(color_palette)]
+
+            # Draw rotated box around matched target
+            if target.valid:
+                corners = _compute_target_box_corners(target, self._box_size)
+                pts = corners.astype(np.int32).reshape((-1, 1, 2))
+                # Convert from (row, col) to (x, y) for OpenCV
+                pts_xy = pts[:, :, ::-1]
+                cv2.polylines(vis, [pts_xy], True, color, thickness=2)
+
+                # Label the target
+                label_text = f"T#{target.id} s={target.score:.2f} r={target.rotation_deg:.1f}"
+                cv2.putText(
+                    vis,
+                    label_text,
+                    (int(target.center_col) + 5, int(target.center_row) - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    color,
+                    1,
+                    cv2.LINE_AA,
+                )
+
+                # Draw measurement results for this target
+                for label, result in target.measurements.items():
+                    if isinstance(result, dict):
+                        _draw_result_on_image(vis, result, color)
+                    elif hasattr(result, "valid") and result.valid:
+                        _draw_geometric_result(vis, result, color)
+
+        # Draw summary at bottom
+        summary = (
+            f"MultiTarget: {len(self._results)} targets, "
+            f"{sum(1 for t in self._results if t.valid)} valid"
+        )
+        cv2.putText(
+            vis,
+            summary,
+            (10, vis.shape[0] - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+        return vis
+
+    # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
+
+    def save(self, filepath: str) -> None:
+        """
+        Save the entire workflow to a .npz file.
+
+        Args:
+            filepath: Path for the .npz file.
+        """
+        if self._template_point is None:
+            raise RuntimeError("No template defined. Call teach_template() first.")
+
+        tp = self._template_point
+
+        meta = {
+            "version": 1,
+            "box_center": list(self._box_center),
+            "box_size": list(self._box_size),
+            "box_angle_deg": self._box_angle_deg,
+            "template_size": self._template_size,
+            "match_score_threshold": self._match_score_threshold,
+            "angle_range": list(self._angle_range),
+            "angle_step": self._angle_step,
+            "max_matches": self._max_matches,
+            "coarse_fine": self._coarse_fine,
+            "coarse_angle_step": self._coarse_angle_step,
+            "preprocessor_data": tp.preprocessor.serialize(),
+            "click_row": tp.click_row,
+            "click_col": tp.click_col,
+            "crop_center_row": tp._crop_center_row,
+            "crop_center_col": tp._crop_center_col,
+            "crop_h": tp._crop_h,
+            "crop_w": tp._crop_w,
+            "measurement_defs": self._measurement_defs,
+        }
+
+        save_dict = {
+            "workflow_meta": np.array([json.dumps(meta)], dtype=np.object_),
+            "edge_template": tp.edge_template,
+            "template_image": self._template_image,
+            "reference_image": self._reference_image,
+        }
+
+        np.savez_compressed(filepath, **save_dict)
+
+    @classmethod
+    def load(cls, filepath: str) -> "MultiTargetWorkflow":
+        """
+        Load a workflow from a .npz file.
+
+        Args:
+            filepath: Path to a .npz file saved by MultiTargetWorkflow.save().
+
+        Returns:
+            A fully reconstructed MultiTargetWorkflow ready for measure().
+        """
+        data = np.load(filepath, allow_pickle=True)
+
+        meta_raw = data["workflow_meta"]
+        if isinstance(meta_raw, np.ndarray) and meta_raw.dtype == np.object_:
+            meta = json.loads(str(meta_raw[0]))
+        else:
+            meta = json.loads(str(meta_raw))
+
+        if meta.get("version", 0) != 1:
+            raise ValueError(
+                f"Unsupported project file version: {meta.get('version')}. "
+                f"Expected version 1."
+            )
+
+        wf = cls()
+
+        # Restore box and matching params
+        wf._box_center = tuple(meta["box_center"])
+        wf._box_size = tuple(meta["box_size"])
+        wf._box_angle_deg = meta["box_angle_deg"]
+        wf._template_size = meta["template_size"]
+        wf._match_score_threshold = meta["match_score_threshold"]
+        wf._angle_range = tuple(meta["angle_range"])
+        wf._angle_step = meta["angle_step"]
+        wf._max_matches = meta["max_matches"]
+        wf._coarse_fine = meta["coarse_fine"]
+        wf._coarse_angle_step = meta["coarse_angle_step"]
+
+        # Restore preprocessor
+        wf._preprocessor = _deserialize_preprocessor(meta["preprocessor_data"])
+
+        # Restore template image and reference image
+        if "template_image" in data:
+            wf._template_image = data["template_image"]
+        if "reference_image" in data:
+            wf._reference_image = data["reference_image"]
+
+        # Reconstruct TemplatePoint
+        tp = TemplatePoint.__new__(TemplatePoint)
+        tp.click_row = meta["click_row"]
+        tp.click_col = meta["click_col"]
+        tp.template_size = meta["template_size"]
+        tp.match_score_threshold = meta["match_score_threshold"]
+        tp.use_subpixel = True
+        tp.edge_template = data["edge_template"]
+        tp._crop_center_row = meta["crop_center_row"]
+        tp._crop_center_col = meta["crop_center_col"]
+        tp._crop_h = meta["crop_h"]
+        tp._crop_w = meta["crop_w"]
+        tp._actual_crop_bounds = (
+            0, tp._crop_h, 0, tp._crop_w
+        )
+        tp.preprocessor = wf._preprocessor
+        tp.rotation_invariant = True
+        tp.angle_range = wf._angle_range
+        tp.angle_step = wf._angle_step
+        tp.scale_invariant = False
+        tp.scale_range = (0.9, 1.1)
+        tp.scale_step = 0.02
+        tp.coarse_fine = wf._coarse_fine
+        tp.coarse_angle_step = wf._coarse_angle_step
+        tp.coarse_scale_step = 0.1
+        tp.multi_target = True
+        tp.max_matches = wf._max_matches
+        tp.result = None
+        wf._template_point = tp
+
+        # Restore measurement definitions
+        wf._measurement_defs = meta.get("measurement_defs", [])
+
+        return wf
+
+    def summary_text(self) -> str:
+        """
+        Generate a human-readable summary of all results.
+
+        This corresponds to the user's requirement Step 5:
+        "在一个文本框输出每个目标的测量结果"
+        """
+        lines = []
+        lines.append("=" * 60)
+        lines.append("测量结果汇总 (Multi-Target Measurement Results)")
+        lines.append("=" * 60)
+
+        if not self._results:
+            lines.append("(无结果 / No results)")
+            return "\n".join(lines)
+
+        lines.append(f"共检测到 {len(self._results)} 个目标")
+        lines.append(f"其中有效目标: {sum(1 for t in self._results if t.valid)}")
+        lines.append("")
+
+        for target in self._results:
+            lines.append(
+                f"[Target #{target.id}] "
+                f"score={target.score:.4f}, "
+                f"rotation={target.rotation_deg:.2f}°, "
+                f"center=({target.center_row:.1f}, {target.center_col:.1f}), "
+                f"status={'✓ 有效' if target.valid else '✗ 无效'}"
+            )
+
+            if not target.measurements:
+                lines.append("  (无测量项)")
+                continue
+
+            for label, result in target.measurements.items():
+                if isinstance(result, dict):
+                    if label == "_error":
+                        lines.append(f"  [ERROR] {result}")
+                    else:
+                        lines.append(_format_result_dict(label, result))
+                elif hasattr(result, "valid"):
+                    lines.append(_format_geometric_result(label, result))
+                else:
+                    lines.append(f"  {label}: {result}")
+
+            lines.append("")
+
+        return "\n".join(lines)
+
+
+# ===========================================================================
+# Helpers
+# ===========================================================================
+
+
+def _get_defaults(object_type: str) -> Dict[str, Any]:
+    """Get default parameters for each measurement type."""
+    defaults = {
+        "EdgePoint": {"sigma": 1.0, "threshold": 30.0, "transition": "all",
+                       "select": "first", "interpolation": "linear"},
+        "EdgePair": {"sigma": 1.0, "threshold": 30.0, "transition": "negative",
+                      "select": "first", "interpolation": "linear"},
+        "FitLine": {"num_measures": 10, "sigma": 1.0, "threshold": 30.0,
+                     "transition": "all"},
+        "FitCircle": {"num_measures": 12, "sigma": 1.0, "threshold": 30.0,
+                       "transition": "all", "start_phi": 0.0, "end_phi": 2 * np.pi},
+    }
+    return defaults.get(object_type, {})
+
+
+def _references_label(defn: Dict[str, Any], target_label: str) -> bool:
+    """Check if a composed measurement references the given label."""
+    params = defn.get("params", {})
+    for key in ["point_a_label", "point_b_label", "point_label",
+                "line_a_label", "line_b_label", "line_label",
+                "circle_label"]:
+        if params.get(key) == target_label:
+            return True
+    return False
+
+
+def _compute_target_box_corners(
+    target: TargetResult,
+    size: Tuple[float, float],
+) -> np.ndarray:
+    """Compute the 4 corners of a target's rotated box in image coordinates."""
+    from .utils import compute_rotated_box_corners
+
+    return compute_rotated_box_corners(
+        (target.center_row, target.center_col),
+        size,
+        target.rotation_deg,
+    )
+
+
+def _map_result_to_original(result, M_inv: np.ndarray):
+    """Map a GeometricResult's point coordinates back to the original image.
+
+    Returns a dict (serializable) instead of modifying the GeometricResult
+    (which is a frozen dataclass).
+    """
+    from measure_workflow import (
+        CircleResult,
+        DistanceResult,
+        LineResult,
+        PointResult,
+    )
+
+    if isinstance(result, PointResult):
+        if result.valid:
+            orig_row, orig_col = map_point_to_original(
+                (result.row, result.col), M_inv
+            )
+            return {
+                "type": "point",
+                "label": result.label,
+                "valid": True,
+                "row": orig_row,
+                "col": orig_col,
+                "meta": result.meta,
+            }
+        return {"type": "point", "label": result.label, "valid": False}
+
+    elif isinstance(result, LineResult):
+        if result.valid:
+            sr, sc = map_point_to_original(
+                (result.start_row, result.start_col), M_inv
+            )
+            er, ec = map_point_to_original(
+                (result.end_row, result.end_col), M_inv
+            )
+            return {
+                "type": "line",
+                "label": result.label,
+                "valid": True,
+                "start_row": sr, "start_col": sc,
+                "end_row": er, "end_col": ec,
+                "a": result.a, "b": result.b, "c": result.c,
+                "meta": result.meta,
+            }
+        return {"type": "line", "label": result.label, "valid": False}
+
+    elif isinstance(result, CircleResult):
+        if result.valid:
+            cr, cc = map_point_to_original(
+                (result.center_row, result.center_col), M_inv
+            )
+            return {
+                "type": "circle",
+                "label": result.label,
+                "valid": True,
+                "center_row": cr, "center_col": cc,
+                "radius": result.radius,
+                "meta": result.meta,
+            }
+        return {"type": "circle", "label": result.label, "valid": False}
+
+    elif isinstance(result, DistanceResult):
+        return {
+            "type": "distance",
+            "label": result.label,
+            "valid": result.valid,
+            "value": result.value,
+        }
+
+    else:  # AngleResult etc.
+        return {
+            "type": result.type,
+            "label": result.label,
+            "valid": result.valid,
+            "value": getattr(result, "value", None),
+            "value_deg": getattr(result, "value_deg", None),
+        }
+
+
+def _draw_result_on_image(
+    vis: np.ndarray,
+    result: dict,
+    color: Tuple[int, int, int],
+):
+    """Draw a mapped result dict onto the visualization image."""
+    rtype = result.get("type", "")
+    if not result.get("valid", False):
+        return
+
+    if rtype == "point":
+        pt = (int(round(result["col"])), int(round(result["row"])))
+        cv2.drawMarker(
+            vis, pt, color, markerType=cv2.MARKER_CROSS,
+            markerSize=8, thickness=1,
+        )
+
+    elif rtype == "line":
+        pt1 = (int(round(result["start_col"])), int(round(result["start_row"])))
+        pt2 = (int(round(result["end_col"])), int(round(result["end_row"])))
+        cv2.line(vis, pt1, pt2, color, thickness=1)
+
+    elif rtype == "circle":
+        ct = (int(round(result["center_col"])), int(round(result["center_row"])))
+        r = int(round(result["radius"]))
+        cv2.circle(vis, ct, r, color, thickness=1)
+
+    elif rtype in ("distance", "angle"):
+        pass  # Distance/angle don't have inherent geometry to draw
+
+
+def _draw_geometric_result(
+    vis: np.ndarray,
+    result,
+    color: Tuple[int, int, int],
+):
+    """Draw a GeometricResult onto the visualization image."""
+    # This is called when results haven't been mapped yet (fallback)
+    if not result.valid:
+        return
+    if hasattr(result, "row") and hasattr(result, "col"):
+        pt = (int(round(result.col)), int(round(result.row)))
+        cv2.drawMarker(
+            vis, pt, color, markerType=cv2.MARKER_CROSS,
+            markerSize=8, thickness=1,
+        )
+
+
+def _format_result_dict(label: str, result: dict) -> str:
+    """Format a single measurement result dict for text display."""
+    rtype = result.get("type", "unknown")
+    valid = result.get("valid", False)
+
+    if not valid:
+        return f"  {label}: [{rtype}] INVALID"
+
+    if rtype == "point":
+        return (
+            f"  {label}: [{rtype}] "
+            f"row={result['row']:.2f}, col={result['col']:.2f}"
+        )
+    elif rtype == "line":
+        return (
+            f"  {label}: [{rtype}] "
+            f"start=({result['start_row']:.1f},{result['start_col']:.1f}), "
+            f"end=({result['end_row']:.1f},{result['end_col']:.1f})"
+        )
+    elif rtype == "circle":
+        return (
+            f"  {label}: [{rtype}] "
+            f"center=({result['center_row']:.1f},{result['center_col']:.1f}), "
+            f"radius={result['radius']:.2f}px"
+        )
+    elif rtype == "distance":
+        return f"  {label}: [{rtype}] {result['value']:.3f} px"
+    elif rtype == "angle":
+        val = result.get("value_deg", result.get("value", 0))
+        return f"  {label}: [{rtype}] {val:.2f}°"
+    else:
+        return f"  {label}: [{rtype}] VALID"
+
+
+def _format_geometric_result(label: str, result) -> str:
+    """Format a GeometricResult for text display."""
+    rtype = result.type
+    if not result.valid:
+        return f"  {label}: [{rtype}] INVALID"
+
+    if rtype == "point":
+        return f"  {label}: [{rtype}] row={result.row:.2f}, col={result.col:.2f}"
+    elif rtype == "line":
+        return (
+            f"  {label}: [{rtype}] "
+            f"start=({result.start_row:.1f},{result.start_col:.1f}), "
+            f"end=({result.end_row:.1f},{result.end_col:.1f})"
+        )
+    elif rtype == "circle":
+        return (
+            f"  {label}: [{rtype}] "
+            f"center=({result.center_row:.1f},{result.center_col:.1f}), "
+            f"radius={result.radius:.2f}px"
+        )
+    elif rtype == "distance":
+        return f"  {label}: [{rtype}] {result.value:.3f} px"
+    elif rtype == "angle":
+        val = getattr(result, "value_deg", result.value)
+        return f"  {label}: [{rtype}] {val:.2f}°"
+    return f"  {label}: [{rtype}] VALID"
