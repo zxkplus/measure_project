@@ -96,8 +96,8 @@ def crop_and_straighten(
     #   local_row = r - h/2
     #   local_col = c - w/2
     # We then rotate by +angle_deg and translate to (cy, cx) in the original.
-
-    theta = np.deg2rad(angle_deg)
+    print(f"angle_deg: {angle_deg}")
+    theta = np.deg2rad(-angle_deg)
     cos_a = np.cos(theta)
     sin_a = np.sin(theta)
 
@@ -129,6 +129,9 @@ def crop_and_straighten(
         borderMode=border_mode,
         borderValue=border_value,
     )
+    cv2.imwrite("original.png", image)
+    cv2.imwrite("straightened.png", straightened)
+
 
     return straightened, M_inv_3x3
 
