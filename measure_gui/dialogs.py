@@ -30,10 +30,12 @@ class BaseParamDialog(tk.Toplevel):
         self._vars: Dict[str, tk.Variable] = {}
 
         self.transient(parent)
-        self.grab_set()
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+        # Defer grab_set until window is viewable
+        self.after_idle(self.grab_set)
 
         # Center on parent
         self.update_idletasks()

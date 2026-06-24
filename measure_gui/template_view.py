@@ -25,6 +25,7 @@ from .dialogs import (
     EdgePointDialog,
     FitCircleDialog,
     FitLineDialog,
+    TemplateMatchPointDialog,
 )
 from .utils import cv2_to_tk
 
@@ -665,6 +666,21 @@ class TemplateView(tk.Frame):
             for item_id in items:
                 self._canvas.addtag_withtag("preview", item_id)
 
+        elif self._current_tool == TemplateTool.FIT_LINE:
+            # Show preview line from start to current position
+            if self._draw_phase == 1 and self._draw_start is not None:
+                start_r, start_c = self._draw_start
+                self._canvas.delete("preview")
+                params = {
+                    "start": self._draw_start,
+                    "end": (row, col),
+                    "num_measures": 10,
+                    "measure_length2": 25.0,
+                }
+                items = self._draw_fit_line_overlay(params, "cyan")
+                for item_id in items:
+                    self._canvas.addtag_withtag("preview", item_id)
+
         elif self._current_tool == TemplateTool.FIT_CIRCLE:
             start_r, start_c = self._draw_start
             radius = np.sqrt((row - start_r)**2 + (col - start_c)**2)
@@ -871,8 +887,6 @@ class TemplateView(tk.Frame):
 
     def _add_template_match_point(self, row: float, col: float):
         """Add a template-matching point at the clicked position."""
-        from .dialogs import TemplateMatchPointDialog
-
         params = {
             "row": row,
             "col": col,
