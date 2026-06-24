@@ -51,6 +51,11 @@ class TemplateView(tk.Frame):
         view.on_tool_added = lambda tool_type, label, params: ...
     """
 
+    # Zoom constants (similar to ImageCanvas)
+    MIN_ZOOM = 0.1
+    MAX_ZOOM = 10.0
+    ZOOM_STEP = 1.1
+
     def __init__(self, parent: tk.Widget, width: int = 350, height: int = 350,
                  bg: str = "#1e1e1e", **kwargs):
         super().__init__(parent, **kwargs)
@@ -70,10 +75,18 @@ class TemplateView(tk.Frame):
         self._drawing: bool = False
         self._draw_start: Optional[Tuple[float, float]] = None  # (row, col) in template coords
 
-        # Display scale (template usually small, may need to upscale)
+        # Zoom state (similar to ImageCanvas)
+        # _base_scale: auto-fit scale (no zoom applied)
+        # _zoom_factor: user zoom multiplier
+        # Actual display scale = _base_scale * _zoom_factor
         self._scale: float = 1.0
+        self._base_scale: Optional[float] = None
+        self._zoom_factor: float = 1.0
         self._offset_x: float = 0.0
         self._offset_y: float = 0.0
+
+        # Pan state (SELECT mode: click empty space to pan)
+        self._panning: bool = False
 
         # Callbacks
         self.on_tool_added: Optional[Callable] = None
@@ -147,6 +160,9 @@ class TemplateView(tk.Frame):
         self._canvas.bind("<B1-Motion>", self._on_drag)
         self._canvas.bind("<ButtonRelease-1>", self._on_release)
         self._canvas.bind("<Motion>", self._on_motion)
+        self._canvas.bind("<Button-4>", self._on_scroll_up)     # Linux scroll up
+        self._canvas.bind("<Button-5>", self._on_scroll_down)   # Linux scroll down
+        self._canvas.bind("<MouseWheel>", self._on_mousewheel)  # Windows/Mac
 
         # Status bar
         self._status = ttk.Label(self, text="加载模板后点击放置测量工具", foreground="gray")
@@ -169,6 +185,9 @@ class TemplateView(tk.Frame):
         if clear_tools:
             self._tools = []
             self._tool_counters = {}
+            # Reset zoom state so _redraw recalculates base_scale
+            self._zoom_factor = 1.0
+            self._base_scale = None
         self._redraw()
 
     @property
@@ -234,7 +253,7 @@ class TemplateView(tk.Frame):
         """Serialize complete template view state for project saving.
 
         Returns a dict with:
-            scale, offset_x, offset_y — display transform
+            scale, base_scale, zoom_factor, offset_x, offset_y — display transform
             tools — list of {object_type, label, params, _selected}
             tool_counters — dict[str, int] auto-label counters
         """
@@ -248,6 +267,8 @@ class TemplateView(tk.Frame):
             })
         return {
             "scale": self._scale,
+            "base_scale": self._base_scale,
+            "zoom_factor": self._zoom_factor,
             "offset_x": self._offset_x,
             "offset_y": self._offset_y,
             "tools": tools_data,
@@ -263,6 +284,8 @@ class TemplateView(tk.Frame):
         """
         # Restore display params
         self._scale = state.get("scale", 1.0)
+        self._base_scale = state.get("base_scale", None)
+        self._zoom_factor = state.get("zoom_factor", 1.0)
         self._offset_x = state.get("offset_x", 0.0)
         self._offset_y = state.get("offset_y", 0.0)
 
@@ -283,14 +306,14 @@ class TemplateView(tk.Frame):
             }
             self._tools.append(tool)
 
-        # Redraw all tool overlays on the canvas
-        self._redraw_tools()
+        # Redraw all canvas content (image + tool overlays) at restored scale
+        self._redraw()
 
     def set_status(self, text: str):
         self._status.config(text=text)
 
     # ------------------------------------------------------------------
-    # Template coordinate transforms (no zoom — fixed scale to fit canvas)
+    # Template coordinate transforms (zoom-aware)
     # ------------------------------------------------------------------
 
     def _tmpl_to_canvas(self, row: float, col: float) -> Tuple[float, float]:
@@ -302,6 +325,63 @@ class TemplateView(tk.Frame):
         """Canvas coords to template coords."""
         return ((cy - self._offset_y) / self._scale,
                 (cx - self._offset_x) / self._scale)
+
+    # ------------------------------------------------------------------
+    # Zoom (similar to ImageCanvas)
+    # ------------------------------------------------------------------
+
+    def _zoom_at(self, canvas_x: float, canvas_y: float, factor: float):
+        """Zoom centered at a canvas position, keeping mouse point fixed."""
+        new_zoom = self._zoom_factor * factor
+        if new_zoom < self.MIN_ZOOM or new_zoom > self.MAX_ZOOM:
+            return
+
+        self._offset_x = canvas_x - (canvas_x - self._offset_x) * factor
+        self._offset_y = canvas_y - (canvas_y - self._offset_y) * factor
+        self._zoom_factor = new_zoom
+        self._redraw()
+
+    def _on_scroll_up(self, event):
+        """Linux scroll up — zoom in."""
+        if self._template_image is not None:
+            self._zoom_at(event.x, event.y, self.ZOOM_STEP)
+
+    def _on_scroll_down(self, event):
+        """Linux scroll down — zoom out."""
+        if self._template_image is not None:
+            self._zoom_at(event.x, event.y, 1.0 / self.ZOOM_STEP)
+
+    def _on_mousewheel(self, event):
+        """Windows/Mac mousewheel — zoom in/out."""
+        if self._template_image is not None:
+            if event.delta > 0:
+                self._zoom_at(event.x, event.y, self.ZOOM_STEP)
+            else:
+                self._zoom_at(event.x, event.y, 1.0 / self.ZOOM_STEP)
+
+    def zoom_to_fit(self):
+        """Reset to auto-fit zoom (zoom_factor = 1.0)."""
+        self._zoom_factor = 1.0
+        if self._template_image is not None:
+            h, w = self._template_image.shape[:2]
+            canvas_w = self._canvas.winfo_width()
+            canvas_h = self._canvas.winfo_height()
+            if canvas_w <= 1:
+                canvas_w = self._width
+            if canvas_h <= 1:
+                canvas_h = self._height
+            self._base_scale = min(canvas_w / w, canvas_h / h) * 0.95
+            self._offset_x = (canvas_w - w * self._base_scale) / 2
+            self._offset_y = (canvas_h - h * self._base_scale) / 2
+        self._redraw()
+
+    def zoom_to_100(self):
+        """Zoom to 1:1 (template pixels = screen pixels)."""
+        if self._base_scale and self._base_scale > 0:
+            self._zoom_factor = 1.0 / self._base_scale
+        else:
+            self._zoom_factor = 1.0
+        self._redraw()
 
     # ------------------------------------------------------------------
     # Redraw
@@ -324,10 +404,14 @@ class TemplateView(tk.Frame):
         if canvas_h <= 1:
             canvas_h = self._height
 
-        # Scale to fit canvas
-        self._scale = min(canvas_w / w, canvas_h / h) * 0.95
-        self._offset_x = (canvas_w - w * self._scale) / 2
-        self._offset_y = (canvas_h - h * self._scale) / 2
+        # Calculate base (auto-fit) scale on first load or after zoom_to_fit
+        if self._base_scale is None:
+            self._base_scale = min(canvas_w / w, canvas_h / h) * 0.95
+            self._offset_x = (canvas_w - w * self._base_scale) / 2
+            self._offset_y = (canvas_h - h * self._base_scale) / 2
+
+        # Actual display scale = base_scale * zoom_factor
+        self._scale = self._base_scale * self._zoom_factor
 
         # Resize for display
         new_w = max(1, int(w * self._scale))
@@ -605,9 +689,14 @@ class TemplateView(tk.Frame):
         if self._current_tool == TemplateTool.SELECT:
             # Check if clicking on an existing tool
             clicked_label, prev_selected = self._select_tool_at(event.x, event.y)
-            if clicked_label is not None and clicked_label == prev_selected:
-                # Same tool clicked again — open edit dialog
-                self._edit_selected_tool()
+            if clicked_label is not None:
+                if clicked_label == prev_selected:
+                    # Same tool clicked again — open edit dialog
+                    self._edit_selected_tool()
+            else:
+                # Clicked on empty space — start panning
+                self._drag_start = (event.x, event.y)
+                self._panning = True
             return
 
         elif self._current_tool in (TemplateTool.EDGE_POINT, TemplateTool.EDGE_PAIR,
@@ -630,6 +719,16 @@ class TemplateView(tk.Frame):
 
     def _on_drag(self, event):
         """Handle mouse drag."""
+        # Panning in SELECT mode
+        if self._panning and self._drag_start is not None:
+            dx = event.x - self._drag_start[0]
+            dy = event.y - self._drag_start[1]
+            self._offset_x += dx
+            self._offset_y += dy
+            self._drag_start = (event.x, event.y)
+            self._redraw()
+            return
+
         if not self._drawing or self._draw_start is None:
             return
 
@@ -685,6 +784,12 @@ class TemplateView(tk.Frame):
 
     def _on_release(self, event):
         """Handle mouse release."""
+        # End panning
+        if self._panning:
+            self._panning = False
+            self._drag_start = None
+            return
+
         if not self._drawing:
             return
 
