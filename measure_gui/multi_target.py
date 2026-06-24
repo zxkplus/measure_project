@@ -371,6 +371,9 @@ class MultiTargetWorkflow:
         self._results: List[TargetResult] = []
         self._last_inspection_image: Optional[np.ndarray] = None
 
+        # Debug image saving
+        self._debug_dir: Optional[str] = None
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -441,6 +444,326 @@ class MultiTargetWorkflow:
         if self._preprocessor is None:
             return "raw"
         return self._preprocessor.name
+
+    @property
+    def debug_dir(self) -> Optional[str]:
+        """Directory for saving debug images. None disables debug output."""
+        return self._debug_dir
+
+    @debug_dir.setter
+    def debug_dir(self, path: Optional[str]):
+        self._debug_dir = path
+
+    # ------------------------------------------------------------------
+    # Debug helpers
+    # ------------------------------------------------------------------
+
+    def _debug_save(self, filename: str, image: np.ndarray):
+        """Save a debug image if debug_dir is set."""
+        if not self._debug_dir:
+            return
+        import os
+        os.makedirs(self._debug_dir, exist_ok=True)
+        filepath = os.path.join(self._debug_dir, filename)
+        cv2.imwrite(filepath, image)
+
+    def _debug_save_inspection_boxes(self, inspection_image: np.ndarray):
+        """Draw rotated target boxes on the inspection image and save."""
+        if len(inspection_image.shape) == 2:
+            vis = cv2.cvtColor(inspection_image, cv2.COLOR_GRAY2BGR)
+        else:
+            vis = inspection_image.copy()
+
+        color_palette = [
+            (0, 255, 0),     # green
+            (0, 255, 255),   # yellow
+            (255, 0, 255),   # magenta
+            (255, 255, 0),   # cyan
+            (0, 165, 255),   # orange
+            (255, 0, 0),     # blue
+            (128, 0, 128),   # dark magenta
+            (0, 128, 128),   # dark yellow
+        ]
+
+        for target in self._results:
+            color = color_palette[target.id % len(color_palette)]
+
+            # Draw rotated box
+            corners = _compute_target_box_corners(target, self._box_size)
+            pts = corners[:, ::-1].astype(np.int32).reshape((-1, 1, 2))
+            thickness = 2 if target.valid else 1
+            cv2.polylines(vis, [pts], True, color, thickness=thickness)
+
+            # Label
+            label_text = (
+                f"T#{target.id} s={target.score:.2f} "
+                f"r={target.rotation_deg:.1f}° "
+                f"{'OK' if target.valid else 'FAIL'}"
+            )
+            font_scale = 0.45
+            cv2.putText(
+                vis, label_text,
+                (int(target.center_col) + 5, int(target.center_row) - 5),
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 1, cv2.LINE_AA,
+            )
+
+        # Summary
+        n_valid = sum(1 for t in self._results if t.valid)
+        summary = (
+            f"MultiTarget: {len(self._results)} targets, "
+            f"{n_valid} valid"
+        )
+        cv2.putText(
+            vis, summary,
+            (10, vis.shape[0] - 10),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA,
+        )
+
+        self._debug_save("inspection_boxes.png", vis)
+
+    def _debug_draw_measurements_on_patch(
+        self,
+        patch: np.ndarray,
+        raw_results: Dict[str, Any],
+    ) -> np.ndarray:
+        """Draw measurement tool ROIs and detected results on a patch copy.
+
+        Uses OpenCV drawing to overlay:
+        - Tool ROIs in light blue (where each tool is looking)
+        - Valid detections in green
+        - Invalid detections in red
+        - Composed measurement connecting lines in yellow
+
+        Returns:
+            BGR image with overlays drawn.
+        """
+        if len(patch.shape) == 2:
+            vis = cv2.cvtColor(patch, cv2.COLOR_GRAY2BGR)
+        else:
+            vis = patch.copy()
+
+        h, w = vis.shape[:2]
+
+        # Colors
+        ROI_COLOR = (255, 180, 80)       # light blue (BGR)
+        VALID_COLOR = (0, 255, 0)        # green
+        INVALID_COLOR = (0, 0, 255)      # red
+        COMPOSED_COLOR = (0, 255, 255)   # yellow
+        TICK_COLOR = (180, 180, 180)     # gray
+
+        # --- Pass 1: draw each measurement tool's ROI ---
+        for d in self._measurement_defs:
+            obj_type = d["object_type"]
+            label = d["label"]
+            params = d["params"]
+
+            result = raw_results.get(label)
+            is_valid = (
+                result.valid
+                if (result is not None and hasattr(result, "valid"))
+                else False
+            )
+
+            if obj_type in ("EdgePoint", "EdgePair"):
+                self._debug_draw_edge_roi(vis, params, is_valid)
+
+            elif obj_type == "FitLine":
+                self._debug_draw_fit_line_roi(vis, params, is_valid)
+
+            elif obj_type == "FitCircle":
+                self._debug_draw_fit_circle_roi(vis, params, is_valid)
+
+            elif obj_type == "TemplateMatchPoint":
+                self._debug_draw_tmpl_match_roi(vis, params, is_valid)
+
+        # --- Pass 2: draw measurement results ---
+        from measure_workflow import CircleResult, LineResult, PointResult
+
+        for label, result in raw_results.items():
+            if label == "_error" or not hasattr(result, "valid"):
+                continue
+
+            color = VALID_COLOR if result.valid else INVALID_COLOR
+
+            if isinstance(result, PointResult) and result.valid:
+                pt = (int(round(result.col)), int(round(result.row)))
+                cv2.drawMarker(
+                    vis, pt, color,
+                    markerType=cv2.MARKER_CROSS, markerSize=12, thickness=2,
+                )
+                cv2.putText(
+                    vis, label, (pt[0] + 8, pt[1] - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA,
+                )
+
+            elif isinstance(result, LineResult) and result.valid:
+                pt1 = (int(round(result.start_col)), int(round(result.start_row)))
+                pt2 = (int(round(result.end_col)), int(round(result.end_row)))
+                cv2.line(vis, pt1, pt2, color, thickness=2)
+                mid = ((pt1[0] + pt2[0]) // 2, (pt1[1] + pt2[1]) // 2)
+                cv2.putText(
+                    vis, label, (mid[0] + 5, mid[1] - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA,
+                )
+
+            elif isinstance(result, CircleResult) and result.valid:
+                ct = (int(round(result.center_col)), int(round(result.center_row)))
+                cv2.circle(vis, ct, int(round(result.radius)), color, thickness=2)
+                cv2.putText(
+                    vis, label, (ct[0] + 5, ct[1] - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA,
+                )
+
+        # --- Pass 3: draw composed measurement connections ---
+        for d in self._measurement_defs:
+            obj_type = d["object_type"]
+            params = d["params"]
+
+            if obj_type in ("TwoPointsDistance", "TwoPointsLine"):
+                p1 = raw_results.get(params.get("point_a_label", ""))
+                p2 = raw_results.get(params.get("point_b_label", ""))
+                if p1 and p2 and p1.valid and p2.valid:
+                    pt1 = (int(p1.col), int(p1.row))
+                    pt2 = (int(p2.col), int(p2.row))
+                    cv2.line(vis, pt1, pt2, COMPOSED_COLOR, thickness=2)
+
+            elif obj_type == "PointLineDistance":
+                pt = raw_results.get(params.get("point_label", ""))
+                line = raw_results.get(params.get("line_label", ""))
+                if (pt and line and pt.valid and line.valid
+                        and hasattr(line, "a") and hasattr(line, "c")):
+                    a, b, c = line.a, line.b, line.c
+                    denom = a * a + b * b
+                    if denom > 1e-10:
+                        proj_col = (b * b * pt.col - a * b * pt.row - a * c) / denom
+                        proj_row = (-a * b * pt.col + a * a * pt.row - b * c) / denom
+                        p1 = (int(pt.col), int(pt.row))
+                        p2 = (int(proj_col), int(proj_row))
+                        cv2.line(vis, p1, p2, COMPOSED_COLOR, thickness=1,
+                                 lineType=cv2.LINE_AA)
+
+        # Legend
+        cv2.putText(
+            vis, "Green=Valid  Red=Invalid  Blue=ROI  Yellow=Composed",
+            (5, h - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1,
+            cv2.LINE_AA,
+        )
+
+        return vis
+
+    # --- Per-type ROI drawing helpers ---
+
+    @staticmethod
+    def _debug_draw_edge_roi(vis: np.ndarray, params: dict, is_valid: bool):
+        """Draw caliper ROI rectangle and direction arrow."""
+        color = (0, 255, 0) if is_valid else (0, 0, 255)
+        roi_color = (255, 180, 80)
+
+        row, col = params["row"], params["col"]
+        angle = params["angle"]          # radians
+        length1 = params["length1"]      # half-length along probe direction
+        length2 = params["length2"]      # half-width perpendicular
+
+        # Direction vector (same as template_view._draw_edge_probe)
+        dr = -np.cos(angle)
+        dc = np.sin(angle)
+        # Perpendicular
+        pr = dc
+        pc = dr
+
+        corners = np.array([
+            [row - dr * length1 - pr * length2, col - dc * length1 - pc * length2],
+            [row - dr * length1 + pr * length2, col - dc * length1 + pc * length2],
+            [row + dr * length1 + pr * length2, col + dc * length1 + pc * length2],
+            [row + dr * length1 - pr * length2, col + dc * length1 - pc * length2],
+        ], dtype=np.float64)
+        pts = corners[:, ::-1].reshape((-1, 1, 2)).astype(np.int32)
+        cv2.polylines(vis, [pts], True, roi_color, thickness=1)
+
+        # Direction arrow from center
+        pt_start = (int(col), int(row))
+        pt_end = (int(col + dc * length1 * 0.7), int(row + dr * length1 * 0.7))
+        cv2.arrowedLine(vis, pt_start, pt_end, roi_color, thickness=1, tipLength=0.2)
+
+    @staticmethod
+    def _debug_draw_fit_line_roi(vis: np.ndarray, params: dict, is_valid: bool):
+        """Draw fit line ROI with perpendicular measurement ticks."""
+        color = (0, 255, 0) if is_valid else (0, 0, 255)
+        roi_color = (255, 180, 80)
+        tick_color = (180, 180, 180)
+
+        start = params["start"]
+        end = params["end"]
+        pt1 = (int(start[1]), int(start[0]))
+        pt2 = (int(end[1]), int(end[0]))
+
+        # Dashed main line
+        num_segments = 20
+        for i in range(0, num_segments, 2):
+            t1 = i / num_segments
+            t2 = min((i + 1) / num_segments, 1.0)
+            s1 = (int(start[1] + t1 * (end[1] - start[1])),
+                  int(start[0] + t1 * (end[0] - start[0])))
+            s2 = (int(start[1] + t2 * (end[1] - start[1])),
+                  int(start[0] + t2 * (end[0] - start[0])))
+            cv2.line(vis, s1, s2, roi_color, thickness=1)
+
+        # Endpoint dots
+        cv2.circle(vis, pt1, 3, roi_color, -1)
+        cv2.circle(vis, pt2, 3, roi_color, -1)
+
+        # Perpendicular measurement ticks
+        num_measures = params.get("num_measures", 10)
+        measure_length2 = params.get("measure_length2", 25.0)
+        dr = end[0] - start[0]
+        dc = end[1] - start[1]
+        line_len = np.sqrt(dr**2 + dc**2)
+        if line_len > 1e-10:
+            for i in range(num_measures):
+                t = (i + 0.5) / num_measures
+                mr = start[0] + t * dr
+                mc = start[1] + t * dc
+                pdr = -dc / line_len * measure_length2
+                pdc = dr / line_len * measure_length2
+                t1 = (int(mc - pdc), int(mr - pdr))
+                t2 = (int(mc + pdc), int(mr + pdr))
+                cv2.line(vis, t1, t2, tick_color, thickness=1)
+
+    @staticmethod
+    def _debug_draw_fit_circle_roi(vis: np.ndarray, params: dict, is_valid: bool):
+        """Draw fit circle ROI (center cross + expected radius circle)."""
+        color = (0, 255, 0) if is_valid else (0, 0, 255)
+        roi_color = (255, 180, 80)
+
+        center = params["center"]
+        radius = params.get("radius", 50.0)
+        ct = (int(center[1]), int(center[0]))
+
+        # Expected radius circle
+        cv2.circle(vis, ct, int(radius), roi_color, thickness=1)
+        # Center crosshair
+        cv2.drawMarker(
+            vis, ct, roi_color,
+            markerType=cv2.MARKER_CROSS, markerSize=12, thickness=1,
+        )
+
+    @staticmethod
+    def _debug_draw_tmpl_match_roi(vis: np.ndarray, params: dict, is_valid: bool):
+        """Draw template-matching point ROI (bounding box + crosshair)."""
+        color = (0, 255, 0) if is_valid else (0, 0, 255)
+        roi_color = (255, 180, 80)
+
+        row, col = params["row"], params["col"]
+        size = params.get("template_size", 40)
+        half = size // 2
+
+        pt1 = (int(col - half), int(row - half))
+        pt2 = (int(col + half), int(row + half))
+        cv2.rectangle(vis, pt1, pt2, roi_color, thickness=1)
+        cv2.drawMarker(
+            vis, (int(col), int(row)), roi_color,
+            markerType=cv2.MARKER_CROSS, markerSize=8, thickness=1,
+        )
 
     # ------------------------------------------------------------------
     # Teaching
@@ -667,6 +990,10 @@ class MultiTargetWorkflow:
         if self._template_point is None:
             raise RuntimeError("No template defined. Call teach_template() first.")
 
+        # Debug: save template image used for matching
+        if self._debug_dir and self._template_image is not None:
+            self._debug_save("template.png", self._template_image)
+
         # Step 1: Multi-target matching
         match_result = self._template_point.measure(inspection_image)
         matches = match_result.get("matches", [])
@@ -682,6 +1009,10 @@ class MultiTargetWorkflow:
         for i, m in enumerate(matches):
             target_result = self._measure_one_target(inspection_image, m, i)
             self._results.append(target_result)
+
+        # Debug: save inspection image with all matched target boxes
+        if self._debug_dir:
+            self._debug_save_inspection_boxes(inspection_image)
 
         return self._results
 
@@ -707,10 +1038,13 @@ class MultiTargetWorkflow:
         valid_match = match.get("valid", True)
 
         if not valid_match:
+            # Even for invalid matches, store the absolute rotation for correct
+            # box drawing in debug visualizations.
+            absolute_rotation = self._box_angle_deg + rotation_deg
             return TargetResult(
                 id=index,
                 score=match_score,
-                rotation_deg=rotation_deg,
+                rotation_deg=absolute_rotation,
                 scale=scale,
                 center_row=matched_row,
                 center_col=matched_col,
@@ -718,11 +1052,14 @@ class MultiTargetWorkflow:
                 meta={"reason": "match below threshold"},
             )
 
-        # Crop and straighten the target from the inspection image
-        # The match rotation_deg represents the target's rotation relative
-        # to the unrotated template (which was straightened from box_angle).
-        # So the target's absolute rotation in the inspection image is rotation_deg.
-        target_angle = rotation_deg
+        # Crop and straighten the target from the inspection image.
+        # best_rotation_deg is the rotation relative to the template's
+        # orientation in the reference image (which was at box_angle_deg).
+        # The target's absolute rotation in the inspection image is:
+        #     box_angle_deg + best_rotation_deg
+        # We must add box_angle_deg here because crop_and_straighten needs
+        # the absolute angle to correctly deskew the content.
+        target_angle = self._box_angle_deg + rotation_deg
 
         patch, M_inv = crop_and_straighten(
             inspection_image,
@@ -730,6 +1067,9 @@ class MultiTargetWorkflow:
             self._box_size,
             target_angle,
         )
+
+        # Debug: save straightened patch
+        self._debug_save(f"target_{index + 1:02d}_patch.png", patch)
 
         # Run measurements directly on the straightened patch
         raw_results: Dict[str, Any] = {}  # label -> GeometricResult
@@ -888,6 +1228,14 @@ class MultiTargetWorkflow:
             all_valid = False
             raw_results["_error"] = str(e)
 
+        # Debug: save patch with measurement overlays
+        if self._debug_dir:
+            debug_vis = self._debug_draw_measurements_on_patch(patch, raw_results)
+            valid_str = "OK" if all_valid else "FAIL"
+            self._debug_save(
+                f"target_{index + 1:02d}_measured_{valid_str}.png", debug_vis
+            )
+
         # Map point results back to original image coordinates
         measurements = {}
         for label, result in raw_results.items():
@@ -899,7 +1247,7 @@ class MultiTargetWorkflow:
         return TargetResult(
             id=index + 1,
             score=match_score,
-            rotation_deg=rotation_deg,
+            rotation_deg=target_angle,
             scale=scale,
             center_row=matched_row,
             center_col=matched_col,

@@ -549,6 +549,15 @@ class MeasureApp:
             # Sync workflow params from tool panel
             self._sync_workflow_params()
 
+            # Set debug output directory (project_dir/debug_timestamp/)
+            if self._current_project_dir:
+                import time
+                debug_dir = os.path.join(
+                    self._current_project_dir,
+                    f"debug_{time.strftime('%Y%m%d_%H%M%S')}",
+                )
+                self._workflow.debug_dir = debug_dir
+
             results = self._workflow.measure(self._inspection_image)
 
             # Display results
