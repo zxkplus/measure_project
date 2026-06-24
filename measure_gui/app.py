@@ -224,6 +224,7 @@ class MeasureApp:
         # Connect template view callbacks
         self.template_view.on_tool_added = self._on_template_tool_added
         self.template_view.on_tool_removed = self._on_template_tool_removed
+        self.template_view.on_tool_edited = self._on_template_tool_edited
 
         # Bottom: ResultPanel
         self.result_panel = ResultPanel(self._right_pane)
@@ -877,9 +878,68 @@ class MeasureApp:
         self._workflow.remove_measurement(label)
         self.tool_panel.remove_tool_from_list(label)
 
+    def _on_template_tool_edited(self, label: str, params: dict):
+        """A measurement tool was edited on the template view (double-click or re-click)."""
+        if self._workflow is None:
+            return
+
+        # Sync edited params to the workflow measurement_def
+        self._workflow.update_measurement(label, **params)
+
+        self._status_text.set(f"已更新测量工具: {label}")
+
     def _on_tool_edit(self, label: str):
-        """Edit a tool's parameters."""
-        messagebox.showinfo("提示", f"编辑功能: {label}\n(可通过模板预览图重新绘制该工具)")
+        """Edit a tool's parameters (triggered from tool panel Edit button).
+
+        Opens the parameter dialog pre-filled with the tool's current params.
+        Updates both the template_view overlay and workflow measurement_def.
+        """
+        # Find the tool in template_view
+        tool = None
+        for t in self.template_view._tools:
+            if t["label"] == label:
+                tool = t
+                break
+
+        if tool is None:
+            messagebox.showwarning("提示", f"未找到工具: {label}")
+            return
+
+        obj_type = tool["object_type"]
+        params = tool["params"]
+
+        from .dialogs import (
+            EdgePairDialog,
+            EdgePointDialog,
+            FitCircleDialog,
+            FitLineDialog,
+            TemplateMatchPointDialog,
+        )
+
+        dlg_params = None
+        if obj_type == "EdgePoint":
+            dlg_params = EdgePointDialog.ask(self.root, params=dict(params))
+        elif obj_type == "EdgePair":
+            dlg_params = EdgePairDialog.ask(self.root, params=dict(params))
+        elif obj_type == "FitLine":
+            dlg_params = FitLineDialog.ask(self.root, params=dict(params))
+        elif obj_type == "FitCircle":
+            dlg_params = FitCircleDialog.ask(self.root, params=dict(params))
+        elif obj_type == "TemplateMatchPoint":
+            dlg_params = TemplateMatchPointDialog.ask(self.root, params=dict(params))
+
+        if dlg_params is None:
+            return  # User cancelled
+
+        # Update template_view tool params and redraw overlay
+        params.update(dlg_params)
+        self.template_view._redraw_tools()
+
+        # Update workflow measurement_def
+        if self._workflow is not None:
+            self._workflow.update_measurement(label, **dlg_params)
+
+        self._status_text.set(f"已更新测量工具: {label}")
 
     def _on_tool_delete(self, label: str):
         """Delete a tool from the tool panel."""

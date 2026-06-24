@@ -941,6 +941,20 @@ class MultiTargetWorkflow:
             if not _references_label(d, label)
         ]
 
+    def update_measurement(self, label: str, **params):
+        """Update a measurement definition's params by label.
+
+        Merges the given params into the existing definition, then rebuilds
+        cached TemplateMatchPoint instances if needed.
+        """
+        for d in self._measurement_defs:
+            if d["label"] == label:
+                d["params"].update(params)
+                break
+        # Rebuild cached TemplateMatchPoint if the updated tool is one
+        if self._template_image is not None:
+            self._build_template_match_points()
+
     def clear_measurements(self):
         """Remove all measurement definitions."""
         self._measurement_defs = []

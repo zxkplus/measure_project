@@ -143,6 +143,7 @@ class TemplateView(tk.Frame):
 
         # Bindings
         self._canvas.bind("<Button-1>", self._on_click)
+        self._canvas.bind("<Double-Button-1>", self._on_double_click)
         self._canvas.bind("<B1-Motion>", self._on_drag)
         self._canvas.bind("<ButtonRelease-1>", self._on_release)
         self._canvas.bind("<Motion>", self._on_motion)
@@ -603,7 +604,10 @@ class TemplateView(tk.Frame):
 
         if self._current_tool == TemplateTool.SELECT:
             # Check if clicking on an existing tool
-            self._select_tool_at(event.x, event.y)
+            clicked_label, prev_selected = self._select_tool_at(event.x, event.y)
+            if clicked_label is not None and clicked_label == prev_selected:
+                # Same tool clicked again — open edit dialog
+                self._edit_selected_tool()
             return
 
         elif self._current_tool in (TemplateTool.EDGE_POINT, TemplateTool.EDGE_PAIR,
@@ -917,23 +921,40 @@ class TemplateView(tk.Frame):
     # Selection
     # ------------------------------------------------------------------
 
-    def _select_tool_at(self, cx: float, cy: float):
-        """Select a tool at canvas position."""
+    def _select_tool_at(self, cx: float, cy: float) -> Tuple[Optional[str], Optional[str]]:
+        """Select a tool at canvas position.
+
+        Returns:
+            (clicked_label, prev_selected_label) — both None if nothing clicked.
+            If the same tool is clicked again, both will be the same label.
+        """
+        # Remember previously selected label
+        prev_selected = None
+        for t in self._tools:
+            if t.get("_selected"):
+                prev_selected = t["label"]
+                break
+
         # Deselect all
         for t in self._tools:
             t["_selected"] = False
 
         # Find clicked tool
+        clicked_label = None
         overlap = self._canvas.find_overlapping(cx - 5, cy - 5, cx + 5, cy + 5)
         for i, t in enumerate(self._tools):
             for item_id in t.get("canvas_items", []):
                 if item_id in overlap:
                     t["_selected"] = True
+                    clicked_label = t["label"]
                     self._redraw_tools()
-                    self.set_status(f"已选中 {t['label']} — 点击[删除]移除或拖拽移动")
-                    return
+                    self.set_status(f"已选中 {t['label']} — 再次点击可编辑参数")
+                    break
 
-        self._redraw_tools()
+        if clicked_label is None:
+            self._redraw_tools()
+
+        return clicked_label, prev_selected
 
     def _delete_selected(self):
         """Delete the currently selected tool."""
@@ -942,3 +963,54 @@ class TemplateView(tk.Frame):
                 self.remove_tool(t["label"])
                 self.set_status(f"已删除 {t['label']}")
                 return
+
+    def _edit_selected_tool(self):
+        """Open the parameter dialog for the currently selected tool.
+
+        The dialog is pre-filled with the tool's current params.
+        If the user confirms, the tool's params and overlay are updated,
+        and the on_tool_edited callback is fired.
+        """
+        selected = None
+        for t in self._tools:
+            if t.get("_selected"):
+                selected = t
+                break
+
+        if selected is None:
+            return
+
+        obj_type = selected["object_type"]
+        params = selected["params"]
+
+        # Open the appropriate dialog with current params pre-filled
+        dlg_params = None
+        if obj_type == "EdgePoint":
+            dlg_params = EdgePointDialog.ask(self, params=dict(params))
+        elif obj_type == "EdgePair":
+            dlg_params = EdgePairDialog.ask(self, params=dict(params))
+        elif obj_type == "FitLine":
+            dlg_params = FitLineDialog.ask(self, params=dict(params))
+        elif obj_type == "FitCircle":
+            dlg_params = FitCircleDialog.ask(self, params=dict(params))
+        elif obj_type == "TemplateMatchPoint":
+            dlg_params = TemplateMatchPointDialog.ask(self, params=dict(params))
+
+        if dlg_params is None:
+            return  # User cancelled
+
+        # Update only the algorithm params (dialog returns subset of keys)
+        params.update(dlg_params)
+        self._redraw_tools()
+
+        if self.on_tool_edited:
+            self.on_tool_edited(selected["label"], params)
+
+        self.set_status(f"已更新 {selected['label']} 的参数")
+
+    def _on_double_click(self, event):
+        """Handle double-click on template canvas — edit tool at position."""
+        if self._current_tool == TemplateTool.SELECT:
+            clicked_label, _ = self._select_tool_at(event.x, event.y)
+            if clicked_label is not None:
+                self._edit_selected_tool()
