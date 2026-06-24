@@ -55,6 +55,7 @@ class TemplateView(tk.Frame):
     MIN_ZOOM = 0.1
     MAX_ZOOM = 10.0
     ZOOM_STEP = 1.1
+    ZOOM_DEBOUNCE_MS = 80      # ms between zoom redraws (prevents UI freeze from rapid scrolling)
 
     def __init__(self, parent: tk.Widget, width: int = 350, height: int = 350,
                  bg: str = "#1e1e1e", **kwargs):
@@ -87,6 +88,12 @@ class TemplateView(tk.Frame):
 
         # Pan state (SELECT mode: click empty space to pan)
         self._panning: bool = False
+
+        # Zoom debounce (prevents UI freeze from rapid scrolling)
+        self._zoom_after_id: Optional[str] = None  # tkinter after ID
+        self._accumulated_factor: float = 1.0
+        self._zoom_cursor_x: float = 0.0
+        self._zoom_cursor_y: float = 0.0
 
         # Callbacks
         self.on_tool_added: Optional[Callable] = None
@@ -331,14 +338,56 @@ class TemplateView(tk.Frame):
     # ------------------------------------------------------------------
 
     def _zoom_at(self, canvas_x: float, canvas_y: float, factor: float):
-        """Zoom centered at a canvas position, keeping mouse point fixed."""
-        new_zoom = self._zoom_factor * factor
+        """Zoom centered at a canvas position (debounced).
+
+        The zoom transform (offset + zoom_factor) is accumulated on each scroll
+        event, but the expensive _redraw() (cv2.resize + cv2_to_tk) is
+        deferred so that rapid mouse-wheel bursts produce only one redraw
+        every ZOOM_DEBOUNCE_MS milliseconds.
+        """
+        new_zoom = self._zoom_factor * self._accumulated_factor * factor
         if new_zoom < self.MIN_ZOOM or new_zoom > self.MAX_ZOOM:
             return
 
+        # Accumulate zoom factor
+        self._accumulated_factor *= factor
+
+        # Save mouse position
+        self._zoom_cursor_x = canvas_x
+        self._zoom_cursor_y = canvas_y
+
+        # Cancel previous pending redraw
+        if self._zoom_after_id is not None:
+            self.after_cancel(self._zoom_after_id)
+
+        # Schedule debounced redraw
+        self._zoom_after_id = self.after(self.ZOOM_DEBOUNCE_MS, self._apply_accumulated_zoom)
+
+    def _apply_accumulated_zoom(self):
+        """Apply accumulated zoom transforms and redraw once."""
+        self._zoom_after_id = None
+
+        factor = self._accumulated_factor
+        if factor == 1.0:
+            return
+        self._accumulated_factor = 1.0
+
+        # Clamp accumulated zoom factor to bounds
+        new_zoom = self._zoom_factor * factor
+        if new_zoom < self.MIN_ZOOM:
+            factor = self.MIN_ZOOM / self._zoom_factor
+        elif new_zoom > self.MAX_ZOOM:
+            factor = self.MAX_ZOOM / self._zoom_factor
+
+        canvas_x = self._zoom_cursor_x
+        canvas_y = self._zoom_cursor_y
+
+        # Adjust offset to keep the point under cursor fixed
         self._offset_x = canvas_x - (canvas_x - self._offset_x) * factor
         self._offset_y = canvas_y - (canvas_y - self._offset_y) * factor
-        self._zoom_factor = new_zoom
+        self._zoom_factor *= factor
+
+        # Do the expensive redraw once
         self._redraw()
 
     def _on_scroll_up(self, event):
