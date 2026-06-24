@@ -69,7 +69,6 @@ class TemplateView(tk.Frame):
         # Interaction state
         self._drawing: bool = False
         self._draw_start: Optional[Tuple[float, float]] = None  # (row, col) in template coords
-        self._draw_phase: int = 0  # 0=wait_start, 1=wait_end (for line)
 
         # Display scale (template usually small, may need to upscale)
         self._scale: float = 1.0
@@ -179,7 +178,6 @@ class TemplateView(tk.Frame):
         """Switch the active placement tool."""
         self._current_tool = tool
         self._drawing = False
-        self._draw_phase = 0
 
         names = {
             TemplateTool.SELECT: "选择",
@@ -608,25 +606,11 @@ class TemplateView(tk.Frame):
             self._select_tool_at(event.x, event.y)
             return
 
-        elif self._current_tool in (TemplateTool.EDGE_POINT, TemplateTool.EDGE_PAIR):
-            # Click to set center, drag to set direction + length
+        elif self._current_tool in (TemplateTool.EDGE_POINT, TemplateTool.EDGE_PAIR,
+                                     TemplateTool.FIT_LINE):
+            # Click to set start, drag to set direction + length/endpoint
             self._draw_start = (row, col)
             self._drawing = True
-
-        elif self._current_tool == TemplateTool.FIT_LINE:
-            if self._draw_phase == 0:
-                self._draw_start = (row, col)
-                self._drawing = True
-                self._draw_phase = 1
-                self.set_status(f"点击终点... 起点=({row:.0f},{col:.0f})")
-            elif self._draw_phase == 1:
-                # Complete the line
-                start = self._draw_start
-                end = (row, col)
-                self._add_line_tool(start, end)
-                self._draw_phase = 0
-                self._drawing = False
-                self.set_status("已添加拟合直线")
 
         elif self._current_tool == TemplateTool.FIT_CIRCLE:
             # Click center, drag radius
@@ -638,7 +622,7 @@ class TemplateView(tk.Frame):
             self._add_template_match_point(row, col)
             self.set_status("已添加模板匹配点")
             # Switch back to select
-            self._after(100, lambda: self.set_tool(TemplateTool.SELECT))
+            self.after(100, lambda: self.set_tool(TemplateTool.SELECT))
 
     def _on_drag(self, event):
         """Handle mouse drag."""
@@ -668,18 +652,17 @@ class TemplateView(tk.Frame):
 
         elif self._current_tool == TemplateTool.FIT_LINE:
             # Show preview line from start to current position
-            if self._draw_phase == 1 and self._draw_start is not None:
-                start_r, start_c = self._draw_start
-                self._canvas.delete("preview")
-                params = {
-                    "start": self._draw_start,
-                    "end": (row, col),
-                    "num_measures": 10,
-                    "measure_length2": 25.0,
-                }
-                items = self._draw_fit_line_overlay(params, "cyan")
-                for item_id in items:
-                    self._canvas.addtag_withtag("preview", item_id)
+            start_r, start_c = self._draw_start
+            self._canvas.delete("preview")
+            params = {
+                "start": self._draw_start,
+                "end": (row, col),
+                "num_measures": 10,
+                "measure_length2": 25.0,
+            }
+            items = self._draw_fit_line_overlay(params, "cyan")
+            for item_id in items:
+                self._canvas.addtag_withtag("preview", item_id)
 
         elif self._current_tool == TemplateTool.FIT_CIRCLE:
             start_r, start_c = self._draw_start
@@ -708,6 +691,8 @@ class TemplateView(tk.Frame):
             self._add_edge_tool("EdgePoint", row, col)
         elif self._current_tool == TemplateTool.EDGE_PAIR:
             self._add_edge_tool("EdgePair", row, col)
+        elif self._current_tool == TemplateTool.FIT_LINE:
+            self._add_line_tool(self._draw_start, (row, col))
         elif self._current_tool == TemplateTool.FIT_CIRCLE:
             self._add_circle_tool(row, col)
 

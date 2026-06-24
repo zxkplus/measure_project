@@ -35,7 +35,7 @@ class BaseParamDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
         # Defer grab_set until window is viewable
-        self.after_idle(self.grab_set)
+        self.after(100, self._safe_grab_set)
 
         # Center on parent
         self.update_idletasks()
@@ -43,6 +43,13 @@ class BaseParamDialog(tk.Toplevel):
             x = parent.winfo_rootx() + parent.winfo_width() // 2 - self.winfo_width() // 2
             y = parent.winfo_rooty() + parent.winfo_height() // 2 - self.winfo_height() // 2
             self.geometry(f"+{x}+{y}")
+
+    def _safe_grab_set(self):
+        """Attempt grab_set, silently ignore if window not viewable yet."""
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
 
     def _build_ui(self):
         # Subclasses override
