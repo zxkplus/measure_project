@@ -652,12 +652,33 @@ class TemplateView(tk.Frame):
         return items
 
     def _draw_fit_circle_overlay(self, params: dict, color: str) -> List[int]:
-        """Draw a fit circle ROI."""
+        """Draw a fit circle ROI with search radius boundaries."""
         items = []
         center = params["center"]
         radius = params["radius"]
+        r_min = params.get("radius_min", None)
+        r_max = params.get("radius_max", None)
 
         cx, cy = self._tmpl_to_canvas(center[0], center[1])
+
+        # --- Search radius boundaries (dashed) ---
+        # radius_min: cyan dashed circle — inner search boundary
+        if r_min is not None and r_min > 0:
+            r_min_px = max(1, int(r_min * self._scale))
+            circ_min = self._canvas.create_oval(
+                cx - r_min_px, cy - r_min_px, cx + r_min_px, cy + r_min_px,
+                outline="cyan", width=1, dash=(6, 4))
+            items.append(circ_min)
+
+        # radius_max: orange dashed circle — outer search boundary
+        if r_max is not None and r_max > 0 and r_max > (r_min or 0):
+            r_max_px = max(1, int(r_max * self._scale))
+            circ_max = self._canvas.create_oval(
+                cx - r_max_px, cy - r_max_px, cx + r_max_px, cy + r_max_px,
+                outline="orange", width=1, dash=(6, 4))
+            items.append(circ_max)
+
+        # --- Expected circle (solid) ---
         r = max(1, int(radius * self._scale))
         circ = self._canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
                                         outline=color, width=1)
