@@ -15,7 +15,47 @@ from measurement.constants import EPS
 from measurement.viz import to_bgr, draw_text_shadow
 
 
-class LineMeasureObject:
+class _BaseMeasureObject:
+    """Shared drawing helpers for LineMeasureObject and CircleMeasureObject."""
+
+    measure_rectangles: list
+    edge_points: list
+    result: dict | None
+
+    def _draw_measure_rectangles(
+        self, img: np.ndarray, color: Tuple[int, int, int], thickness: int
+    ):
+        """Draw all measurement rectangles."""
+        for rect in self.measure_rectangles:
+            self._draw_single_rectangle(
+                img, rect['center'], rect['angle'],
+                rect['length2'], rect['length1'],
+                color, thickness,
+            )
+
+    def _draw_single_rectangle(
+        self, img: np.ndarray, center: Tuple[float, float], angle: float,
+        length1: float, length2: float, color: Tuple[int, int, int],
+        thickness: int,
+    ):
+        """Draw a single measurement rectangle on *img* (in-place)."""
+        cos_a = np.cos(angle)
+        sin_a = np.sin(angle)
+        corners = np.array([
+            [center[1] - length1 / 2 * cos_a - length2 / 2 * sin_a,
+             center[0] - length1 / 2 * sin_a + length2 / 2 * cos_a],
+            [center[1] + length1 / 2 * cos_a - length2 / 2 * sin_a,
+             center[0] + length1 / 2 * sin_a + length2 / 2 * cos_a],
+            [center[1] + length1 / 2 * cos_a + length2 / 2 * sin_a,
+             center[0] + length1 / 2 * sin_a - length2 / 2 * cos_a],
+            [center[1] - length1 / 2 * cos_a + length2 / 2 * sin_a,
+             center[0] - length1 / 2 * sin_a - length2 / 2 * cos_a],
+        ], dtype=np.int32)
+        cv2.polylines(img, [corners], True, color, thickness)
+        cv2.circle(img, (int(center[1]), int(center[0])), 2, color, -1)
+
+
+class LineMeasureObject(_BaseMeasureObject):
     """
     直线测量对象
     
@@ -302,51 +342,7 @@ class LineMeasureObject:
             cv2.destroyAllWindows()
         
         return vis_img
-    
-    def _draw_measure_rectangles(self, img: np.ndarray, 
-                                  color: Tuple[int, int, int],
-                                  thickness: int):
-        """绘制所有测量矩形"""
-        for rect in self.measure_rectangles:
-            self._draw_single_rectangle(
-                img, 
-                rect['center'],
-                rect['angle'],
-                rect['length2'],  # length1 in measure is along measure direction
-                rect['length1'],
-                color,
-                thickness
-            )
-    
-    def _draw_single_rectangle(self, img: np.ndarray,
-                                center: Tuple[float, float],
-                                angle: float,
-                                length1: float,
-                                length2: float,
-                                color: Tuple[int, int, int],
-                                thickness: int):
-        """绘制单个测量矩形"""
-        cos_a = np.cos(angle)
-        sin_a = np.sin(angle)
-        
-        # 四个角点
-        corners = np.array([
-            [center[1] - length1/2 * cos_a - length2/2 * sin_a,
-             center[0] - length1/2 * sin_a + length2/2 * cos_a],
-            [center[1] + length1/2 * cos_a - length2/2 * sin_a,
-             center[0] + length1/2 * sin_a + length2/2 * cos_a],
-            [center[1] + length1/2 * cos_a + length2/2 * sin_a,
-             center[0] + length1/2 * sin_a - length2/2 * cos_a],
-            [center[1] - length1/2 * cos_a + length2/2 * sin_a,
-             center[0] - length1/2 * sin_a - length2/2 * cos_a]
-        ], dtype=np.int32)
-        
-        # 绘制矩形框
-        cv2.polylines(img, [corners], True, color, thickness)
-        
-        # 绘制中心点
-        cv2.circle(img, (int(center[1]), int(center[0])), 2, color, -1)
-    
+
     def _draw_edge_points(self, img: np.ndarray,
                           color_positive: Tuple[int, int, int],
                           color_negative: Tuple[int, int, int],
@@ -432,7 +428,7 @@ class LineMeasureObject:
             draw_text_shadow(img, info3, (10, 90), color=(255, 255, 255), font_scale=0.5, thickness=1)
 
 
-class CircleMeasureObject:
+class CircleMeasureObject(_BaseMeasureObject):
     """
     圆测量对象
     
@@ -716,51 +712,18 @@ class CircleMeasureObject:
         self._draw_info(vis_img)
 
         return vis_img
-    
-    def _draw_measure_rectangles(self, img: np.ndarray,
-                                  color: Tuple[int, int, int],
-                                  thickness: int):
-        """绘制所有测量矩形"""
+
+    def _draw_measure_rectangles(
+        self, img: np.ndarray, color: Tuple[int, int, int], thickness: int
+    ):
+        """绘制所有测量矩形（Circle 使用不同的 rect dict 键名约定）"""
         for rect in self.measure_rectangles:
             self._draw_single_rectangle(
-                img,
-                rect['center'],
-                rect['angle'],
-                rect['length1'],
-                rect['length2'],
-                color,
-                thickness
+                img, rect['center'], rect['angle'],
+                rect['length1'], rect['length2'],
+                color, thickness,
             )
-    
-    def _draw_single_rectangle(self, img: np.ndarray,
-                                center: Tuple[float, float],
-                                angle: float,
-                                length1: float,
-                                length2: float,
-                                color: Tuple[int, int, int],
-                                thickness: int):
-        """绘制单个测量矩形"""
-        cos_a = np.cos(angle)
-        sin_a = np.sin(angle)
-        
-        # 四个角点
-        corners = np.array([
-            [center[1] - length1/2 * cos_a - length2/2 * sin_a,
-             center[0] - length1/2 * sin_a + length2/2 * cos_a],
-            [center[1] + length1/2 * cos_a - length2/2 * sin_a,
-             center[0] + length1/2 * sin_a + length2/2 * cos_a],
-            [center[1] + length1/2 * cos_a + length2/2 * sin_a,
-             center[0] + length1/2 * sin_a - length2/2 * cos_a],
-            [center[1] - length1/2 * cos_a + length2/2 * sin_a,
-             center[0] - length1/2 * sin_a - length2/2 * cos_a]
-        ], dtype=np.int32)
-        
-        # 绘制矩形框
-        cv2.polylines(img, [corners], True, color, thickness)
-        
-        # 绘制中心点
-        cv2.circle(img, (int(center[1]), int(center[0])), 2, color, -1)
-    
+
     def _draw_edge_points(self, img: np.ndarray,
                           color: Tuple[int, int, int],
                           radius: int,
