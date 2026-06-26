@@ -665,15 +665,18 @@ class CircleMeasureObject:
                   show_fitted_circle: bool = True,
                   show_labels: bool = True,
                   show_center_lines: bool = False,
+                  show_search_radii: bool = True,
                   rect_color: Tuple[int, int, int] = (0, 255, 255),
                   edge_color: Tuple[int, int, int] = (0, 255, 0),
                   circle_color: Tuple[int, int, int] = (255, 0, 255),
                   center_color: Tuple[int, int, int] = (0, 0, 255),
+                  radius_min_color: Tuple[int, int, int] = (255, 255, 0),
+                  radius_max_color: Tuple[int, int, int] = (0, 165, 255),
                   line_thickness: int = 2,
                   point_radius: int = 5) -> np.ndarray:
         """
         可视化测量结果
-        
+
         参数:
             image: 输入图像（灰度或彩色）
             show_rectangles: 是否显示测量矩形
@@ -681,13 +684,16 @@ class CircleMeasureObject:
             show_fitted_circle: 是否显示拟合圆
             show_labels: 是否显示标签
             show_center_lines: 是否显示圆心到边缘点的连线
+            show_search_radii: 是否显示搜索半径范围（radius_min / radius_max）
             rect_color: 矩形颜色 (B, G, R)
             edge_color: 边缘点颜色
             circle_color: 拟合圆颜色
             center_color: 圆心颜色
+            radius_min_color: 最小搜索半径圆颜色 (B, G, R)
+            radius_max_color: 最大搜索半径圆颜色 (B, G, R)
             line_thickness: 线条粗细
             point_radius: 点半径
-            
+
         返回:
             可视化后的彩色图像
         """
@@ -696,23 +702,27 @@ class CircleMeasureObject:
             vis_img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         else:
             vis_img = image.copy()
-        
+
         # 1. 绘制测量矩形
         if show_rectangles:
             self._draw_measure_rectangles(vis_img, rect_color, line_thickness)
-        
+
         # 2. 绘制边缘点
         if show_edge_points:
-            self._draw_edge_points(vis_img, edge_color, point_radius, 
+            self._draw_edge_points(vis_img, edge_color, point_radius,
                                    show_labels, show_center_lines, center_color)
-        
-        # 3. 绘制拟合圆
+
+        # 3. 绘制搜索半径范围
+        if show_search_radii:
+            self._draw_search_radii(vis_img, radius_min_color, radius_max_color, line_thickness)
+
+        # 4. 绘制拟合圆
         if show_fitted_circle and self.result is not None:
             self._draw_fitted_circle(vis_img, circle_color, center_color, line_thickness)
-        
+
         # 添加信息
         self._draw_info(vis_img)
-        
+
         return vis_img
     
     def _draw_measure_rectangles(self, img: np.ndarray,
@@ -782,6 +792,56 @@ class CircleMeasureObject:
                 cv2.putText(img, str(i), (int(x) + radius + 3, int(y) - 3),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
     
+    def _draw_dashed_circle(self, img: np.ndarray,
+                            center: Tuple[float, float],
+                            radius: float,
+                            color: Tuple[int, int, int],
+                            thickness: int = 1,
+                            dash_len: int = 10,
+                            gap_len: int = 6):
+        """绘制虚线圆（用短线段近似圆弧）"""
+        cx, cy = int(center[1]), int(center[0])
+        r = int(radius)
+        if r <= 0:
+            return
+
+        total_angle = (dash_len + gap_len) / r
+        n_segments = int(2 * np.pi / total_angle)
+        if n_segments == 0:
+            return
+
+        for i in range(n_segments):
+            a_start = i * total_angle
+            a_end = a_start + dash_len / r
+
+            n_pts = max(2, int(dash_len / 3))
+            pts = []
+            for j in range(n_pts + 1):
+                a = a_start + j * (a_end - a_start) / n_pts
+                x = int(cx + r * np.cos(a))
+                y = int(cy + r * np.sin(a))
+                pts.append([x, y])
+
+            if len(pts) >= 2:
+                cv2.polylines(img, [np.array(pts, dtype=np.int32)], False,
+                              color, thickness, cv2.LINE_AA)
+
+    def _draw_search_radii(self, img: np.ndarray,
+                           min_color: Tuple[int, int, int],
+                           max_color: Tuple[int, int, int],
+                           thickness: int):
+        """绘制搜索半径范围（radius_min 和 radius_max 虚线圆）"""
+        center = self.center
+        r_min = getattr(self, 'radius_min', None)
+        r_max = getattr(self, 'radius_max', None)
+
+        if r_min is not None and r_min > 0:
+            self._draw_dashed_circle(img, center, r_min, min_color,
+                                     max(1, thickness - 1), dash_len=8, gap_len=5)
+        if r_max is not None and r_max > 0 and r_max > (r_min or 0):
+            self._draw_dashed_circle(img, center, r_max, max_color,
+                                     max(1, thickness - 1), dash_len=8, gap_len=5)
+
     def _draw_fitted_circle(self, img: np.ndarray,
                             circle_color: Tuple[int, int, int],
                             center_color: Tuple[int, int, int],
@@ -789,7 +849,7 @@ class CircleMeasureObject:
         """绘制拟合圆"""
         if self.result is None:
             return
-        
+
         center = self.result['center']
         radius = self.result['radius']
         
@@ -842,6 +902,13 @@ class CircleMeasureObject:
             
             cv2.putText(img, info4, (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
             cv2.putText(img, info4, (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+            r_min = getattr(self, 'radius_min', None)
+            r_max = getattr(self, 'radius_max', None)
+            if r_min is not None and r_max is not None:
+                info5 = f'Search radii: [{r_min:.1f}, {r_max:.1f}] px'
+                cv2.putText(img, info5, (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+                cv2.putText(img, info5, (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
 
 class MetrologyModel:
