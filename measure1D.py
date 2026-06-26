@@ -5,6 +5,7 @@ from scipy.ndimage import gaussian_filter1d
 from measurement.constants import EPS
 from measurement.viz import to_bgr, draw_text_shadow
 from measurement.signal_ops import find_peaks_vectorized, batch_refine_subpixel
+from measurement.transforms import compute_rotated_rect_corners
 
 class Halcon1DMeasure:
     """
@@ -646,21 +647,10 @@ class Halcon1DMeasure:
         vis = to_bgr(img)
         
         # 先绘制ROI矩形框
-        cos_a = np.cos(self.angle)
-        sin_a = np.sin(self.angle)
-        dx_half = self.length1 / 2
-        dy_half = self.length2 / 2
-        
-        corners = np.array([
-            [self.col - dx_half * cos_a + dy_half * sin_a,
-             self.row - dx_half * sin_a - dy_half * cos_a],
-            [self.col + dx_half * cos_a + dy_half * sin_a,
-             self.row + dx_half * sin_a - dy_half * cos_a],
-            [self.col + dx_half * cos_a - dy_half * sin_a,
-             self.row + dx_half * sin_a + dy_half * cos_a],
-            [self.col - dx_half * cos_a - dy_half * sin_a,
-             self.row - dx_half * sin_a + dy_half * cos_a]
-        ], dtype=np.int32)
+        corners = compute_rotated_rect_corners(
+            self.col, self.row,
+            self.length1 / 2, self.length2 / 2, self.angle,
+        )
         
         # 绘制矩形框（使用更明显的颜色和线条）
         # 外层黑色边框，增强对比度
@@ -724,32 +714,10 @@ class Halcon1DMeasure:
         vis_img = to_bgr(img)
         
         # 计算ROI的四个角点（按顺时针顺序：左上、右上、右下、左下）
-        cos_a = np.cos(self.angle)
-        sin_a = np.sin(self.angle)
-        
-        # 四个角点的偏移量
-        dx_half = self.length1 / 2
-        dy_half = self.length2 / 2
-        
-        # 左上、右上、右下、左下（顺时针顺序）
-        corners = np.array([
-            [
-                self.col - dx_half * cos_a + dy_half * sin_a,
-                self.row - dx_half * sin_a - dy_half * cos_a
-            ],
-            [
-                self.col + dx_half * cos_a + dy_half * sin_a,
-                self.row + dx_half * sin_a - dy_half * cos_a
-            ],
-            [
-                self.col + dx_half * cos_a - dy_half * sin_a,
-                self.row + dx_half * sin_a + dy_half * cos_a
-            ],
-            [
-                self.col - dx_half * cos_a - dy_half * sin_a,
-                self.row - dx_half * sin_a + dy_half * cos_a
-            ]
-        ], dtype=np.int32)
+        corners = compute_rotated_rect_corners(
+            self.col, self.row,
+            self.length1 / 2, self.length2 / 2, self.angle,
+        )
         
         # 绘制矩形框
         cv2.polylines(vis_img, [corners], True, rect_color, line_thickness)
@@ -810,22 +778,10 @@ class Halcon1DMeasure:
         vis = to_bgr(img)
         
         # 绘制ROI矩形框
-        cos_a = np.cos(self.angle)
-        sin_a = np.sin(self.angle)
-        dx_half = self.length1 / 2
-        dy_half = self.length2 / 2
-        
-        # 计算矩形框的四个角点
-        corners = np.array([
-            [self.col - dx_half * cos_a + dy_half * sin_a,
-            self.row - dx_half * sin_a - dy_half * cos_a],
-            [self.col + dx_half * cos_a + dy_half * sin_a,
-            self.row + dx_half * sin_a - dy_half * cos_a],
-            [self.col + dx_half * cos_a - dy_half * sin_a,
-            self.row + dx_half * sin_a + dy_half * cos_a],
-            [self.col - dx_half * cos_a - dy_half * sin_a,
-            self.row - dx_half * sin_a + dy_half * cos_a]
-        ], dtype=np.int32)
+        corners = compute_rotated_rect_corners(
+            self.col, self.row,
+            self.length1 / 2, self.length2 / 2, self.angle,
+        )
         
         # 绘制矩形框（绿色）
         cv2.polylines(vis, [corners], True, (0, 255, 0), 2)
@@ -950,32 +906,10 @@ def visualize_measure_result(img: np.ndarray, measure: Halcon1DMeasure,
     
     # 绘制ROI框
     # 计算ROI的四个角点（按顺时针顺序：左上、右上、右下、左下）
-    cos_a = np.cos(measure.angle)
-    sin_a = np.sin(measure.angle)
-    
-    # 四个角点的偏移量
-    dx_half = measure.length1 / 2
-    dy_half = measure.length2 / 2
-    
-    # 左上、右上、右下、左下（顺时针顺序）
-    corners = np.array([
-        [
-            measure.col - dx_half * cos_a + dy_half * sin_a,
-            measure.row - dx_half * sin_a - dy_half * cos_a
-        ],
-        [
-            measure.col + dx_half * cos_a + dy_half * sin_a,
-            measure.row + dx_half * sin_a - dy_half * cos_a
-        ],
-        [
-            measure.col + dx_half * cos_a - dy_half * sin_a,
-            measure.row + dx_half * sin_a + dy_half * cos_a
-        ],
-        [
-            measure.col - dx_half * cos_a - dy_half * sin_a,
-            measure.row - dx_half * sin_a + dy_half * cos_a
-        ]
-    ], dtype=np.int32)
+    corners = compute_rotated_rect_corners(
+        measure.col, measure.row,
+        measure.length1 / 2, measure.length2 / 2, measure.angle,
+    )
     cv2.polylines(vis, [corners], True, (0, 255, 0), 2)
     
     # 根据结果类型绘制
