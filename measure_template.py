@@ -37,6 +37,8 @@ import json
 import cv2
 import numpy as np
 from typing import Tuple, Optional, Dict, Any, List, Protocol
+from measurement.constants import EPS
+from measurement.viz import to_bgr, to_gray, draw_text_shadow
 
 
 # =========================================================================
@@ -1249,27 +1251,21 @@ class TemplatePoint:
         y = 25
         mode_str = self.preprocessor.name if hasattr(self.preprocessor, 'name') else 'Custom'
         title = f'Template Point [{mode_str}]'
-        cv2.putText(img, title, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-        cv2.putText(img, title, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        draw_text_shadow(img, title, (10, y), color=(255, 255, 255), font_scale=0.6, thickness=1)
 
         y += 22
         size_text = f'Template: {self._crop_h}x{self._crop_w} px'
-        cv2.putText(img, size_text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 2)
-        cv2.putText(img, size_text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+        draw_text_shadow(img, size_text, (10, y), color=(200, 200, 200), font_scale=0.45, thickness=1)
 
         if self.result is not None:
             y += 20
             num_matches = self.result.get('num_matches', 0)
             if num_matches > 1:
                 count_text = f'Matches: {num_matches}'
-                cv2.putText(img, count_text, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
-                           0.45, (0, 0, 0), 2)
-                cv2.putText(img, count_text, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
-                           0.45, (200, 200, 200), 1)
+                draw_text_shadow(img, count_text, (10, y), color=(200, 200, 200), font_scale=0.45, thickness=1)
                 y += 20
             score_text = f'Score: {self.result["match_score"]:.4f}'
-            cv2.putText(img, score_text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 2)
-            cv2.putText(img, score_text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+            draw_text_shadow(img, score_text, (10, y), color=(200, 200, 200), font_scale=0.45, thickness=1)
 
             y += 20
             valid_text = 'VALID' if self.result['valid'] else 'INVALID'
@@ -1415,16 +1411,12 @@ class TemplatePoint:
     @staticmethod
     def _to_gray(image: np.ndarray) -> np.ndarray:
         """Convert image to grayscale if it is BGR."""
-        if len(image.shape) == 3:
-            return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        return image
+        return to_gray(image)
 
     @staticmethod
     def _to_bgr(image: np.ndarray) -> np.ndarray:
         """Convert image to BGR if it is grayscale (returns a copy)."""
-        if len(image.shape) == 2:
-            return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        return image.copy()
+        return to_bgr(image)
 
     def _compute_crop_bounds(self, image_shape: Tuple[int, int]) -> Tuple[int, int, int, int]:
         """
@@ -1468,7 +1460,7 @@ class TemplatePoint:
             try:
                 coeffs = np.polyfit(x_vals, y_vals, 2)
                 a, b, c = coeffs
-                if abs(a) > 1e-10:
+                if abs(a) > EPS:
                     subpixel_x = -b / (2.0 * a)
                 else:
                     subpixel_x = float(peak_x)
@@ -1485,7 +1477,7 @@ class TemplatePoint:
             try:
                 coeffs = np.polyfit(x_vals, y_vals, 2)
                 a, b, c = coeffs
-                if abs(a) > 1e-10:
+                if abs(a) > EPS:
                     subpixel_y = -b / (2.0 * a)
                 else:
                     subpixel_y = float(peak_y)

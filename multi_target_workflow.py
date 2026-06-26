@@ -43,6 +43,8 @@ import cv2
 import numpy as np
 
 from measure_template import TemplatePoint, RawPreprocessor, Preprocessor
+from measurement.constants import EPS
+from measurement.viz import to_bgr, draw_text_shadow
 from measure_workflow import (
     MeasurementWorkflow,
     PointResult,
@@ -174,7 +176,7 @@ def _transform_line_result(
     dr = new_end_row - new_start_row
     dc = new_end_col - new_start_col
     length = math.sqrt(dr * dr + dc * dc)
-    if length < 1e-10:
+    if length < EPS:
         a, b, c = 0.0, 0.0, 0.0
     else:
         # Normal vector: (dc, -dr) / length gives direction perpendicular to line
@@ -184,7 +186,7 @@ def _transform_line_result(
         c = -(a * new_start_row + b * new_start_col)
         # Normalize
         norm = math.sqrt(a * a + b * b)
-        if norm > 1e-10:
+        if norm > EPS:
             a /= norm
             b /= norm
             c /= norm
@@ -939,10 +941,7 @@ class MultiTargetWorkflow:
             Annotated BGR image (copy).
         """
         # Convert to BGR
-        if len(image.shape) == 2:
-            vis = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        else:
-            vis = image.copy()
+        vis = to_bgr(image)
 
         if targets is None:
             targets = []
@@ -981,10 +980,7 @@ class MultiTargetWorkflow:
                      color, 2)
 
             # Index label
-            cv2.putText(vis, str(t.index), (c + point_radius + 4, r - point_radius),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
-            cv2.putText(vis, str(t.index), (c + point_radius + 4, r - point_radius),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+            draw_text_shadow(vis, str(t.index), (c + point_radius + 4, r - point_radius), color=(255, 255, 255), font_scale=0.55, thickness=1)
 
             # Draw measurements
             if show_measurements:
@@ -1017,10 +1013,7 @@ class MultiTargetWorkflow:
 
         # Info overlay
         y = 25
-        cv2.putText(vis, f'Targets: {len(targets)}', (10, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-        cv2.putText(vis, f'Targets: {len(targets)}', (10, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        draw_text_shadow(vis, f'Targets: {len(targets)}', (10, y), color=(255, 255, 255), font_scale=0.6, thickness=1)
 
         if wait_time >= 0:
             cv2.imshow("Multi-Target Workflow", vis)

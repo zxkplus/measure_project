@@ -56,6 +56,8 @@ import numpy as np
 
 from measure1D import Halcon1DMeasure
 from measure2D import CircleMeasureObject, LineMeasureObject
+from measurement.constants import EPS
+from measurement.viz import to_bgr, draw_text_shadow
 from measure_template import (
     Preprocessor,
     RawPreprocessor,
@@ -290,7 +292,7 @@ class SimilarityTransform:
 
         # Scale
         src_var = np.sum(src_centered**2) / n
-        if src_var > 1e-10:
+        if src_var > EPS:
             scale = np.sum(S * d) / src_var
         else:
             scale = 1.0
@@ -840,10 +842,7 @@ class EdgePointObject(MeasureObject):
         )
 
     def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:
-        if len(image.shape) == 2:
-            vis = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        else:
-            vis = image.copy()
+        vis = to_bgr(image)
 
         # Draw the caliper position (reuse cached object from measure() if available)
         measure = getattr(self, "_cached_measure", None)
@@ -979,10 +978,7 @@ class TemplateMatchPointObject(MeasureObject):
         )
 
     def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:
-        if len(image.shape) == 2:
-            vis = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        else:
-            vis = image.copy()
+        vis = to_bgr(image)
 
         pos = (self._calibrated_col, self._calibrated_row)
         if self.result is not None and self.result.valid:
@@ -1136,10 +1132,7 @@ class EdgePairObject(MeasureObject):
         )
 
     def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:
-        if len(image.shape) == 2:
-            vis = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        else:
-            vis = image.copy()
+        vis = to_bgr(image)
         measure = getattr(self, "_cached_measure", None)
         if measure is None:
             measure = Halcon1DMeasure(
@@ -1496,7 +1489,7 @@ class TwoPointsLineObject(MeasureObject):
         dc = p2.col - p1.col
         norm = np.sqrt(dr**2 + dc**2)
 
-        if norm < 1e-10:
+        if norm < EPS:
             result = LineResult(
                 label=self.label,
                 valid=False,
@@ -1540,10 +1533,7 @@ class TwoPointsLineObject(MeasureObject):
         return obj
 
     def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:
-        if len(image.shape) == 2:
-            vis = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        else:
-            vis = image.copy()
+        vis = to_bgr(image)
         if self.result is not None and self.result.valid:
             r = self.result
             pt1 = (int(round(r.start_col)), int(round(r.start_row)))
@@ -1591,10 +1581,7 @@ class TwoPointsDistanceObject(MeasureObject):
         return obj
 
     def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:
-        if len(image.shape) == 2:
-            vis = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        else:
-            vis = image.copy()
+        vis = to_bgr(image)
         if (
             self.result is not None
             and self.result.valid
@@ -1636,7 +1623,7 @@ class PointLineDistanceObject(MeasureObject):
             return result
         # Distance = |a*row + b*col + c| / sqrt(a^2 + b^2)
         dist = abs(line.a * pt.row + line.b * pt.col + line.c) / np.sqrt(
-            line.a**2 + line.b**2 + 1e-10
+            line.a**2 + line.b**2 + EPS
         )
         result = DistanceResult(label=self.label, value=dist, valid=True)
         self.result = result
@@ -1652,10 +1639,7 @@ class PointLineDistanceObject(MeasureObject):
         return obj
 
     def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:
-        if len(image.shape) == 2:
-            vis = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        else:
-            vis = image.copy()
+        vis = to_bgr(image)
         if (
             self.result is not None
             and self.result.valid
@@ -1709,7 +1693,7 @@ class TwoLinesAngleObject(MeasureObject):
         dot = line1.a * line2.a + line1.b * line2.b
         norm1 = np.sqrt(line1.a**2 + line1.b**2)
         norm2 = np.sqrt(line2.a**2 + line2.b**2)
-        cos_angle = np.clip(dot / (norm1 * norm2 + 1e-10), -1.0, 1.0)
+        cos_angle = np.clip(dot / (norm1 * norm2 + EPS), -1.0, 1.0)
         angle = np.arccos(cos_angle)
         # Return acute angle
         if angle > np.pi / 2:
@@ -1728,10 +1712,7 @@ class TwoLinesAngleObject(MeasureObject):
         return obj
 
     def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:
-        if len(image.shape) == 2:
-            vis = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        else:
-            vis = image.copy()
+        vis = to_bgr(image)
         if (
             self.result is not None
             and self.result.valid
@@ -1749,7 +1730,7 @@ class TwoLinesAngleObject(MeasureObject):
                 a1, b1, c1 = line1.a, line1.b, line1.c
                 a2, b2, c2 = line2.a, line2.b, line2.c
                 det = a1 * b2 - a2 * b1
-                if abs(det) > 1e-10:
+                if abs(det) > EPS:
                     ix_row = (b1 * c2 - b2 * c1) / det
                     ix_col = (a2 * c1 - a1 * c2) / det
                     ix = (int(round(ix_col)), int(round(ix_row)))
@@ -1800,10 +1781,7 @@ class PointCircleDistanceObject(MeasureObject):
         return obj
 
     def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:
-        if len(image.shape) == 2:
-            vis = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        else:
-            vis = image.copy()
+        vis = to_bgr(image)
         if (
             self.result is not None
             and self.result.valid
@@ -2141,10 +2119,7 @@ class MeasurementWorkflow:
         Returns:
             Annotated BGR image.
         """
-        if len(image.shape) == 2:
-            vis = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        else:
-            vis = image.copy()
+        vis = to_bgr(image)
 
         # Filter objects
         order = self._execution_order or self._registration_order

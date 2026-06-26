@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 from typing import Tuple, List, Optional
 from scipy.ndimage import gaussian_filter1d
+from measurement.constants import EPS
+from measurement.viz import to_bgr, draw_text_shadow
 
 class Halcon1DMeasure:
     """
@@ -404,7 +406,7 @@ class Halcon1DMeasure:
             a, b, c = coeffs
             
             # 极值点位置: x = -b / (2a)
-            if abs(a) > 1e-10:
+            if abs(a) > EPS:
                 refined_pos = -b / (2 * a)
             else:
                 refined_pos = peak_idx
@@ -454,7 +456,7 @@ class Halcon1DMeasure:
         profile_min = profile.min()
         profile_max = profile.max()
         
-        if profile_max - profile_min > 1e-10:
+        if profile_max - profile_min > EPS:
             profile_norm = (profile - profile_min) / (profile_max - profile_min)
         else:
             profile_norm = np.zeros_like(profile)
@@ -474,20 +476,18 @@ class Halcon1DMeasure:
         
         # 绘制零线（用于梯度）
         if zero_line:
-            zero_y = img_height - margin - int((0 - profile_min) / (profile_max - profile_min + 1e-10) * (img_height - 2 * margin))
+            zero_y = img_height - margin - int((0 - profile_min) / (profile_max - profile_min + EPS) * (img_height - 2 * margin))
             cv2.line(vis, (0, zero_y), (img_width, zero_y), (128, 128, 128), 1, cv2.LINE_AA)
             
         # 绘制基准线
         cv2.line(vis, (0, img_height - margin), (img_width, img_height - margin), (0, 0, 0), 1)
         
         # 添加标题
-        cv2.putText(vis, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-        cv2.putText(vis, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        draw_text_shadow(vis, title, (10, 25), color=(255, 255, 255), font_scale=0.6, thickness=1)
         
         # 显示数值范围
         range_text = f'[{profile_min:.1f}, {profile_max:.1f}]'
-        cv2.putText(vis, range_text, (10, img_height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)
-        cv2.putText(vis, range_text, (10, img_height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
+        draw_text_shadow(vis, range_text, (10, img_height - 10), color=(100, 100, 100), font_scale=0.4, thickness=1)
         
         cv2.imshow(window_name, vis)
         cv2.waitKey(wait_time)
@@ -515,7 +515,7 @@ class Halcon1DMeasure:
         profile_min = profile.min()
         profile_max = profile.max()
         
-        if profile_max - profile_min > 1e-10:
+        if profile_max - profile_min > EPS:
             profile_norm = (profile - profile_min) / (profile_max - profile_min)
         else:
             profile_norm = np.zeros_like(profile)
@@ -533,13 +533,13 @@ class Halcon1DMeasure:
         cv2.polylines(vis, [points], False, (100, 100, 100), 2)
         
         # 绘制零线
-        zero_y = img_height - margin - int((0 - profile_min) / (profile_max - profile_min + 1e-10) * (img_height - 2 * margin))
+        zero_y = img_height - margin - int((0 - profile_min) / (profile_max - profile_min + EPS) * (img_height - 2 * margin))
         cv2.line(vis, (0, zero_y), (img_width, zero_y), (128, 128, 128), 1, cv2.LINE_AA)
         
         # 标记峰值点
         for pos, amp in zip(positions, amplitudes):
             # 计算峰值在图像中的位置
-            peak_y = img_height - margin - int((amp - profile_min) / (profile_max - profile_min + 1e-10) * (img_height - 2 * margin))
+            peak_y = img_height - margin - int((amp - profile_min) / (profile_max - profile_min + EPS) * (img_height - 2 * margin))
             
             # 根据幅度正负选择颜色
             if amp > 0:
@@ -565,13 +565,11 @@ class Halcon1DMeasure:
         cv2.line(vis, (0, img_height - margin), (img_width, img_height - margin), (0, 0, 0), 1)
         
         # 添加标题
-        cv2.putText(vis, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-        cv2.putText(vis, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        draw_text_shadow(vis, title, (10, 25), color=(255, 255, 255), font_scale=0.6, thickness=1)
         
         # 统计信息
         stats_text = f'Peaks: {len(positions)} (+{sum(1 for a in amplitudes if a > 0)}/-{sum(1 for a in amplitudes if a < 0)})'
-        cv2.putText(vis, stats_text, (10, img_height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)
-        cv2.putText(vis, stats_text, (10, img_height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
+        draw_text_shadow(vis, stats_text, (10, img_height - 10), color=(100, 100, 100), font_scale=0.4, thickness=1)
         
         cv2.imshow(window_name, vis)
         cv2.waitKey(wait_time)
@@ -589,10 +587,7 @@ class Halcon1DMeasure:
             window_name: 窗口名称
         """
         # 转换为彩色图像
-        if len(roi.shape) == 2:
-            vis = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
-        else:
-            vis = roi.copy()
+        vis = to_bgr(roi)
         
         h, w = roi.shape[:2]
         center_y = h // 2
@@ -624,10 +619,7 @@ class Halcon1DMeasure:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
         
         # 添加标题
-        cv2.putText(vis, f'ROI with {len(positions)} Peaks', (10, 25),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-        cv2.putText(vis, f'ROI with {len(positions)} Peaks', (10, 25),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        draw_text_shadow(vis, f'ROI with {len(positions)} Peaks', (10, 25), color=(255, 255, 255), font_scale=0.6, thickness=1)
         
         # 绘制边框
         cv2.rectangle(vis, (0, 0), (w-1, h-1), (0, 0, 0), 2)
@@ -651,10 +643,7 @@ class Halcon1DMeasure:
             window_name: 窗口名称
         """
         # 转换为彩色图像
-        if len(img.shape) == 2:
-            vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        else:
-            vis = img.copy()
+        vis = to_bgr(img)
         
         # 先绘制ROI矩形框
         cos_a = np.cos(self.angle)
@@ -703,13 +692,11 @@ class Halcon1DMeasure:
         
         # 添加标题
         title = f'Edges: {len(row_edges)} ({transition})'
-        cv2.putText(vis, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
-        cv2.putText(vis, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+        draw_text_shadow(vis, title, (10, 25), color=(255, 255, 255), font_scale=0.7, thickness=1)
         
         # 添加ROI信息
         roi_info = f'ROI: ({self.col:.0f},{self.row:.0f}) {np.degrees(self.angle):.1f}°'
-        cv2.putText(vis, roi_info, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-        cv2.putText(vis, roi_info, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        draw_text_shadow(vis, roi_info, (10, 55), color=(255, 255, 255), font_scale=0.5, thickness=1)
         
         cv2.imshow(window_name, vis)
         cv2.waitKey(wait_time)
@@ -734,10 +721,7 @@ class Halcon1DMeasure:
             vis_img: 绘制后的彩色图像
         """
         # 转换为彩色图像（如果是灰度图）
-        if len(img.shape) == 2:
-            vis_img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        else:
-            vis_img = img.copy()
+        vis_img = to_bgr(img)
         
         # 计算ROI的四个角点（按顺时针顺序：左上、右上、右下、左下）
         cos_a = np.cos(self.angle)
@@ -823,10 +807,7 @@ class Halcon1DMeasure:
             wait_time: 等待时间（毫秒），0表示无限等待，-1表示不显示窗口
         """
         # 转换为彩色图像
-        if len(img.shape) == 2:
-            vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        else:
-            vis = img.copy()
+        vis = to_bgr(img)
         
         # 绘制ROI矩形框
         cos_a = np.cos(self.angle)
@@ -927,13 +908,11 @@ class Halcon1DMeasure:
         
         # 添加标题
         title = 'Measurement Results'
-        cv2.putText(vis, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
-        cv2.putText(vis, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+        draw_text_shadow(vis, title, (10, 25), color=(255, 255, 255), font_scale=0.7, thickness=1)
         
         # 添加ROI信息
         roi_info = f'ROI: ({self.col:.0f},{self.row:.0f}) {np.degrees(self.angle):.1f}°'
-        cv2.putText(vis, roi_info, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-        cv2.putText(vis, roi_info, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        draw_text_shadow(vis, roi_info, (10, 55), color=(255, 255, 255), font_scale=0.5, thickness=1)
         
         # 显示结果
         if wait_time >= 0:
@@ -967,7 +946,7 @@ def visualize_measure_result(img: np.ndarray, measure: Halcon1DMeasure,
     """
     可视化测量结果
     """
-    vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    vis = to_bgr(img)
     
     # 绘制ROI框
     # 计算ROI的四个角点（按顺时针顺序：左上、右上、右下、左下）
@@ -1042,7 +1021,7 @@ def visualize_profile(profile: np.ndarray, window_name: str = 'Profile'):
     profile_img = np.ones((h, w), dtype=np.uint8) * 200
     
     # 归一化轮廓到图像高度
-    profile_norm = (profile - profile.min()) / (profile.max() - profile.min() + 1e-10)
+    profile_norm = (profile - profile.min()) / (profile.max() - profile.min() + EPS)
     profile_scaled = (profile_norm * (h - 40)).astype(np.int32)
     
     # 绘制轮廓

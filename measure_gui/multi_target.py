@@ -31,6 +31,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from measurement.constants import EPS
+from measurement.viz import to_bgr, draw_text_shadow
 from measure_workflow import (
     EdgePairObject,
     EdgePointObject,
@@ -469,10 +471,7 @@ class MultiTargetWorkflow:
 
     def _debug_save_inspection_boxes(self, inspection_image: np.ndarray):
         """Draw rotated target boxes on the inspection image and save."""
-        if len(inspection_image.shape) == 2:
-            vis = cv2.cvtColor(inspection_image, cv2.COLOR_GRAY2BGR)
-        else:
-            vis = inspection_image.copy()
+        vis = to_bgr(inspection_image)
 
         color_palette = [
             (0, 255, 0),     # green
@@ -537,10 +536,7 @@ class MultiTargetWorkflow:
         Returns:
             BGR image with overlays drawn.
         """
-        if len(patch.shape) == 2:
-            vis = cv2.cvtColor(patch, cv2.COLOR_GRAY2BGR)
-        else:
-            vis = patch.copy()
+        vis = to_bgr(patch)
 
         h, w = vis.shape[:2]
 
@@ -634,7 +630,7 @@ class MultiTargetWorkflow:
                         and hasattr(line, "a") and hasattr(line, "c")):
                     a, b, c = line.a, line.b, line.c
                     denom = a * a + b * b
-                    if denom > 1e-10:
+                    if denom > EPS:
                         proj_col = (b * b * pt.col - a * b * pt.row - a * c) / denom
                         proj_row = (-a * b * pt.col + a * a * pt.row - b * c) / denom
                         p1 = (int(pt.col), int(pt.row))
@@ -718,7 +714,7 @@ class MultiTargetWorkflow:
         dr = end[0] - start[0]
         dc = end[1] - start[1]
         line_len = np.sqrt(dr**2 + dc**2)
-        if line_len > 1e-10:
+        if line_len > EPS:
             for i in range(num_measures):
                 t = (i + 0.5) / num_measures
                 mr = start[0] + t * dr
@@ -1145,7 +1141,7 @@ class MultiTargetWorkflow:
                         dr = p2.row - p1.row
                         dc = p2.col - p1.col
                         norm = np.sqrt(dr**2 + dc**2)
-                        if norm > 1e-10:
+                        if norm > EPS:
                             from measure_workflow import LineResult
                             a = dc / norm
                             b = -dr / norm
@@ -1189,7 +1185,7 @@ class MultiTargetWorkflow:
                     if (pt and line and pt.valid and line.valid and
                         hasattr(line, "a") and hasattr(line, "b") and hasattr(line, "c")):
                         dist = abs(line.a * pt.row + line.b * pt.col + line.c) / \
-                               np.sqrt(line.a**2 + line.b**2 + 1e-10)
+                               np.sqrt(line.a**2 + line.b**2 + EPS)
                         from measure_workflow import DistanceResult
                         result = DistanceResult(label=label, value=dist, valid=True)
                     else:
@@ -1312,10 +1308,7 @@ class MultiTargetWorkflow:
                 raise ValueError("No inspection image available.")
             inspection_image = self._last_inspection_image
 
-        if len(inspection_image.shape) == 2:
-            vis = cv2.cvtColor(inspection_image, cv2.COLOR_GRAY2BGR)
-        else:
-            vis = inspection_image.copy()
+        vis = to_bgr(inspection_image)
 
         if color_palette is None:
             color_palette = [

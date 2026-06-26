@@ -11,6 +11,8 @@ import cv2
 import numpy as np
 from typing import Tuple, List, Optional, Dict, Any
 from measure1D import Halcon1DMeasure
+from measurement.constants import EPS
+from measurement.viz import to_bgr, draw_text_shadow
 
 
 class LineMeasureObject:
@@ -66,7 +68,7 @@ class LineMeasureObject:
         # 计算直线参数
         self.direction = self.end - self.start
         self.length = np.linalg.norm(self.direction)
-        if self.length > 1e-10:
+        if self.length > EPS:
             self.direction_normalized = self.direction / self.length
         else:
             self.direction_normalized = np.array([1.0, 0.0])
@@ -201,7 +203,7 @@ class LineMeasureObject:
         
         # 归一化参数
         norm = np.sqrt(a**2 + b**2)
-        if norm > 1e-10:
+        if norm > EPS:
             a, b, c = a/norm, b/norm, c/norm
         
         # 计算方向向量
@@ -213,7 +215,7 @@ class LineMeasureObject:
         cy = np.mean(y)
         
         # 投影到直线
-        d = (a * cx + b * cy + c) / (a**2 + b**2 + 1e-10)
+        d = (a * cx + b * cy + c) / (a**2 + b**2 + EPS)
         x0 = cx - a * d
         y0 = cy - b * d
         
@@ -230,7 +232,7 @@ class LineMeasureObject:
         fit_end = (y0 + t_max * direction[1], x0 + t_max * direction[0])
         
         # 计算拟合误差
-        distances = np.abs(a * x + b * y + c) / (np.sqrt(a**2 + b**2) + 1e-10)
+        distances = np.abs(a * x + b * y + c) / (np.sqrt(a**2 + b**2) + EPS)
         mean_error = np.mean(distances)
         max_error = np.max(distances)
         
@@ -277,10 +279,7 @@ class LineMeasureObject:
             可视化后的彩色图像
         """
         # 转换为彩色图像
-        if len(image.shape) == 2:
-            vis_img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        else:
-            vis_img = image.copy()
+        vis_img = to_bgr(image)
         
         # 1. 绘制测量矩形
         if show_rectangles:
@@ -418,8 +417,7 @@ class LineMeasureObject:
         
         # 标题
         title = f'Line Measure: {self.num_measures} rectangles'
-        cv2.putText(img, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-        cv2.putText(img, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        draw_text_shadow(img, title, (10, 25), color=(255, 255, 255), font_scale=0.6, thickness=1)
         
         # 结果信息
         if self.result:
@@ -427,14 +425,11 @@ class LineMeasureObject:
             info2 = f'Mean error: {self.result["mean_error"]:.3f} px'
             info3 = f'Angle: {np.degrees(self.result["angle"]):.2f} deg'
             
-            cv2.putText(img, info1, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-            cv2.putText(img, info1, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            draw_text_shadow(img, info1, (10, 50), color=(255, 255, 255), font_scale=0.5, thickness=1)
             
-            cv2.putText(img, info2, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-            cv2.putText(img, info2, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            draw_text_shadow(img, info2, (10, 70), color=(255, 255, 255), font_scale=0.5, thickness=1)
             
-            cv2.putText(img, info3, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-            cv2.putText(img, info3, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            draw_text_shadow(img, info3, (10, 90), color=(255, 255, 255), font_scale=0.5, thickness=1)
 
 
 class CircleMeasureObject:
@@ -698,10 +693,7 @@ class CircleMeasureObject:
             可视化后的彩色图像
         """
         # 转换为彩色图像
-        if len(image.shape) == 2:
-            vis_img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        else:
-            vis_img = image.copy()
+        vis_img = to_bgr(image)
 
         # 1. 绘制测量矩形
         if show_rectangles:
@@ -880,8 +872,7 @@ class CircleMeasureObject:
         
         # 标题
         title = f'Circle Measure: {self.num_measures} rectangles'
-        cv2.putText(img, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-        cv2.putText(img, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        draw_text_shadow(img, title, (10, 25), color=(255, 255, 255), font_scale=0.6, thickness=1)
         
         # 结果信息
         if self.result:
@@ -891,24 +882,19 @@ class CircleMeasureObject:
             info3 = f'Edge points: {self.result["num_points"]}'
             info4 = f'Mean error: {self.result["mean_error"]:.3f} px'
             
-            cv2.putText(img, info1, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-            cv2.putText(img, info1, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            draw_text_shadow(img, info1, (10, 50), color=(255, 255, 255), font_scale=0.5, thickness=1)
             
-            cv2.putText(img, info2, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-            cv2.putText(img, info2, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            draw_text_shadow(img, info2, (10, 70), color=(255, 255, 255), font_scale=0.5, thickness=1)
             
-            cv2.putText(img, info3, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-            cv2.putText(img, info3, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            draw_text_shadow(img, info3, (10, 90), color=(255, 255, 255), font_scale=0.5, thickness=1)
             
-            cv2.putText(img, info4, (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-            cv2.putText(img, info4, (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            draw_text_shadow(img, info4, (10, 110), color=(255, 255, 255), font_scale=0.5, thickness=1)
 
             r_min = getattr(self, 'radius_min', None)
             r_max = getattr(self, 'radius_max', None)
             if r_min is not None and r_max is not None:
                 info5 = f'Search radii: [{r_min:.1f}, {r_max:.1f}] px'
-                cv2.putText(img, info5, (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-                cv2.putText(img, info5, (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                draw_text_shadow(img, info5, (10, 130), color=(255, 255, 255), font_scale=0.5, thickness=1)
 
 
 class MetrologyModel:
@@ -1065,10 +1051,7 @@ class MetrologyModel:
         返回:
             可视化后的图像
         """
-        if len(image.shape) == 2:
-            vis_img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        else:
-            vis_img = image.copy()
+        vis_img = to_bgr(image)
         
         for item in self.objects:
             obj = item['object']
