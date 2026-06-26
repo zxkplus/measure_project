@@ -1,0 +1,15 @@
+[project]
+name = "measure_project"
+version = "0.2.0"
+description = "纯 Python 实现的几何测量工具（1D 边缘检测、直线/圆拟合、模板匹配）"
+readme = "readme.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.21.0",
+    "opencv-python>=4.5.0",
+    "scipy>=1.7.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--headless"]
