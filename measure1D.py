@@ -4,17 +4,22 @@ from typing import Tuple, List, Optional
 from scipy.ndimage import gaussian_filter1d
 from measurement.constants import EPS
 from measurement.viz import to_bgr, draw_text_shadow
+from measurement.signal_ops import find_peaks_vectorized, batch_refine_subpixel
 
 class Halcon1DMeasure:
     """
     OpenCV实现的1D测量工具（简化版）
-    
+
     核心思路：
     1. 将斜矩形ROI通过仿射变换旋转为正矩形
     2. 在正矩形上水平方向统计每列的平均灰度值
     3. 进行边缘检测和亚像素定位
     4. 将结果逆变换回原图坐标
     """
+
+    # Class-level cache to avoid recomputing identical rotation matrices
+    # Key: (angle_deg, target_cx, target_cy, interpolation_flag)
+    _matrix_cache: dict = {}
     
     def __init__(self, row: float, col: float, angle: float, 
                  length1: float, length2: float,
@@ -41,77 +46,74 @@ class Halcon1DMeasure:
         self.inverse_matrix = None
         self._compute_transform_matrices()
     
+    # ------------------------------------------------------------------
+    # Interpolation flag lookup (shared class attribute to avoid
+    # per-instance dict construction)
+    # ------------------------------------------------------------------
+    _INTERP_FLAGS = {
+        'nearest': cv2.INTER_NEAREST,
+        'linear': cv2.INTER_LINEAR,
+        'cubic': cv2.INTER_CUBIC,
+    }
+
     def _compute_transform_matrices(self):
         """
-        计算仿射变换矩阵和逆矩阵
-        
-        关键：将ROI中心旋转到原点，旋转-angle角度，再平移回目标图像中心
+        计算仿射变换矩阵和逆矩阵（带类级别缓存）。
         """
-        # 旋转角度
         angle_deg = np.degrees(self.angle)
-        
-        # 计算正矩形在目标图像中的中心位置
-        target_center_x = self.length1 / 2
-        target_center_y = self.length2 / 2
-        
-        # 计算旋转矩阵：将原图中的点旋转到正矩形坐标系
+        target_cx = self.length1 / 2.0
+        target_cy = self.length2 / 2.0
+
+        # Cache lookup
+        cache_key = (round(angle_deg, 5), round(target_cx, 5),
+                     round(target_cy, 5))
+        if cache_key in self._matrix_cache:
+            self.rotation_matrix, self.inverse_matrix = self._matrix_cache[cache_key]
+            return
+
+        # Compute rotation matrix (with OpenCV convention)
         self.rotation_matrix = cv2.getRotationMatrix2D(
             center=(self.col, self.row),
             angle=angle_deg,
-            scale=1.0
+            scale=1.0,
         )
-        
-        # 调整旋转矩阵，使ROI移动到目标图像中心
-        self.rotation_matrix[0, 2] += target_center_x - self.col
-        self.rotation_matrix[1, 2] += target_center_y - self.row
-        
-        # 计算逆矩阵（用于将结果转回原图坐标）
-        # 逆变换：先反向平移，再反向旋转
+        self.rotation_matrix[0, 2] += target_cx - self.col
+        self.rotation_matrix[1, 2] += target_cy - self.row
         self.inverse_matrix = cv2.invertAffineTransform(self.rotation_matrix)
-    
+
+        # Cache (bounded)
+        if len(self._matrix_cache) < 256:
+            self._matrix_cache[cache_key] = (
+                self.rotation_matrix.copy(), self.inverse_matrix.copy())
+
     def extract_roi(self, img: np.ndarray) -> np.ndarray:
         """
-        提取ROI并转换为正矩形
-        
-        返回：
-            aligned_img: 形状为 (length2, length1) 的正矩形图像
+        提取ROI并转换为正矩形 (length2, length1)。
         """
-        # 确定插值标志
-        interp_flag = {
-            'nearest': cv2.INTER_NEAREST,
-            'linear': cv2.INTER_LINEAR,
-            'cubic': cv2.INTER_CUBIC
-        }.get(self.interpolation, cv2.INTER_LINEAR)
-        
-        # 执行仿射变换
+        interp_flag = self._INTERP_FLAGS.get(self.interpolation, cv2.INTER_LINEAR)
         target_size = (int(self.length1), int(self.length2))
         aligned_img = cv2.warpAffine(
             img,
             self.rotation_matrix,
             target_size,
             flags=interp_flag,
-            borderMode=cv2.BORDER_REPLICATE
+            borderMode=cv2.BORDER_REPLICATE,
         )
-        
         return aligned_img
     
     def _transform_points_to_original(self, points: np.ndarray) -> np.ndarray:
         """
         将正矩形坐标系中的点变换回原图坐标系
-        
+
         参数:
             points: 形状为 (N, 2) 的数组，每行为 [x, y]（正矩形坐标）
-        
+
         返回:
             transformed: 形状为 (N, 2) 的数组，每行为 [col, row]（原图坐标）
         """
-        # 转换为齐次坐标
         num_points = points.shape[0]
         homogeneous = np.hstack([points, np.ones((num_points, 1))])
-        
-        # 应用逆变换矩阵
         transformed = (self.inverse_matrix @ homogeneous.T).T
-        
         return transformed[:, :2]
     
     def measure_pos(self, img: np.ndarray, sigma: float = 1.0, 
@@ -162,9 +164,9 @@ class Halcon1DMeasure:
         
         # Step 3: 高斯平滑
         if sigma > 0:
-            profile_smooth = gaussian_filter1d(profile.reshape(-1, 1).astype(np.float32), sigma=sigma).flatten()
+            profile_smooth = gaussian_filter1d(profile.astype(np.float64, copy=False), sigma=sigma)
         else:
-            profile_smooth = profile.astype(np.float32)
+            profile_smooth = profile.astype(np.float64)
         
         # Debug 2: 显示平滑后的灰度轮廓
         if debug:
@@ -202,9 +204,9 @@ class Halcon1DMeasure:
                               window_name='Debug_4_Scaled_Gradient')
             print(f"[阈值信息] 有效阈值={effective_threshold:.2f}")
         
-        # Step 5: 查找局部极值点
-        peaks_positive, _ = self._find_peaks(gradient, effective_threshold)
-        peaks_negative, _ = self._find_peaks(-gradient, effective_threshold)
+        # Step 5: 查找局部极值点（向量化）
+        peaks_positive = find_peaks_vectorized(gradient, effective_threshold)
+        peaks_negative = find_peaks_vectorized(-gradient, effective_threshold)
         
         # Step 6: 根据transition筛选
         if transition == 'positive':
@@ -214,17 +216,14 @@ class Halcon1DMeasure:
         else:  # 'all'
             peak_indices = np.sort(np.concatenate([peaks_positive, peaks_negative]))
         
-        # Step 7: 亚像素精炼
-        refined_positions = []
-        refined_amplitudes = []
-        
-        for idx in peak_indices:
-            refined_pos, refined_amp = self._refine_subpixel(profile_smooth, gradient, idx)
-            refined_positions.append(refined_pos)
-            refined_amplitudes.append(refined_amp)
-        
-        if not refined_positions:
+        # Step 7: 亚像素精炼（批量闭式二次拟合）
+        refined_positions, refined_amplitudes = batch_refine_subpixel(
+            gradient, peak_indices
+        )
+        if len(refined_positions) == 0:
             return [], [], [], []
+        refined_positions = refined_positions.tolist()
+        refined_amplitudes = refined_amplitudes.tolist()
         
         # Debug 5: 在ROI小图上标记峰值点
         if debug:
@@ -246,13 +245,14 @@ class Halcon1DMeasure:
         row_edges = points_original[:, 1].tolist()
         col_edges = points_original[:, 0].tolist()
         
-        # Step 9: 计算连续边缘间距
+        # Step 9: 计算连续边缘间距（向量化）
         distances = []
         if len(row_edges) > 1:
-            for i in range(len(row_edges) - 1):
-                dx = col_edges[i+1] - col_edges[i]
-                dy = row_edges[i+1] - row_edges[i]
-                distances.append(np.sqrt(dx**2 + dy**2))
+            row_arr = np.array(row_edges)
+            col_arr = np.array(col_edges)
+            dx = np.diff(col_arr)
+            dy = np.diff(row_arr)
+            distances = np.sqrt(dx**2 + dy**2).tolist()
         
         # Debug 6: 在原图上标记检测到的边缘点
         if debug:
