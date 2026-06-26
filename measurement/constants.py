@@ -5,6 +5,8 @@ Centralises magic numbers and common colour / font defaults that were
 previously inlined across ~25+ call sites.
 """
 
+from pathlib import Path
+
 import cv2
 
 # ---------------------------------------------------------------------------
@@ -34,3 +36,23 @@ DEFAULT_FONT_SCALE: float = 0.5
 DEFAULT_THICKNESS: int = 1
 DEFAULT_LINE_TYPE: int = cv2.LINE_AA
 DEFAULT_MARKER_TYPE: int = cv2.MARKER_CROSS
+
+# ---------------------------------------------------------------------------
+# Display / output control
+# ---------------------------------------------------------------------------
+DISPLAY_MODE: str = "show"  # 'show' | 'save' | 'both'
+
+# Root directory for saved images when using save/both mode
+OUTPUT_DIR: Path = Path.cwd() / "tests" / "output"
+
+
+def set_display_mode(mode: str) -> None:
+    global DISPLAY_MODE
+    if mode not in ("show", "save", "both"):
+        raise ValueError(f"Invalid display mode: {mode!r}")
+    DISPLAY_MODE = mode
+
+
+def set_output_dir(path: str | Path) -> None:
+    global OUTPUT_DIR
+    OUTPUT_DIR = Path(path)

@@ -4,3 +4,4 @@ __pycache__
 data
 propmt_history.txt
 output
+tests/output/

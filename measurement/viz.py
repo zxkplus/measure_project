@@ -127,3 +127,55 @@ def draw_legend(
             color=color, font_scale=font_scale, line_type=cv2.LINE_AA,
         )
         y += line_height
+
+
+# ---------------------------------------------------------------------------
+# Display-or-save helper
+# ---------------------------------------------------------------------------
+
+def display_or_save(
+    image: np.ndarray,
+    filename: str,
+    subdir: str = "",
+    window_name: str = "debug",
+    wait_time: int = 1,
+) -> None:
+    """Save *image* (and optionally show it) based on global ``DISPLAY_MODE``.
+
+    The image is always written to ``OUTPUT_DIR / subdir / filename`` when
+    ``DISPLAY_MODE`` is ``'save'`` or ``'both'``.  When ``DISPLAY_MODE`` is
+    ``'show'`` or ``'both'`` the image is also displayed via ``cv2.imshow``.
+
+    This is the **single entry point** that replaces all ad-hoc
+    ``cv2.imshow`` / ``cv2.waitKey`` / ``cv2.destroyAllWindows`` calls
+    scattered across the test files.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        Image to save / display.
+    filename : str
+        Output filename (e.g. ``"01_profile.png"``).
+    subdir : str
+        Optional subfolder inside ``OUTPUT_DIR`` (e.g. test name).
+    window_name : str
+        OpenCV window title (only used in 'show'/'both' modes).
+    wait_time : int
+        ``cv2.waitKey`` delay in ms.  Use ``-1`` to suppress the window
+        even in ``'show'`` mode.
+    """
+    from measurement.constants import DISPLAY_MODE, OUTPUT_DIR
+
+    mode = DISPLAY_MODE
+
+    # Always save when in 'save' or 'both' mode
+    if mode in ("save", "both"):
+        path = OUTPUT_DIR / subdir
+        path.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(path / filename), image)
+
+    # Show when in 'show' or 'both' mode (and wait_time >= 0)
+    if mode in ("show", "both") and wait_time >= 0:
+        cv2.imshow(window_name, image)
+        cv2.waitKey(wait_time)
+        cv2.destroyAllWindows()
