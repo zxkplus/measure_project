@@ -33,7 +33,7 @@ MANIFEST_FILENAME = "project.json"
 WORKFLOW_FILENAME = "workflow.npz"
 REF_IMAGE_FILENAME = "reference.png"
 INSP_IMAGE_FILENAME = "inspection.png"
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 MAX_RECENT = 10
 
 
@@ -135,6 +135,7 @@ class ProjectManager:
             "template_view": _to_json(app.template_view.get_state()),
             "tool_list_order": _to_json(app.get_tool_list_order()),
             "gui": _to_json(app.get_gui_state()),
+            "alignment": _to_json(app.get_alignment_state()),
         }
         return manifest
 
@@ -192,6 +193,17 @@ class ProjectManager:
                 )
                 if roi.get("confirmed", False):
                     app._ref_canvas.confirm_roi()
+
+                # Restore alignment mode
+                alignment_mode = roi.get("alignment_mode", "single_box")
+                app.tool_panel.set_alignment_mode(alignment_mode)
+
+                # Restore control points if multi-point
+                if alignment_mode == "multi_point":
+                    cps = roi.get("control_points", [])
+                    if cps:
+                        points = [(cp["row"], cp["col"]) for cp in cps]
+                        app._ref_canvas.set_control_points(points)
 
             # Restore ref canvas view state
             ref_state = manifest.get("ref_canvas_state", {})

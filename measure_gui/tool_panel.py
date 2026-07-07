@@ -59,6 +59,7 @@ class ToolPanel(ttk.Frame):
         self.on_add_composed: Optional[Callable] = None
         self.on_tool_edit: Optional[Callable] = None
         self.on_tool_delete: Optional[Callable] = None
+        self.on_alignment_mode_changed: Optional[Callable] = None
         self.on_export_csv: Optional[Callable] = None
 
         # State
@@ -118,6 +119,19 @@ class ToolPanel(ttk.Frame):
         # --- Template settings ---
         tmpl_frame = ttk.LabelFrame(f, text="模板设置", padding=5)
         tmpl_frame.pack(fill=tk.X, padx=4, pady=2)
+
+        # Alignment mode
+        ttk.Label(tmpl_frame, text="对齐方式").pack(anchor=tk.W, **pad)
+        self._alignment_var = tk.StringVar(value="旋转框")
+        alignment_combo = ttk.Combobox(
+            tmpl_frame, textvariable=self._alignment_var,
+            values=["旋转框", "多点仿射"],
+            state="readonly", width=18,
+        )
+        alignment_combo.pack(fill=tk.X, **pad)
+        alignment_combo.bind("<<ComboboxSelected>>",
+                           lambda e: self._fire(self.on_alignment_mode_changed,
+                                               self._alignment_var.get()))
 
         # Preprocessor
         ttk.Label(tmpl_frame, text="预处理").pack(anchor=tk.W, **pad)
@@ -355,6 +369,18 @@ class ToolPanel(ttk.Frame):
         self._angle_var.set(f"±{int(angle_range_half)}°")
         self._max_matches_var.set(max_matches)
         self._overlap_var.set(overlap)
+
+    def get_alignment_mode(self) -> str:
+        """Return 'single_box' or 'multi_point'."""
+        if self._alignment_var.get() == "多点仿射":
+            return "multi_point"
+        return "single_box"
+
+    def set_alignment_mode(self, mode: str):
+        """Set alignment mode: 'single_box' or 'multi_point'."""
+        self._alignment_var.set(
+            "多点仿射" if mode == "multi_point" else "旋转框"
+        )
 
     def set_progress(self, running: bool):
         """Start/stop the progress bar."""

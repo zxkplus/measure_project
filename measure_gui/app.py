@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional
 import cv2
 import numpy as np
 
+from .alignment import MultiPointAlignment, SingleBoxAlignment
 from .image_canvas import CanvasMode, ImageCanvas
 from .multi_target import MultiTargetWorkflow, TargetResult
 from .project_manager import ProjectManager
@@ -183,6 +184,7 @@ class MeasureApp:
         self.tool_panel.on_tool_edit = self._on_tool_edit
         self.tool_panel.on_tool_delete = self._on_tool_delete
         self.tool_panel.on_export_csv = self._on_export_csv
+        self.tool_panel.on_alignment_mode_changed = self._on_alignment_mode_changed
 
         # Right side: vertical paned window
         self._right_pane = ttk.PanedWindow(self._main_pane, orient=tk.VERTICAL)
@@ -207,6 +209,7 @@ class MeasureApp:
         self._ref_canvas.pack(fill=tk.BOTH, expand=True)
         self._ref_canvas.on_roi_changed = self._on_roi_changed
         self._ref_canvas.on_roi_confirmed = self._on_roi_confirmed
+        self._ref_canvas.on_control_points_confirmed = self._on_control_points_confirmed
 
         # Inspection image tab
         self._insp_frame = ttk.Frame(self._notebook)
@@ -676,14 +679,21 @@ class MeasureApp:
         """Collect current ROI state from reference canvas."""
         if self._ref_canvas.roi_center is None:
             return {}
-        return {
+        state = {
             "center_row": self._ref_canvas.roi_center[0],
             "center_col": self._ref_canvas.roi_center[1],
             "height": self._ref_canvas.roi_size[0],
             "width": self._ref_canvas.roi_size[1],
             "angle_deg": self._ref_canvas.roi_angle,
             "confirmed": self._ref_canvas.roi_confirmed,
+            "alignment_mode": self.tool_panel.get_alignment_mode(),
         }
+        if state["alignment_mode"] == "multi_point":
+            state["control_points"] = [
+                {"row": r, "col": c}
+                for r, c in self._ref_canvas.get_control_points()
+            ]
+        return state
 
     def _parse_angle_range(self) -> float:
         """Parse angle range half-value from the tool panel combo string."""
@@ -761,7 +771,48 @@ class MeasureApp:
 
     def _on_roi_confirmed(self, center_row, center_col, height, width, angle_deg):
         """Called when the user confirms the ROI (double-click)."""
-        self._create_template_from_roi(center_row, center_col, height, width, angle_deg)
+        if self.tool_panel.get_alignment_mode() == "multi_point":
+            # Switch to control-point mode; user places points, then
+            # double-clicking again calls _on_control_points_confirmed
+            self._ref_canvas.set_mode(CanvasMode.DRAW_CONTROL_POINTS)
+            self._ref_canvas.set_roi(
+                (center_row, center_col), (height, width), angle_deg
+            )
+        else:
+            self._create_template_from_roi(center_row, center_col,
+                                           height, width, angle_deg)
+
+    def _on_control_points_confirmed(self, points):
+        """Called when user confirms control points (double-click in
+        DRAW_CONTROL_POINTS mode)."""
+        if len(points) < 3:
+            messagebox.showwarning("提示", "至少需要 3 个控制点")
+            return
+        roi = self._ref_canvas.roi_center
+        if roi is None:
+            messagebox.showwarning("提示", "请先绘制 ROI 框")
+            return
+        self._create_template_from_roi(
+            roi[0], roi[1],
+            self._ref_canvas.roi_size[0],
+            self._ref_canvas.roi_size[1],
+            self._ref_canvas.roi_angle,
+            control_points=[
+                (r, c) for r, c in points
+            ],
+        )
+
+    def _on_alignment_mode_changed(self, mode_str: str):
+        """Handle alignment mode change from the tool panel."""
+        if mode_str == "多点仿射":
+            # When multi-point is selected, confirm ROI first then move
+            # to control-point placement
+            pass
+        else:
+            # Single box: restore normal DRAW_ROI mode if needed
+            if self._ref_canvas.get_mode() == CanvasMode.DRAW_CONTROL_POINTS:
+                self._ref_canvas.set_mode(CanvasMode.DRAW_ROI)
+                self._ref_canvas.clear_control_points()
 
     # ------------------------------------------------------------------
     # Template creation
@@ -785,8 +836,15 @@ class MeasureApp:
             self._ref_canvas.roi_angle,
         )
 
-    def _create_template_from_roi(self, center_row, center_col, height, width, angle_deg):
-        """Create the MultiTargetWorkflow template from ROI parameters."""
+    def _create_template_from_roi(self, center_row, center_col, height, width,
+                                   angle_deg, control_points=None):
+        """Create the MultiTargetWorkflow template from ROI parameters.
+
+        Args:
+            control_points: Optional list of (row, col) for multi-point
+                            affine alignment.  If given, the alignment
+                            strategy is switched to MultiPointAlignment.
+        """
         if self._reference_image is None:
             return
 
@@ -818,6 +876,16 @@ class MeasureApp:
         preproc_name = self.tool_panel._preproc_var.get()
         preprocessor = preproc_map.get(preproc_name, RawPreprocessor())
 
+        # Set alignment strategy based on mode
+        use_multi_point = (
+            control_points is not None and len(control_points) >= 3
+        )
+        if use_multi_point:
+            strategy = MultiPointAlignment()
+        else:
+            strategy = SingleBoxAlignment()
+        self._workflow._alignment = strategy
+
         self._workflow.teach_template(
             self._reference_image,
             center=(center_row, center_col),
@@ -832,6 +900,13 @@ class MeasureApp:
             coarse_fine=True,
             coarse_angle_step=5.0,
         )
+
+        # For multi-point, register control points with the alignment
+        if use_multi_point and isinstance(strategy, MultiPointAlignment):
+            for i, (r, c) in enumerate(control_points):
+                strategy.add_control_point(
+                    f"cp_{i}", float(r), float(c))
+            strategy.build_all_control_point_templates()
 
         # Update template view
         self.template_view.load_template(self._workflow.template_image)
@@ -997,6 +1072,85 @@ class MeasureApp:
     def _on_overlap_changed(self, value: float):
         if self._workflow:
             self._workflow.overlap = value
+
+    def _on_alignment_mode_changed(self, mode_name: str):
+        """Switch between single-box and multi-point alignment modes."""
+        if mode_name == "多点仿射":
+            self._ref_canvas.set_mode(CanvasMode.DRAW_CONTROL_POINTS)
+            self._status_text.set("对齐模式: 多点仿射 — 点击放置 ≥3 个控制点")
+        else:
+            self._ref_canvas.set_mode(CanvasMode.DRAW_ROI)
+            self._status_text.set("对齐模式: 旋转框 — 画旋转矩形")
+
+    def _on_control_points_confirmed(self, points: list):
+        """Handle multi-point control point confirmation (double-click)."""
+        if self._reference_image is None:
+            return
+        if len(points) < 3:
+            messagebox.showwarning("提示", "多点仿射需要至少 3 个控制点")
+            return
+
+        alignment = MultiPointAlignment()
+        angle_str = self.tool_panel._angle_var.get()
+        angle_val = float(angle_str.replace("±", "").replace("°", ""))
+        alignment.set_parent_search_angle_range((-angle_val, angle_val))
+
+        for i, (row, col) in enumerate(points):
+            alignment.add_control_point(
+                label=f"cp_{i}", ref_row=float(row), ref_col=float(col),
+                template_size=40,
+            )
+
+        if self._workflow is None:
+            self._workflow = MultiTargetWorkflow()
+
+        from measure_template import (
+            CannyPreprocessor, CLAHEPreprocessor, RawPreprocessor,
+            SobelPreprocessor, ThresholdPreprocessor,
+        )
+        preproc_map = {
+            "raw": RawPreprocessor(), "canny": CannyPreprocessor(50.0, 150.0),
+            "sobel": SobelPreprocessor(3), "clahe": CLAHEPreprocessor(2.0),
+            "threshold": ThresholdPreprocessor(128.0),
+        }
+        preprocessor = preproc_map.get(
+            self.tool_panel._preproc_var.get(), RawPreprocessor()
+        )
+
+        alignment.teach(self._reference_image, preprocessor)
+        self._workflow.alignment = alignment
+
+        tmpl_img = alignment.template_image
+        if tmpl_img is not None:
+            self.template_view.load_template(tmpl_img)
+
+        self.tool_panel.clear_tool_list()
+        self.tool_panel.set_template_created(True)
+        self._teaching = True
+        self._ref_canvas.confirm_control_points()
+
+        h, w = tmpl_img.shape if tmpl_img is not None else (0, 0)
+        pp_name = self.tool_panel._preproc_var.get()
+        messagebox.showinfo(
+            "模板创建成功",
+            f"对齐模式: 多点仿射\n控制点: {len(points)} 个\n"
+            f"模板尺寸: {w}×{h} px\n预处理: {pp_name}",
+        )
+        self._status_text.set(
+            f"模板已创建 (多点仿射, {len(points)} 控制点, {w}×{h})"
+        )
+
+    def get_alignment_state(self) -> dict:
+        """Collect alignment mode and control points for project serialization."""
+        mode = self.tool_panel._alignment_var.get()
+        state: dict = {"mode": "single_box" if mode != "多点仿射" else "multi_point"}
+        if state["mode"] == "multi_point":
+            points = self._ref_canvas.get_control_points()
+            state["control_points"] = [
+                {"label": f"cp_{i}", "ref_row": r, "ref_col": c}
+                for i, (r, c) in enumerate(points)
+            ]
+        return state
 
     def _on_export_csv(self):
         """Export results (handled by ResultPanel)."""
