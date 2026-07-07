@@ -1,9 +1,11 @@
 """
-Tkinter Canvas-based image viewer with zoom, pan, and interactive rotated ROI drawing.
+Tkinter Canvas-based image viewer with zoom, pan, interactive rotated ROI drawing,
+and multi-point control point placement.
 
-Supports three modes:
+Supports four modes:
   - BROWSE: Pan and zoom the image
   - DRAW_ROI: Draw and edit a rotated rectangular ROI
+  - DRAW_CONTROL_POINTS: Place/move/delete alignment control points
   - VIEW_RESULT: View inspection results (read-only)
 """
 
@@ -11,7 +13,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from enum import Enum, auto
-from typing import Callable, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -19,9 +21,17 @@ import numpy as np
 from .utils import compute_rotated_box_corners, cv2_to_tk
 
 
+_CP_COLORS = [
+    "#00FF00", "#FFFF00", "#FF00FF", "#00FFFF",
+    "#FF8800", "#8800FF", "#88FF00", "#FF0088",
+]
+_CP_MARKER_SIZE = 16
+
+
 class CanvasMode(Enum):
     BROWSE = auto()
     DRAW_ROI = auto()
+    DRAW_CONTROL_POINTS = auto()
     VIEW_RESULT = auto()
 
 
@@ -94,6 +104,15 @@ class ImageCanvas(tk.Frame):
         self._img_item: Optional[int] = None
         self._roi_items: dict = {}     # polygon, handles, center_cross, direction_arrow
         self._overlay_items: list = []  # result overlay items
+        self._cp_items: List[int] = []  # control-point canvas items (per-mode)
+
+        # Control point state (DRAW_CONTROL_POINTS mode)
+        self._control_points: List[Tuple[float, float]] = []  # (row, col) image coords
+        self._cp_drag_idx: int = -1  # index being dragged, -1 = none
+        self.on_control_points_changed: Optional[Callable] = None
+        # Signature: (points: List[Tuple[float, float]]) -> None
+        self.on_control_points_confirmed: Optional[Callable] = None
+        # Signature: (points: List[Tuple[float, float]]) -> None
 
         # Build UI
         self._build_ui(bg)
@@ -123,6 +142,7 @@ class ImageCanvas(tk.Frame):
         self._canvas.bind("<Button-5>", self._on_scroll_down)   # Linux scroll down
         self._canvas.bind("<MouseWheel>", self._on_mousewheel)  # Windows/Mac
         self._canvas.bind("<Configure>", self._on_resize)
+        self._canvas.bind("<Button-3>", self._on_right_click)       # right-click: delete CP
         self._canvas.bind("<Motion>", self._on_mouse_move)
 
     # ------------------------------------------------------------------
@@ -146,6 +166,10 @@ class ImageCanvas(tk.Frame):
         if mode == CanvasMode.DRAW_ROI:
             self._canvas.config(cursor="crosshair")
             self._drawing_phase = 0
+        elif mode == CanvasMode.DRAW_CONTROL_POINTS:
+            self._canvas.config(cursor="tcross")
+            self._clear_control_point_items()
+            self._redraw_control_points()
         elif mode == CanvasMode.BROWSE:
             self._canvas.config(cursor="")
         elif mode == CanvasMode.VIEW_RESULT:
@@ -209,6 +233,34 @@ class ImageCanvas(tk.Frame):
         self._drawing_phase = 0
         self._clear_roi_items()
         self._notify_roi_changed()
+
+    # -- control points -------------------------------------------------------
+
+    def get_control_points(self) -> List[Tuple[float, float]]:
+        """Return the current list of control points (row, col) image coords."""
+        return list(self._control_points)
+
+    def set_control_points(self, points: List[Tuple[float, float]]):
+        """Programmatically set the control points."""
+        self._control_points = [(float(r), float(c)) for r, c in points]
+        self._clear_control_point_items()
+        self._redraw_control_points()
+        self._notify_control_points()
+
+    def clear_control_points(self):
+        """Remove all control points."""
+        self._control_points.clear()
+        self._clear_control_point_items()
+        self._notify_control_points()
+
+    def confirm_control_points(self):
+        """Confirm the control points and notify the listener."""
+        if self.on_control_points_confirmed and self._control_points:
+            self.on_control_points_confirmed(list(self._control_points))
+
+    def _notify_control_points(self):
+        if self.on_control_points_changed:
+            self.on_control_points_changed(list(self._control_points))
 
     def get_view_state(self) -> dict:
         """Serialize zoom/pan state for project saving.
@@ -353,6 +405,15 @@ class ImageCanvas(tk.Frame):
         if self._roi_center is not None:
             self._redraw_roi()
 
+        # Redraw control points
+        if self._cp_items:
+            self._clear_control_point_items()
+        if self._control_points and (
+            self._mode == CanvasMode.DRAW_CONTROL_POINTS or
+            self._mode == CanvasMode.DRAW_ROI
+        ):
+            self._redraw_control_points()
+
         # Ensure image is below ROI and overlays
         self._canvas.tag_lower(self._img_item)
 
@@ -459,6 +520,70 @@ class ImageCanvas(tk.Frame):
                 self._canvas.delete(item_id)
         self._roi_items = {}
 
+    def _redraw_control_points(self):
+        """Draw control point markers with labels on the canvas."""
+        canvas = self._canvas
+        for i, (row, col) in enumerate(self._control_points):
+            cx, cy = self._img_to_canvas(row, col)
+            color = _CP_COLORS[i % len(_CP_COLORS)]
+            r = _CP_MARKER_SIZE // 2
+            items = []
+            # Outer circle
+            items.append(canvas.create_oval(
+                cx - r, cy - r, cx + r, cy + r,
+                outline=color, width=2,
+            ))
+            # Inner circle
+            items.append(canvas.create_oval(
+                cx - 2, cy - 2, cx + 2, cy + 2,
+                fill=color, outline="",
+            ))
+            # Label
+            items.append(canvas.create_text(
+                cx + r + 4, cy - r - 4,
+                text=str(i), fill=color, anchor=tk.NW,
+                font=("TkDefaultFont", 10, "bold"),
+            ))
+            self._cp_items.extend(items)
+        # Connect with dashed line to show outline
+        if len(self._control_points) >= 2:
+            pts_flat = canvas.create_line
+            pts = []
+            for row, col in self._control_points:
+                cx, cy = self._img_to_canvas(row, col)
+                pts.extend([cx, cy])
+            item = canvas.create_line(
+                *pts, fill="#888888", width=1, dash=(6, 4),
+                tags="cp_order",
+            )
+            self._cp_items.append(item)
+
+    def _clear_control_point_items(self):
+        """Remove all control-point canvas items."""
+        for item_id in self._cp_items:
+            self._canvas.delete(item_id)
+        self._cp_items.clear()
+
+    def _hit_test_control_point(self, canvas_x: int, canvas_y: int) -> int:
+        """Return the index of a CP within handle radius, or -1."""
+        for i, (row, col) in enumerate(self._control_points):
+            cx, cy = self._img_to_canvas(row, col)
+            if ((canvas_x - cx) ** 2 + (canvas_y - cy) ** 2) <= (
+                _CP_MARKER_SIZE
+            ) ** 2:
+                return i
+        return -1
+
+    def _on_right_click(self, event):
+        """Right click: delete a control point under the cursor."""
+        if self._mode == CanvasMode.DRAW_CONTROL_POINTS:
+            idx = self._hit_test_control_point(event.x, event.y)
+            if idx >= 0:
+                self._control_points.pop(idx)
+                self._clear_control_point_items()
+                self._redraw_control_points()
+                self._notify_control_points()
+
     def _update_title(self):
         """Update the window title for standalone use."""
         # No-op when embedded; used when ImageCanvas is the root window
@@ -473,6 +598,24 @@ class ImageCanvas(tk.Frame):
         if self._mode == CanvasMode.BROWSE:
             self._drag_start = (event.x, event.y)
             self._drag_what = "pan"
+
+        elif self._mode == CanvasMode.DRAW_CONTROL_POINTS:
+            row, col = self._canvas_to_img(event.x, event.y)
+            if self._image is not None:
+                h, w = self._image.shape[:2]
+                if 0 <= row < h and 0 <= col < w:
+                    # Check if clicking near an existing point (for drag)
+                    hit_idx = self._hit_test_control_point(event.x, event.y)
+                    if hit_idx >= 0:
+                        self._cp_drag_idx = hit_idx
+                        self._drag_start = (event.x, event.y)
+                        self._drag_what = "cp_move"
+                        return
+                    # Add new point
+                    self._control_points.append((float(row), float(col)))
+                    self._clear_control_point_items()
+                    self._redraw_control_points()
+                    self._notify_control_points()
 
         elif self._mode == CanvasMode.DRAW_ROI:
             # Check if clicking on a handle
@@ -534,6 +677,18 @@ class ImageCanvas(tk.Frame):
             self._drag_start = (event.x, event.y)
             self._redraw()
 
+        elif self._drag_what == "cp_move" and self._cp_drag_idx >= 0:
+            row, col = self._canvas_to_img(event.x, event.y)
+            if self._image is not None:
+                h, w = self._image.shape[:2]
+                row = max(0, min(row, h - 1))
+                col = max(0, min(col, w - 1))
+            self._control_points[self._cp_drag_idx] = (float(row), float(col))
+            self._drag_start = (event.x, event.y)
+            self._clear_control_point_items()
+            self._redraw_control_points()
+            self._notify_control_points()
+
         elif self._drag_what == "move" and self._roi_center is not None:
             row, col = self._canvas_to_img(event.x, event.y)
             self._roi_center = (row, col)
@@ -587,15 +742,17 @@ class ImageCanvas(tk.Frame):
     def _on_mouse_up(self, event):
         """Handle mouse button release."""
         if self._drag_what and self._drag_what != "pan":
-            # Finished drawing/editing ROI
-            pass
+            pass  # Finished drawing/editing
         self._drag_start = None
         self._drag_what = None
+        self._cp_drag_idx = -1
 
     def _on_double_click(self, event):
-        """Double click: confirm ROI or zoom to fit."""
+        """Double click: confirm ROI or control points, or zoom to fit."""
         if self._mode == CanvasMode.DRAW_ROI and self._roi_center is not None:
             self.confirm_roi()
+        elif self._mode == CanvasMode.DRAW_CONTROL_POINTS:
+            self.confirm_control_points()
         elif self._mode == CanvasMode.BROWSE:
             self.zoom_to_fit()
 
