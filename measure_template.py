@@ -33,6 +33,7 @@ Usage:
     vis = dm.visualize(inspection_img)
 """
 
+import base64
 import json
 import cv2
 import numpy as np
@@ -225,6 +226,9 @@ _PREPROCESSOR_REGISTRY: Dict[str, type] = {
     'clahe': CLAHEPreprocessor,
     'threshold': ThresholdPreprocessor,
 }
+
+
+_TEMPLATE_TYPE_REGISTRY: Dict[str, type] = {}  # populated after class definitions
 
 
 def _deserialize_preprocessor(data: Dict[str, Any]) -> Preprocessor:
@@ -1405,6 +1409,120 @@ class TemplatePoint:
         return obj
 
     # ------------------------------------------------------------------
+    # JSON Serialization (complementary to NPZ save/from_file)
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize TemplatePoint config and template data to a dict.
+
+        The preprocessed template array is base64-encoded for JSON
+        compatibility.  For large templates prefer the existing
+        ``save()`` method which writes a binary .npz file.
+        """
+        pp_data = self.preprocessor.serialize()
+        pp_type = pp_data.get("type", "")
+        if pp_type not in _PREPROCESSOR_REGISTRY:
+            raise ValueError(
+                f"Cannot serialize preprocessor of type '{pp_type}'. "
+                f"Register it via: _PREPROCESSOR_REGISTRY['{pp_type}'] = YourClass"
+            )
+
+        template_bytes = self.edge_template.tobytes()
+        template_b64 = base64.b64encode(template_bytes).decode("ascii")
+
+        return {
+            "object_type": "TemplatePoint",
+            "click_row": self.click_row,
+            "click_col": self.click_col,
+            "template_size": self.template_size,
+            "preprocessor_data": pp_data,
+            "match_score_threshold": self.match_score_threshold,
+            "use_subpixel": self.use_subpixel,
+            "crop_center_row": self._crop_center_row,
+            "crop_center_col": self._crop_center_col,
+            "crop_h": self._crop_h,
+            "crop_w": self._crop_w,
+            "actual_crop_bounds": list(self._actual_crop_bounds),
+            "edge_template_b64": template_b64,
+            "edge_template_dtype": str(self.edge_template.dtype),
+            "rotation_invariant": self.rotation_invariant,
+            "angle_range": list(self.angle_range),
+            "angle_step": self.angle_step,
+            "scale_invariant": self.scale_invariant,
+            "scale_range": list(self.scale_range),
+            "scale_step": self.scale_step,
+            "coarse_fine": self.coarse_fine,
+            "coarse_angle_step": self.coarse_angle_step,
+            "coarse_scale_step": self.coarse_scale_step,
+            "multi_target": self.multi_target,
+            "max_matches": self.max_matches,
+            "overlap": self.overlap,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any],
+                  preprocessor: Optional["Preprocessor"] = None) -> "TemplatePoint":
+        """Reconstruct a TemplatePoint from a dict.
+
+        Uses ``cls.__new__`` to bypass ``__init__`` because no reference
+        image is available.  The ``edge_template`` array is decoded from
+        its base64 encoding.
+
+        Args:
+            data: Dict from ``to_dict()``.
+            preprocessor: Optional override for the stored preprocessor.
+
+        Returns:
+            A fully initialized TemplatePoint ready for ``measure()``.
+        """
+        obj = cls.__new__(cls)
+
+        obj.click_row = float(data["click_row"])
+        obj.click_col = float(data["click_col"])
+        obj.template_size = int(data["template_size"])
+        obj.match_score_threshold = float(data["match_score_threshold"])
+        obj.use_subpixel = bool(data["use_subpixel"])
+        obj._crop_center_row = float(data["crop_center_row"])
+        obj._crop_center_col = float(data["crop_center_col"])
+        obj._crop_h = int(data["crop_h"])
+        obj._crop_w = int(data["crop_w"])
+        obj._actual_crop_bounds = tuple(data["actual_crop_bounds"])
+        obj.result = None
+
+        if preprocessor is not None:
+            obj.preprocessor = preprocessor
+        else:
+            pp_data = data.get("preprocessor_data", {"type": "raw"})
+            obj.preprocessor = _deserialize_preprocessor(pp_data)
+
+        template_b64 = data.get("edge_template_b64", "")
+        edge_dtype = np.dtype(data.get("edge_template_dtype", "float32"))
+        if template_b64:
+            template_bytes = base64.b64decode(template_b64)
+            obj.edge_template = np.frombuffer(
+                template_bytes, dtype=edge_dtype
+            ).reshape(obj._crop_h, obj._crop_w)
+        else:
+            obj.edge_template = np.zeros(
+                (obj._crop_h, obj._crop_w), dtype=edge_dtype
+            )
+
+        obj.rotation_invariant = bool(data.get("rotation_invariant", False))
+        obj.angle_range = tuple(data.get("angle_range", (-30.0, 30.0)))
+        obj.angle_step = float(data.get("angle_step", 1.0))
+        obj.scale_invariant = bool(data.get("scale_invariant", False))
+        obj.scale_range = tuple(data.get("scale_range", (0.9, 1.1)))
+        obj.scale_step = float(data.get("scale_step", 0.02))
+        obj.coarse_fine = bool(data.get("coarse_fine", True))
+        obj.coarse_angle_step = float(data.get("coarse_angle_step", 5.0))
+        obj.coarse_scale_step = float(data.get("coarse_scale_step", 0.1))
+        obj.multi_target = bool(data.get("multi_target", False))
+        obj.max_matches = int(data.get("max_matches", 0))
+        obj.overlap = float(data.get("overlap", 0.3))
+
+        return obj
+
+    # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
@@ -1628,3 +1746,67 @@ class DistanceMeasure:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
             cv2.putText(img, valid_text, (10, y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, vcolor, 1)
+
+    # ------------------------------------------------------------------
+    # JSON Serialization
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize DistanceMeasure to a JSON-compatible dict."""
+        return {
+            "object_type": "DistanceMeasure",
+            "version": 1,
+            "point_a": self.point_a.to_dict(),
+            "point_b": self.point_b.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DistanceMeasure":
+        """Reconstruct a DistanceMeasure from a dict.
+
+        Raises:
+            ValueError: If version is unsupported or required keys missing.
+        """
+        version = data.get("version", 0)
+        if version != 1:
+            raise ValueError(
+                f"Unsupported DistanceMeasure version: {version}. Expected 1."
+            )
+        point_a = TemplatePoint.from_dict(data["point_a"])
+        point_b = TemplatePoint.from_dict(data["point_b"])
+        return cls(point_a, point_b)
+
+    def save(self, filepath: str) -> None:
+        """Serialize the DistanceMeasure to a JSON file.
+
+        Args:
+            filepath: Path to the output .json file.
+        """
+        data = self.to_dict()
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    @classmethod
+    def load(cls, filepath: str) -> "DistanceMeasure":
+        """Deserialize a DistanceMeasure from a JSON file.
+
+        Args:
+            filepath: Path to a .json file saved by DistanceMeasure.save().
+
+        Returns:
+            A fully reconstructed DistanceMeasure.
+
+        Raises:
+            FileNotFoundError: If filepath doesn't exist.
+            json.JSONDecodeError: If the file is not valid JSON.
+        """
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return cls.from_dict(data)
+
+
+# Populate the template type registry (must come after class definitions)
+_TEMPLATE_TYPE_REGISTRY.update({
+    "TemplatePoint": TemplatePoint,
+    "DistanceMeasure": DistanceMeasure,
+})

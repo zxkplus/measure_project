@@ -7,6 +7,7 @@ Halcon Metrology 模块 - 直线与圆测量
 3. 收集边缘点并拟合几何形状
 """
 
+import json
 import cv2
 import numpy as np
 from typing import Tuple, List, Optional, Dict, Any
@@ -15,12 +16,24 @@ from measurement.constants import EPS
 from measurement.viz import to_bgr, draw_text_shadow
 
 
+_MEASURE2D_TYPE_REGISTRY: Dict[str, type] = {}
+
+
 class _BaseMeasureObject:
     """Shared drawing helpers for LineMeasureObject and CircleMeasureObject."""
 
     measure_rectangles: list
     edge_points: list
     result: dict | None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize config params to a JSON-compatible dict. Subclasses must override."""
+        raise NotImplementedError
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "_BaseMeasureObject":
+        """Deserialize from a dict. Subclasses must override."""
+        raise NotImplementedError
 
     def _draw_measure_rectangles(
         self, img: np.ndarray, color: Tuple[int, int, int], thickness: int
@@ -426,6 +439,51 @@ class LineMeasureObject(_BaseMeasureObject):
             draw_text_shadow(img, info2, (10, 70), color=(255, 255, 255), font_scale=0.5, thickness=1)
             
             draw_text_shadow(img, info3, (10, 90), color=(255, 255, 255), font_scale=0.5, thickness=1)
+
+    # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize LineMeasureObject config to a JSON-compatible dict."""
+        return {
+            "object_type": "LineMeasureObject",
+            "start": self.start.tolist(),
+            "end": self.end.tolist(),
+            "measure_length1": self.measure_length1,
+            "measure_length2": self.measure_length2,
+            "num_measures": self.num_measures,
+            "sigma": self.sigma,
+            "threshold": self.threshold,
+            "transition": self.transition,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "LineMeasureObject":
+        """Reconstruct a LineMeasureObject from a dict.
+
+        The constructor recomputes all derived fields (direction, length,
+        direction_normalized, measure_angle) from start/end.
+
+        Raises:
+            ValueError: If required keys are missing.
+        """
+        required = ("start", "end", "measure_length1", "measure_length2")
+        for key in required:
+            if key not in data:
+                raise ValueError(
+                    f"LineMeasureObject.from_dict: missing required key '{key}'"
+                )
+        return cls(
+            start=tuple(data["start"]),
+            end=tuple(data["end"]),
+            measure_length1=float(data["measure_length1"]),
+            measure_length2=float(data["measure_length2"]),
+            num_measures=int(data.get("num_measures", 10)),
+            sigma=float(data.get("sigma", 1.0)),
+            threshold=float(data.get("threshold", 30.0)),
+            transition=data.get("transition", "all"),
+        )
 
 
 class CircleMeasureObject(_BaseMeasureObject):
@@ -859,6 +917,57 @@ class CircleMeasureObject(_BaseMeasureObject):
                 info5 = f'Search radii: [{r_min:.1f}, {r_max:.1f}] px'
                 draw_text_shadow(img, info5, (10, 130), color=(255, 255, 255), font_scale=0.5, thickness=1)
 
+    # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize CircleMeasureObject config to a JSON-compatible dict."""
+        return {
+            "object_type": "CircleMeasureObject",
+            "center": self.center.tolist(),
+            "radius": self.radius,
+            "radius_min": self.radius_min,
+            "radius_max": self.radius_max,
+            "measure_length1": self.measure_length1,
+            "measure_length2": self.measure_length2,
+            "num_measures": self.num_measures,
+            "sigma": self.sigma,
+            "threshold": self.threshold,
+            "transition": self.transition,
+            "start_phi": self.start_phi,
+            "end_phi": self.end_phi,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CircleMeasureObject":
+        """Reconstruct a CircleMeasureObject from a dict.
+
+        Raises:
+            ValueError: If required keys are missing.
+        """
+        required = ("center", "radius", "radius_min", "radius_max",
+                    "measure_length1", "measure_length2")
+        for key in required:
+            if key not in data:
+                raise ValueError(
+                    f"CircleMeasureObject.from_dict: missing required key '{key}'"
+                )
+        return cls(
+            center=tuple(data["center"]),
+            radius=float(data["radius"]),
+            radius_min=float(data["radius_min"]),
+            radius_max=float(data["radius_max"]),
+            measure_length1=float(data["measure_length1"]),
+            measure_length2=float(data["measure_length2"]),
+            num_measures=int(data.get("num_measures", 12)),
+            sigma=float(data.get("sigma", 1.0)),
+            threshold=float(data.get("threshold", 30.0)),
+            transition=data.get("transition", "all"),
+            start_phi=float(data.get("start_phi", 0.0)),
+            end_phi=float(data.get("end_phi", 2 * np.pi)),
+        )
+
 
 class MetrologyModel:
     """
@@ -1019,5 +1128,104 @@ class MetrologyModel:
         for item in self.objects:
             obj = item['object']
             vis_img = obj.visualize(vis_img, **kwargs)
-        
+
         return vis_img
+
+    # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize the entire MetrologyModel to a JSON-compatible dict.
+
+        Each contained LineMeasureObject or CircleMeasureObject is
+        nested inline for a fully self-contained result.
+        """
+        return {
+            "version": 1,
+            "counter": self._counter,
+            "objects": [
+                {
+                    "index": item["index"],
+                    "type": item["type"],
+                    "object": item["object"].to_dict(),
+                }
+                for item in self.objects
+            ],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "MetrologyModel":
+        """Reconstruct a MetrologyModel from a dict.
+
+        Raises:
+            ValueError: If version is unsupported or object type is unknown.
+        """
+        version = data.get("version", 0)
+        if version != 1:
+            raise ValueError(
+                f"Unsupported MetrologyModel version: {version}. Expected 1."
+            )
+
+        model = cls()
+        model._counter = data.get("counter", 0)
+
+        for item in data.get("objects", []):
+            obj_data = item.get("object", {})
+            inner_type = obj_data.get("object_type", "")
+
+            cls_type = _MEASURE2D_TYPE_REGISTRY.get(inner_type)
+            if cls_type is None:
+                raise ValueError(
+                    f"Unknown measure object type: '{inner_type}'. "
+                    f"Known types: {list(_MEASURE2D_TYPE_REGISTRY.keys())}"
+                )
+
+            obj = cls_type.from_dict(obj_data)
+            model.objects.append({
+                "index": item.get("index", model._counter),
+                "type": item.get("type", ""),
+                "object": obj,
+            })
+            model.results.append(None)
+            idx = item.get("index", 0)
+            if idx >= model._counter:
+                model._counter = idx + 1
+
+        return model
+
+    def save(self, filepath: str) -> None:
+        """Serialize the model to a JSON file.
+
+        Args:
+            filepath: Path to the output .json file.
+        """
+        data = self.to_dict()
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    @classmethod
+    def load(cls, filepath: str) -> "MetrologyModel":
+        """Deserialize a MetrologyModel from a JSON file.
+
+        Args:
+            filepath: Path to a .json file saved by MetrologyModel.save().
+
+        Returns:
+            A fully reconstructed MetrologyModel ready for measure().
+
+        Raises:
+            FileNotFoundError: If filepath doesn't exist.
+            json.JSONDecodeError: If the file is not valid JSON.
+            ValueError: If version is unsupported or object type is unknown.
+        """
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return cls.from_dict(data)
+
+
+# Populate the type registry (must come after class definitions)
+_MEASURE2D_TYPE_REGISTRY.update({
+    "LineMeasureObject": LineMeasureObject,
+    "CircleMeasureObject": CircleMeasureObject,
+})
