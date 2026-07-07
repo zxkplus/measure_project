@@ -58,7 +58,18 @@ from measure_template import (
     _deserialize_preprocessor,
 )
 
-from .utils import crop_and_straighten, map_point_to_original
+from .alignment import (
+    AlignmentStrategy,
+    AlignResult,
+    SingleBoxAlignment,
+    MultiPointAlignment,
+    strategy_from_roi_state,
+)
+from .utils import (
+    crop_and_straighten,
+    map_point_to_original,
+    map_point_via_affine,
+)
 
 
 # ===========================================================================
@@ -342,9 +353,10 @@ class MultiTargetWorkflow:
     """
 
     def __init__(self):
-        # Template matching
-        self._template_point: Optional[TemplatePoint] = None
-        self._preprocessor: Optional[Preprocessor] = None
+        # Alignment strategy (defaults to single-box mode)
+        self._alignment: AlignmentStrategy = SingleBoxAlignment()
+
+        # Matching parameters (may be overridden before teach_template)
         self._match_score_threshold: float = 0.5
         self._angle_range: Tuple[float, float] = (-30.0, 30.0)
         self._angle_step: float = 1.0
@@ -353,21 +365,11 @@ class MultiTargetWorkflow:
         self._coarse_fine: bool = True
         self._coarse_angle_step: float = 5.0
 
-        # Rotated box params (for crop_and_straighten)
-        self._box_center: Tuple[float, float] = (0.0, 0.0)
-        self._box_size: Tuple[float, float] = (0.0, 0.0)
-        self._box_angle_deg: float = 0.0
-        self._template_size: int = 80
-
         # Measurement definitions (ordered list)
         self._measurement_defs: List[Dict[str, Any]] = []
 
         # TemplateMatchPoint template cache: label -> TemplatePoint
         self._template_match_points: Dict[str, Any] = {}
-
-        # Saved reference image (needed for template creation on load)
-        self._reference_image: Optional[np.ndarray] = None
-        self._template_image: Optional[np.ndarray] = None
 
         # Last results
         self._results: List[TargetResult] = []
@@ -381,21 +383,26 @@ class MultiTargetWorkflow:
     # ------------------------------------------------------------------
 
     @property
+    def alignment(self) -> AlignmentStrategy:
+        """The active alignment strategy."""
+        return self._alignment
+
+    @property
     def template_image(self) -> Optional[np.ndarray]:
         """The straightened template image (for display in GUI)."""
-        return self._template_image
+        return self._alignment.template_image
 
     @property
     def box_center(self) -> Tuple[float, float]:
-        return self._box_center
+        return self._alignment.box_center
 
     @property
     def box_size(self) -> Tuple[float, float]:
-        return self._box_size
+        return self._alignment.box_size
 
     @property
     def box_angle_deg(self) -> float:
-        return self._box_angle_deg
+        return self._alignment.box_angle_deg
 
     @property
     def measurement_defs(self) -> List[Dict[str, Any]]:
@@ -428,8 +435,9 @@ class MultiTargetWorkflow:
     @max_matches.setter
     def max_matches(self, value: int):
         self._max_matches = value
-        if self._template_point is not None:
-            self._template_point.max_matches = value
+        tp = self._alignment.template_point
+        if tp is not None:
+            tp.max_matches = value
 
     @property
     def overlap(self) -> float:
@@ -438,14 +446,16 @@ class MultiTargetWorkflow:
     @overlap.setter
     def overlap(self, value: float):
         self._overlap = float(value)
-        if self._template_point is not None:
-            self._template_point.overlap = float(value)
+        tp = self._alignment.template_point
+        if tp is not None:
+            tp.overlap = float(value)
 
     @property
     def preprocessor_type(self) -> str:
-        if self._preprocessor is None:
+        tp = self._alignment.template_point
+        if tp is None:
             return "raw"
-        return self._preprocessor.name
+        return tp.preprocessor.name
 
     @property
     def debug_dir(self) -> Optional[str]:
@@ -488,7 +498,7 @@ class MultiTargetWorkflow:
             color = color_palette[target.id % len(color_palette)]
 
             # Draw rotated box
-            corners = _compute_target_box_corners(target, self._box_size)
+            corners = _compute_target_box_corners(target, self._alignment.box_size)
             pts = corners[:, ::-1].astype(np.int32).reshape((-1, 1, 2))
             thickness = 2 if target.valid else 1
             cv2.polylines(vis, [pts], True, color, thickness=thickness)
@@ -798,53 +808,29 @@ class MultiTargetWorkflow:
             coarse_fine: Use two-stage coarse-to-fine search.
             coarse_angle_step: Step size for coarse angle search.
         """
-        self._reference_image = reference_image.copy()
-        self._box_center = (float(center[0]), float(center[1]))
-        self._box_size = (float(size[0]), float(size[1]))
-        self._box_angle_deg = float(angle_deg)
-        self._preprocessor = preprocessor
-        self._match_score_threshold = match_score_threshold
-        self._angle_range = angle_range
-        self._angle_step = angle_step
-        self._max_matches = max_matches
-        self._overlap = float(overlap)
-        self._coarse_fine = coarse_fine
-        self._coarse_angle_step = coarse_angle_step
-
-        # Crop and straighten to create the template image
-        template_size = int(max(size))
-        self._template_size = template_size
-        self._template_image, _ = crop_and_straighten(
-            reference_image, center, size, angle_deg
-        )
-
-        # Create TemplatePoint for multi-target matching
-        # Use the box center as the click point
-        self._template_point = TemplatePoint(
-            reference_image,
-            click_row=center[0],
-            click_col=center[1],
-            template_size=template_size,
+        self._alignment.teach(
+            reference_image, center, size, angle_deg,
             preprocessor=preprocessor,
             match_score_threshold=match_score_threshold,
-            use_subpixel=True,
-            rotation_invariant=True,
-            angle_range=angle_range,
-            angle_step=angle_step,
-            coarse_fine=coarse_fine,
-            coarse_angle_step=coarse_angle_step,
-            multi_target=True,
-            max_matches=max_matches,
-            overlap=overlap,
+            angle_range=angle_range, angle_step=angle_step,
+            max_matches=max_matches, overlap=overlap,
+            coarse_fine=coarse_fine, coarse_angle_step=coarse_angle_step,
         )
 
-        # Build TemplateMatchPoint instances from the newly created template image
+        # Convenience: keep local references to frequently-accessed items
+        self._reference_image = reference_image.copy()
+        self._template_image_legacy = self._alignment.template_image
+        self._box_center_legacy = self._alignment.box_center
+        self._box_size_legacy = self._alignment.box_size
+        self._box_angle_deg_legacy = self._alignment.box_angle_deg
+
+        # Build TemplateMatchPoint instances from the template image
         self._build_template_match_points()
 
     def _build_template_match_points(self):
         """Create TemplatePoint instances for all TemplateMatchPoint definitions.
 
-        Must be called after teach_template() when self._template_image is available.
+        Must be called after teach_template() when alignment.template_image is available.
         Uses the straightened template image as the reference for cropping.
         """
         preproc_map = {
@@ -865,7 +851,7 @@ class MultiTargetWorkflow:
                 )
                 angle_range_half = float(params.get("angle_range_half", 15.0))
                 tp = TemplatePoint(
-                    self._template_image,
+                    self._alignment.template_image,
                     click_row=float(params["row"]),
                     click_col=float(params["col"]),
                     template_size=int(params.get("template_size", 40)),
@@ -919,7 +905,7 @@ class MultiTargetWorkflow:
 
         # If adding a TemplateMatchPoint and template image is available,
         # immediately build its TemplatePoint instance.
-        if object_type == "TemplateMatchPoint" and self._template_image is not None:
+        if object_type == "TemplateMatchPoint" and self._alignment.template_image is not None:
             self._build_template_match_points()
 
         return self
@@ -948,7 +934,7 @@ class MultiTargetWorkflow:
                 d["params"].update(params)
                 break
         # Rebuild cached TemplateMatchPoint if the updated tool is one
-        if self._template_image is not None:
+        if self._alignment.template_image is not None:
             self._build_template_match_points()
 
     def clear_measurements(self):
@@ -997,15 +983,15 @@ class MultiTargetWorkflow:
         self._last_inspection_image = inspection_image.copy()
         self._results = []
 
-        if self._template_point is None:
+        if self._alignment.template_point is None:
             raise RuntimeError("No template defined. Call teach_template() first.")
 
         # Debug: save template image used for matching
-        if self._debug_dir and self._template_image is not None:
-            self._debug_save("template.png", self._template_image)
+        if self._debug_dir and self._alignment.template_image is not None:
+            self._debug_save("template.png", self._alignment.template_image)
 
         # Step 1: Multi-target matching
-        match_result = self._template_point.measure(inspection_image)
+        match_result = self._alignment.template_point.measure(inspection_image)
         matches = match_result.get("matches", [])
 
         if not matches:
@@ -1050,7 +1036,7 @@ class MultiTargetWorkflow:
         if not valid_match:
             # Even for invalid matches, store the absolute rotation for correct
             # box drawing in debug visualizations.
-            absolute_rotation = self._box_angle_deg + rotation_deg
+            absolute_rotation = self._alignment.box_angle_deg + rotation_deg
             return TargetResult(
                 id=index,
                 score=match_score,
@@ -1062,21 +1048,13 @@ class MultiTargetWorkflow:
                 meta={"reason": "match below threshold"},
             )
 
-        # Crop and straighten the target from the inspection image.
-        # best_rotation_deg is the rotation relative to the template's
-        # orientation in the reference image (which was at box_angle_deg).
-        # The target's absolute rotation in the inspection image is:
-        #     box_angle_deg + best_rotation_deg
-        # We must add box_angle_deg here because crop_and_straighten needs
-        # the absolute angle to correctly deskew the content.
-        target_angle = self._box_angle_deg + rotation_deg
-
-        patch, M_inv = crop_and_straighten(
-            inspection_image,
-            (matched_row, matched_col),
-            self._box_size,
-            target_angle,
+        # Delegate alignment to the strategy (handles both rigid and
+        # affine-refined alignment modes transparently).
+        align_result = self._alignment.align(
+            inspection_image, matched_row, matched_col, rotation_deg
         )
+        patch = align_result.patch
+        M_inv = align_result.M_inv  # 2x3 affine matrix
 
         # Debug: save straightened patch
         self._debug_save(f"target_{index + 1:02d}_patch.png", patch)
@@ -1257,7 +1235,7 @@ class MultiTargetWorkflow:
         return TargetResult(
             id=index + 1,
             score=match_score,
-            rotation_deg=target_angle,
+            rotation_deg=self._alignment.box_angle_deg + rotation_deg,
             scale=scale,
             center_row=matched_row,
             center_col=matched_col,
@@ -1266,7 +1244,7 @@ class MultiTargetWorkflow:
             meta={
                 "match_score": match_score,
                 "patch_shape": patch.shape,
-                "M_inv": M_inv,  # Not JSON-serializable, used internally
+                "M_inv": M_inv,
             },
         )
 
@@ -1327,7 +1305,7 @@ class MultiTargetWorkflow:
 
             # Draw rotated box around matched target
             if target.valid:
-                corners = _compute_target_box_corners(target, self._box_size)
+                corners = _compute_target_box_corners(target, self._alignment.box_size)
                 pts = corners.astype(np.int32).reshape((-1, 1, 2))
                 # Convert from (row, col) to (x, y) for OpenCV
                 pts_xy = pts[:, :, ::-1]
@@ -1382,17 +1360,16 @@ class MultiTargetWorkflow:
         Args:
             filepath: Path for the .npz file.
         """
-        if self._template_point is None:
+        tp = self._alignment.template_point
+        if tp is None:
             raise RuntimeError("No template defined. Call teach_template() first.")
-
-        tp = self._template_point
 
         meta = {
             "version": 1,
-            "box_center": list(self._box_center),
-            "box_size": list(self._box_size),
-            "box_angle_deg": self._box_angle_deg,
-            "template_size": self._template_size,
+            "box_center": list(self._alignment.box_center),
+            "box_size": list(self._alignment.box_size),
+            "box_angle_deg": self._alignment.box_angle_deg,
+            "template_size": self._alignment._template_size,
             "match_score_threshold": self._match_score_threshold,
             "angle_range": list(self._angle_range),
             "angle_step": self._angle_step,
@@ -1408,13 +1385,15 @@ class MultiTargetWorkflow:
             "crop_h": tp._crop_h,
             "crop_w": tp._crop_w,
             "measurement_defs": self._measurement_defs,
+            "alignment_mode": self._alignment.mode_name,
+            "alignment_roi_state": self._alignment.get_roi_state(),
         }
 
         save_dict = {
             "workflow_meta": np.array([json.dumps(meta)], dtype=np.object_),
             "edge_template": tp.edge_template,
-            "template_image": self._template_image,
-            "reference_image": self._reference_image,
+            "template_image": self._alignment.template_image,
+            "reference_image": self._alignment._reference_image,
         }
 
         np.savez_compressed(filepath, **save_dict)
@@ -1446,11 +1425,7 @@ class MultiTargetWorkflow:
 
         wf = cls()
 
-        # Restore box and matching params
-        wf._box_center = tuple(meta["box_center"])
-        wf._box_size = tuple(meta["box_size"])
-        wf._box_angle_deg = meta["box_angle_deg"]
-        wf._template_size = meta["template_size"]
+        # Restore matching params
         wf._match_score_threshold = meta["match_score_threshold"]
         wf._angle_range = tuple(meta["angle_range"])
         wf._angle_step = meta["angle_step"]
@@ -1460,13 +1435,31 @@ class MultiTargetWorkflow:
         wf._coarse_angle_step = meta["coarse_angle_step"]
 
         # Restore preprocessor
-        wf._preprocessor = _deserialize_preprocessor(meta["preprocessor_data"])
+        preprocessor = _deserialize_preprocessor(meta["preprocessor_data"])
 
         # Restore template image and reference image
+        template_image = None
+        reference_image = None
         if "template_image" in data:
-            wf._template_image = data["template_image"]
+            template_image = data["template_image"]
         if "reference_image" in data:
-            wf._reference_image = data["reference_image"]
+            reference_image = data["reference_image"]
+
+        # Restore alignment strategy
+        alignment_mode = meta.get("alignment_mode", "single_box")
+        if alignment_mode == "single_box" or "alignment_roi_state" not in meta:
+            wf._alignment = SingleBoxAlignment()
+        else:
+            roi_state = meta["alignment_roi_state"]
+            wf._alignment = strategy_from_roi_state(roi_state, reference_image)
+
+        # Set alignment box params
+        wf._alignment._box_center = tuple(meta["box_center"])
+        wf._alignment._box_size = tuple(meta["box_size"])
+        wf._alignment._box_angle_deg = meta["box_angle_deg"]
+        wf._alignment._template_size = meta["template_size"]
+        wf._alignment._template_image = template_image
+        wf._alignment._reference_image = reference_image
 
         # Reconstruct TemplatePoint
         tp = TemplatePoint.__new__(TemplatePoint)
@@ -1480,10 +1473,8 @@ class MultiTargetWorkflow:
         tp._crop_center_col = meta["crop_center_col"]
         tp._crop_h = meta["crop_h"]
         tp._crop_w = meta["crop_w"]
-        tp._actual_crop_bounds = (
-            0, tp._crop_h, 0, tp._crop_w
-        )
-        tp.preprocessor = wf._preprocessor
+        tp._actual_crop_bounds = (0, tp._crop_h, 0, tp._crop_w)
+        tp.preprocessor = preprocessor
         tp.rotation_invariant = True
         tp.angle_range = wf._angle_range
         tp.angle_step = wf._angle_step
@@ -1497,13 +1488,17 @@ class MultiTargetWorkflow:
         tp.max_matches = wf._max_matches
         tp.overlap = wf._overlap
         tp.result = None
-        wf._template_point = tp
+        wf._alignment._template_point = tp
+
+        # For multi-point alignment, rebuild control point templates
+        if alignment_mode == "multi_point" and template_image is not None:
+            wf._alignment.build_all_control_point_templates()
 
         # Restore measurement definitions
         wf._measurement_defs = meta.get("measurement_defs", [])
 
         # Rebuild TemplateMatchPoint instances from restored template image
-        if wf._template_image is not None:
+        if wf._alignment.template_image is not None:
             wf._build_template_match_points()
 
         return wf
@@ -1611,6 +1606,9 @@ def _map_result_to_original(result, M_inv: np.ndarray):
 
     Returns a dict (serializable) instead of modifying the GeometricResult
     (which is a frozen dataclass).
+
+    Handles both 2x3 affine matrices (from :class:`AlignmentStrategy`) and
+    legacy 3x3 rigid matrices (from :func:`crop_and_straighten`).
     """
     from measure_workflow import (
         CircleResult,
@@ -1619,9 +1617,15 @@ def _map_result_to_original(result, M_inv: np.ndarray):
         PointResult,
     )
 
+    # Pick the right mapper based on M_inv shape
+    if M_inv.shape == (2, 3):
+        mapper = map_point_via_affine
+    else:
+        mapper = map_point_to_original
+
     if isinstance(result, PointResult):
         if result.valid:
-            orig_row, orig_col = map_point_to_original(
+            orig_row, orig_col = mapper(
                 (result.row, result.col), M_inv
             )
             return {
@@ -1636,10 +1640,10 @@ def _map_result_to_original(result, M_inv: np.ndarray):
 
     elif isinstance(result, LineResult):
         if result.valid:
-            sr, sc = map_point_to_original(
+            sr, sc = mapper(
                 (result.start_row, result.start_col), M_inv
             )
-            er, ec = map_point_to_original(
+            er, ec = mapper(
                 (result.end_row, result.end_col), M_inv
             )
             return {
@@ -1655,7 +1659,7 @@ def _map_result_to_original(result, M_inv: np.ndarray):
 
     elif isinstance(result, CircleResult):
         if result.valid:
-            cr, cc = map_point_to_original(
+            cr, cc = mapper(
                 (result.center_row, result.center_col), M_inv
             )
             return {

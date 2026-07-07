@@ -96,7 +96,6 @@ def crop_and_straighten(
     #   local_row = r - h/2
     #   local_col = c - w/2
     # We then rotate by +angle_deg and translate to (cy, cx) in the original.
-    print(f"angle_deg: {angle_deg}")
     theta = np.deg2rad(-angle_deg)
     cos_a = np.cos(theta)
     sin_a = np.sin(theta)
@@ -129,9 +128,6 @@ def crop_and_straighten(
         borderMode=border_mode,
         borderValue=border_value,
     )
-    cv2.imwrite("original.png", image)
-    cv2.imwrite("straightened.png", straightened)
-
 
     return straightened, M_inv_3x3
 
@@ -211,6 +207,33 @@ def build_inverse_transform(
     """
     M_forward = build_forward_transform(center, size, angle_deg)
     return np.linalg.inv(M_forward)
+
+
+def map_point_via_affine(
+    point_in_patch: Tuple[float, float],
+    M_inv: np.ndarray,
+) -> Tuple[float, float]:
+    """
+    Map a point from straightened-patch coordinates back to original
+    image coordinates using a 2x3 affine matrix.
+
+    Args:
+        point_in_patch: (row, col) in the straightened patch.
+        M_inv: 2x3 affine matrix mapping **original → patch**
+               (i.e. the matrix that was passed to ``cv2.warpAffine``).
+
+    Returns:
+        (row, col) in the original image.
+    """
+    r, c = point_in_patch
+    M_forward = cv2.invertAffineTransform(M_inv)
+    orig_col = (
+        M_forward[0, 0] * c + M_forward[0, 1] * r + M_forward[0, 2]
+    )
+    orig_row = (
+        M_forward[1, 0] * c + M_forward[1, 1] * r + M_forward[1, 2]
+    )
+    return (orig_row, orig_col)
 
 
 def cv2_to_pil(image: np.ndarray):
