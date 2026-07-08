@@ -638,6 +638,9 @@ class MultiTargetWorkflow:
                 p1 = raw_results.get(params.get("point_a_label", ""))
                 p2 = raw_results.get(params.get("point_b_label", ""))
                 if p1 and p2 and p1.valid and p2.valid:
+                    if not (hasattr(p1, "col") and hasattr(p1, "row")
+                            and hasattr(p2, "col") and hasattr(p2, "row")):
+                        continue
                     pt1 = (int(p1.col), int(p1.row))
                     pt2 = (int(p2.col), int(p2.row))
                     cv2.line(vis, pt1, pt2, COMPOSED_COLOR, thickness=2)
@@ -646,6 +649,7 @@ class MultiTargetWorkflow:
                 pt = raw_results.get(params.get("point_label", ""))
                 line = raw_results.get(params.get("line_label", ""))
                 if (pt and line and pt.valid and line.valid
+                        and hasattr(pt, "col") and hasattr(pt, "row")
                         and hasattr(line, "a") and hasattr(line, "c")):
                     a, b, c = line.a, line.b, line.c
                     denom = a * a + b * b
@@ -1806,3 +1810,36 @@ def _format_geometric_result(label: str, result) -> str:
         val = getattr(result, "value_deg", result.value)
         return f"  {label}: [{rtype}] {val:.2f}°"
     return f"  {label}: [{rtype}] VALID"
+
+
+def create_workflow_from_template_images(
+    reference_image: np.ndarray,
+    template_regions: list[dict[str, Any]],
+    **workflow_kwargs,
+) -> "MultiTargetWorkflow":
+    """Create a MultiTargetWorkflow from reference image and template region dicts.
+
+    Parameters
+    ----------
+    reference_image : np.ndarray
+        Reference image (gray or color).
+    template_regions : list[dict]
+        Each dict must have ``name``, ``row``, ``col`` (int).
+        Optional: ``template_size`` (int, default 80).
+    **workflow_kwargs
+        Forwarded to ``MultiTargetWorkflow`` constructor.
+
+    Returns
+    -------
+    MultiTargetWorkflow
+        Workflow with all template points added.
+    """
+    workflow = MultiTargetWorkflow(reference_image, **workflow_kwargs)
+    for region in template_regions:
+        workflow.add_template_point(
+            name=region["name"],
+            row=region["row"],
+            col=region["col"],
+            template_size=region.get("template_size", 80),
+        )
+    return workflow

@@ -183,6 +183,24 @@ class CircleResult(GeometricResult):
     center_col: float = 0.0
     radius: float = 0.0
 
+    @property
+    def row(self) -> float:
+        """Compatibility alias: row -> center_row."""
+        return self.center_row
+
+    @property
+    def col(self) -> float:
+        """Compatibility alias: col -> center_col."""
+        return self.center_col
+
+    @row.setter
+    def row(self, value: float) -> None:
+        self.center_row = value
+
+    @col.setter
+    def col(self, value: float) -> None:
+        self.center_col = value
+
 
 @dataclass
 class DistanceResult(GeometricResult):
