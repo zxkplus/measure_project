@@ -577,20 +577,17 @@ class TemplateView(tk.Frame):
         return items
 
     def _draw_fit_line_overlay(self, params: dict, color: str) -> List[int]:
-        """Draw a fit line ROI with perpendicular measurement probes.
+        """Draw a fit line ROI with perpendicular measurement rectangles.
 
-        The fit line tool places ``num_measures`` equally-spaced measurement
-        rectangles perpendicular to the line segment.  Each rectangle runs
-        edge detection and the collected points are fitted to a line.  This
-        overlay draws the main line, endpoint markers, and small probe ticks
-        that represent those measurement rectangles so the user can see at a
-        glance how the tool will measure.
+        Each rectangle is centred on the line, oriented perpendicular to it.
+        Blue outline boxes + red arrows show the edge search direction.
         """
         items = []
         start = params["start"]
         end = params["end"]
         num_measures = params.get("num_measures", 10)
-        measure_length2 = params.get("measure_length2", 25.0)  # half-width perpendicular to line
+        measure_length1 = params.get("measure_length1", 10.0)  # half-length along line
+        measure_length2 = params.get("measure_length2", 25.0)  # half-width perpendicular
 
         sx, sy = self._tmpl_to_canvas(start[0], start[1])
         ex, ey = self._tmpl_to_canvas(end[0], end[1])
@@ -608,47 +605,52 @@ class TemplateView(tk.Frame):
                                          fill=color, outline="")
         items.extend([s_dot, e_dot])
 
-        # --- Perpendicular measurement probes ---
-        # Each probe is a short line segment perpendicular to the main line,
-        # centred at equally-spaced sample points.  It represents the
-        # measurement rectangle that will scan for edge points.
+        # --- Perpendicular measurement rectangles + arrows ---
         if num_measures >= 2:
             sr, sc = start[0], start[1]
             er, ec = end[0], end[1]
-            # Direction vector of the main line (row, col)
             line_dr = er - sr
             line_dc = ec - sc
             line_len = np.sqrt(line_dr ** 2 + line_dc ** 2)
             if line_len > 1e-6:
-                # Unit vector along the line
-                u_r = line_dr / line_len
+                u_r = line_dr / line_len   # unit along line
                 u_c = line_dc / line_len
-                # Unit perpendicular vector (rotate 90° clockwise)
-                n_r = u_c
+                n_r =  u_c                  # perpendicular (90° CW)
                 n_c = -u_r
 
-                # Scale probe half-length from template to canvas pixels
-                probe_half = measure_length2 * self._scale
+                rect_color = "#4488FF"
+                arrow_color = "#FF4444"
 
-                # Draw probes with the main colour + stipple pattern so they
-                # are always visible regardless of the underlying image content.
                 for i in range(num_measures):
-                    # Parameter t ∈ [0, 1] along the line
                     t = i / (num_measures - 1)
                     pr = sr + t * line_dr
                     pc = sc + t * line_dc
-                    p_cx, p_cy = self._tmpl_to_canvas(pr, pc)
 
-                    # Perpendicular endpoints
-                    c1x = p_cx - n_c * probe_half
-                    c1y = p_cy - n_r * probe_half
-                    c2x = p_cx + n_c * probe_half
-                    c2y = p_cy + n_r * probe_half
+                    # Four corners of rotated rectangle
+                    canvas_corners = []
+                    for su, sn in [(-1, -1), (-1, 1), (1, 1), (1, -1)]:
+                        rw = pr + su * u_r * measure_length1 + sn * n_r * measure_length2
+                        cw = pc + su * u_c * measure_length1 + sn * n_c * measure_length2
+                        cx, cy = self._tmpl_to_canvas(rw, cw)
+                        canvas_corners.extend([cx, cy])
+                    rect = self._canvas.create_polygon(
+                        *canvas_corners, outline=rect_color, fill="", width=1,
+                    )
+                    items.append(rect)
 
-                    tick = self._canvas.create_line(
-                        c1x, c1y, c2x, c2y,
-                        fill=color, width=1, stipple="gray25")
-                    items.append(tick)
+                    # Bidirectional arrows along the perpendicular (search) direction
+                    for direction in (+1, -1):
+                        tail_r = pr + direction * n_r * measure_length2 * 0.3
+                        tail_c = pc + direction * n_c * measure_length2 * 0.3
+                        tip_r  = pr + direction * n_r * measure_length2 * 0.8
+                        tip_c  = pc + direction * n_c * measure_length2 * 0.8
+                        sx_a, sy_a = self._tmpl_to_canvas(tail_r, tail_c)
+                        tx_a, ty_a = self._tmpl_to_canvas(tip_r,  tip_c)
+                        arr = self._canvas.create_line(
+                            sx_a, sy_a, tx_a, ty_a,
+                            fill=arrow_color, width=1, arrow=tk.LAST,
+                        )
+                        items.append(arr)
 
         return items
 
