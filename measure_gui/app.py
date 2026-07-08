@@ -439,7 +439,7 @@ class MeasureApp:
                     self._created_at = datetime.now().isoformat()
 
                     # Restore reference image
-                    ref_img = self._workflow._reference_image
+                    ref_img = self._workflow.reference_image
                     if ref_img is not None:
                         self._reference_image = ref_img
                         self._ref_canvas.load_image(ref_img)

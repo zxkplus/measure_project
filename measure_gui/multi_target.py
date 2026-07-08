@@ -387,10 +387,19 @@ class MultiTargetWorkflow:
         """The active alignment strategy."""
         return self._alignment
 
+    @alignment.setter
+    def alignment(self, value: AlignmentStrategy):
+        self._alignment = value
+
     @property
     def template_image(self) -> Optional[np.ndarray]:
         """The straightened template image (for display in GUI)."""
         return self._alignment.template_image
+
+    @property
+    def reference_image(self) -> Optional[np.ndarray]:
+        """The stored reference image (for project save/load)."""
+        return self._alignment._reference_image
 
     @property
     def box_center(self) -> Tuple[float, float]:
@@ -818,7 +827,6 @@ class MultiTargetWorkflow:
         )
 
         # Convenience: keep local references to frequently-accessed items
-        self._reference_image = reference_image.copy()
         self._template_image_legacy = self._alignment.template_image
         self._box_center_legacy = self._alignment.box_center
         self._box_size_legacy = self._alignment.box_size

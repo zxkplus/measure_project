@@ -178,7 +178,7 @@ class ProjectManager:
         app._created_at = manifest.get("created_at")
 
         # Restore reference image
-        ref_img = app._workflow._reference_image
+        ref_img = app._workflow.reference_image
         if ref_img is not None:
             app._reference_image = ref_img
             app._ref_canvas.load_image(ref_img)
@@ -282,7 +282,7 @@ class ProjectManager:
         app._current_project_path = filepath
         app._current_project_dir = None
 
-        ref_img = app._workflow._reference_image
+        ref_img = app._workflow.reference_image
         if ref_img is not None:
             app._reference_image = ref_img
             app._ref_canvas.load_image(ref_img)
