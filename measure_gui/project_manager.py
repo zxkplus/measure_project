@@ -134,6 +134,7 @@ class ProjectManager:
             "insp_canvas_state": _to_json(app._insp_canvas.get_view_state()),
             "template_view": _to_json(app.template_view.get_state()),
             "tool_list_order": _to_json(app.get_tool_list_order()),
+            "tool_visibility": _to_json(dict(app.tool_panel._tool_visibility)),
             "gui": _to_json(app.get_gui_state()),
             "alignment": _to_json(app.get_alignment_state()),
         }
@@ -221,7 +222,11 @@ class ProjectManager:
         # Restore tool panel treeview (order from manifest, data from workflow)
         tools_from_wf = app._workflow.measurement_defs
         tool_order = manifest.get("tool_list_order", [])
+        tool_visibility = manifest.get("tool_visibility", {})
         app.tool_panel.clear_tool_list()
+        if tool_visibility:
+            app.tool_panel._tool_visibility = dict(tool_visibility)
+            app.template_view.set_tool_visibility(tool_visibility)
         app.tool_panel.restore_tool_list(tools_from_wf, tool_order)
 
         # Restore matching params in UI widgets

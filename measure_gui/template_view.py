@@ -73,6 +73,9 @@ class TemplateView(tk.Frame):
         # Placed measurement tools: list of {label, type, params, canvas_items}
         self._tools: List[Dict[str, Any]] = []
 
+        # Hidden tool labels (set by _on_tool_visibility_changed)
+        self._hidden_labels: set = set()
+
         # Interaction state
         self._drawing: bool = False
         self._draw_start: Optional[Tuple[float, float]] = None  # (row, col) in template coords
@@ -255,7 +258,29 @@ class TemplateView(tk.Frame):
             self._delete_tool_items(t)
         self._tools = []
         self._tool_counters = {}
+        self._hidden_labels.clear()
         self._redraw_tools()
+
+    def hide_tool(self, label: str):
+        """Hide a tool's overlay."""
+        self._hidden_labels.add(label)
+        for t in self._tools:
+            if t["label"] == label:
+                self._delete_tool_items(t)
+                break
+
+    def show_tool(self, label: str):
+        """Show a previously hidden tool's overlay."""
+        self._hidden_labels.discard(label)
+        self._redraw_tools()
+
+    def is_tool_visible(self, label: str) -> bool:
+        return label not in self._hidden_labels
+
+    def set_tool_visibility(self, visibility: dict):
+        """Bulk-set visibility from {label: bool}."""
+        self._hidden_labels = {lbl for lbl, v in visibility.items() if not v}
+        self._redraw_tools() if self._tools else None
 
     def get_state(self) -> dict:
         """Serialize complete template view state for project saving.
@@ -482,13 +507,16 @@ class TemplateView(tk.Frame):
         self._redraw_tools()
 
     def _redraw_tools(self):
-        """Redraw all measurement tool overlays."""
+        """Redraw all measurement tool overlays (skipping hidden tools)."""
         # Delete existing tool items
         for t in self._tools:
             self._delete_tool_items(t)
 
-        # Redraw
+        # Redraw only visible tools
         for i, t in enumerate(self._tools):
+            if t["label"] in self._hidden_labels:
+                t["canvas_items"] = []
+                continue
             t["canvas_items"] = self._draw_tool_overlay(t, i)
 
     def _draw_tool_overlay(self, tool: Dict[str, Any], index: int) -> List[int]:

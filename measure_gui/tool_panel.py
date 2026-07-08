@@ -61,9 +61,11 @@ class ToolPanel(ttk.Frame):
         self.on_tool_delete: Optional[Callable] = None
         self.on_alignment_mode_changed: Optional[Callable] = None
         self.on_export_csv: Optional[Callable] = None
+        self.on_tool_visibility_changed: Optional[Callable] = None  # (label, visible) -> None
 
         # State
         self._template_created: bool = False
+        self._tool_visibility: Dict[str, bool] = {}  # label -> bool
 
         self._build_ui()
 
@@ -218,16 +220,19 @@ class ToolPanel(ttk.Frame):
         tool_frame.pack(fill=tk.X, padx=4, pady=2)
 
         # Treeview for tool list
-        columns = ("label", "type")
+        columns = ("visible", "label", "type")
         self._tool_tree = ttk.Treeview(tool_frame, columns=columns,
                                        show="headings", height=8)
+        self._tool_tree.heading("visible", text="")
         self._tool_tree.heading("label", text="标签")
         self._tool_tree.heading("type", text="类型")
-        self._tool_tree.column("label", width=100)
-        self._tool_tree.column("type", width=80)
+        self._tool_tree.column("visible", width=28, anchor=tk.CENTER)
+        self._tool_tree.column("label", width=95)
+        self._tool_tree.column("type", width=75)
         self._tool_tree.pack(fill=tk.X, **pad)
 
-        # Double-click to edit
+        # Click → toggle visibility, Double-click → edit
+        self._tool_tree.bind("<ButtonRelease-1>", self._on_tree_click)
         self._tool_tree.bind("<Double-1>", self._on_tool_double_click)
 
         # Edit/Delete buttons
@@ -300,16 +305,21 @@ class ToolPanel(ttk.Frame):
             self._exec_btn.config(state=tk.DISABLED)
 
     def add_tool_to_list(self, label: str, obj_type: str):
-        """Add a measurement tool to the list display."""
-        self._tool_tree.insert("", tk.END, iid=label, values=(label, obj_type))
+        """Add a measurement tool to the list display (visible by default)."""
+        is_visible = self._tool_visibility.get(label, True)
+        vis_char = "☑" if is_visible else "☐"
+        self._tool_tree.insert("", tk.END, iid=label,
+                               values=(vis_char, label, obj_type))
 
     def remove_tool_from_list(self, label: str):
         """Remove a tool from the list display."""
+        self._tool_visibility.pop(label, None)
         if self._tool_tree.exists(label):
             self._tool_tree.delete(label)
 
     def clear_tool_list(self):
         """Clear all tools from the list."""
+        self._tool_visibility.clear()
         for item in self._tool_tree.get_children():
             self._tool_tree.delete(item)
 
@@ -341,14 +351,39 @@ class ToolPanel(ttk.Frame):
         for label in order:
             obj_type = tool_map.pop(label, "?")
             if not self._tool_tree.exists(label):
-                self._tool_tree.insert("", tk.END, iid=label,
-                                       values=(label, obj_type))
+                self._tool_visibility.setdefault(label, True)
+                self._insert_tool_row(label, obj_type)
 
         # Insert any remaining tools not in order
         for label, obj_type in tool_map.items():
             if not self._tool_tree.exists(label):
-                self._tool_tree.insert("", tk.END, iid=label,
-                                       values=(label, obj_type))
+                self._tool_visibility.setdefault(label, True)
+                self._insert_tool_row(label, obj_type)
+
+    def _insert_tool_row(self, label: str, obj_type: str):
+        """Insert a single tool row into the treeview."""
+        vis_char = "☑" if self._tool_visibility.get(label, True) else "☐"
+        self._tool_tree.insert("", tk.END, iid=label,
+                               values=(vis_char, label, obj_type))
+
+    def _on_tree_click(self, event):
+        """Toggle tool visibility when the ☑/☐ column is clicked."""
+        region = self._tool_tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+        column = self._tool_tree.identify_column(event.x)  # "#1" = visible column
+        if column != "#1":
+            return
+        iid = self._tool_tree.identify_row(event.y)
+        if not iid:
+            return
+        # Toggle
+        current = self._tool_visibility.get(iid, True)
+        self._tool_visibility[iid] = not current
+        vis_char = "☐" if current else "☑"
+        self._tool_tree.set(iid, "visible", vis_char)
+        if self.on_tool_visibility_changed:
+            self.on_tool_visibility_changed(iid, not current)
 
     def set_matching_params(self, preprocessor_type: str,
                             score_threshold: float,

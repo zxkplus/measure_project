@@ -185,6 +185,7 @@ class MeasureApp:
         self.tool_panel.on_tool_delete = self._on_tool_delete
         self.tool_panel.on_export_csv = self._on_export_csv
         self.tool_panel.on_alignment_mode_changed = self._on_alignment_mode_changed
+        self.tool_panel.on_tool_visibility_changed = self._on_tool_visibility_changed
 
         # Right side: vertical paned window
         self._right_pane = ttk.PanedWindow(self._main_pane, orient=tk.VERTICAL)
@@ -1026,6 +1027,13 @@ class MeasureApp:
         self.tool_panel.remove_tool_from_list(label)
 
         self._status_text.set(f"已删除测量工具: {label}")
+
+    def _on_tool_visibility_changed(self, label: str, visible: bool):
+        """Toggle tool overlay visibility."""
+        if visible:
+            self.template_view.show_tool(label)
+        else:
+            self.template_view.hide_tool(label)
 
     def _on_add_composed(self, obj_type: str, label: str, params: dict):
         """Add a composed measurement from the tool panel."""
