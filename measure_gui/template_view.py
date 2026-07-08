@@ -713,20 +713,37 @@ class TemplateView(tk.Frame):
         length1: float, length2: float, num: int,
         start_phi: float, end_phi: float,
     ):
-        """Draw measurement rectangles and radial arrows around the circle.
+        """Draw measurement rectangles and radial arrows around a circle.
 
-        Each rectangle is drawn as a rotated box centered on the expected
-        circle, oriented radially inward toward the center.  An arrowhead
-        indicates the search direction.
+        Every rectangle is perpendicular to the circle edge (radially
+        oriented) and every arrow points toward the centre.
+
+        Image-coordinate convention (row ↓, col →):
+          point on circle at angle φ:
+            pr = cr + radius · sin(φ)    pc = cc + radius · cos(φ)
+          radial direction toward centre:   (−sin(φ), −cos(φ))
+          tangential direction (CCW):       ( cos(φ), −sin(φ))
         """
         cr, cc = center
-        rect_color = "#4488FF"   # blue — measurement probe
-        arrow_color = "#4488FF"
+        rect_color = "#4488FF"
+        arrow_color = "#FF4444"
 
         if end_phi <= start_phi:
             phi_range = end_phi + 2 * math.pi - start_phi
         else:
             phi_range = end_phi - start_phi
+
+        half_l1 = length1 / 2.0  # radial half-length
+        half_l2 = length2 / 2.0  # tangential half-length
+
+        # Local corners in (tangential, radial) = (t, r) where
+        #  r > 0  means "toward centre",  r < 0  means "away from centre"
+        corners_t_r = [
+            (-half_l2, -half_l1),   # far  – tangentially left
+            ( half_l2, -half_l1),   # far  – tangentially right
+            ( half_l2,  half_l1),   # near – tangentially right
+            (-half_l2,  half_l1),   # near – tangentially left
+        ]
 
         for i in range(num):
             if num > 1:
@@ -734,44 +751,33 @@ class TemplateView(tk.Frame):
             else:
                 phi = start_phi + phi_range / 2
 
-            # Point on the expected circle
-            pr = cr + radius * math.sin(phi)
-            pc = cc + radius * math.cos(phi)
+            cos_p = math.cos(phi)
+            sin_p = math.sin(phi)
 
-            # Rectangle is centered at (pr, pc), oriented radially:
-            #   angle = phi + pi  (pointing inward)
-            rad_angle = phi + math.pi
-            cos_a = math.cos(rad_angle)
-            sin_a = math.sin(rad_angle)
+            # point on the expected circle
+            pr = cr + radius * sin_p
+            pc = cc + radius * cos_p
 
-            # Four corners of the rotated rectangle
-            # local (u, v): u = along radial, v = tangential
-            half_l1, half_l2 = length1 / 2.0, length2 / 2.0
-            corners_local = [
-                (-half_l1, -half_l2),  # far-left
-                (-half_l1,  half_l2),  # far-right
-                ( half_l1,  half_l2),  # near-right
-                ( half_l1, -half_l2),  # near-left
-            ]
+            # ---- rotated rectangle ----
             canvas_corners = []
-            for dr, dc in corners_local:
-                r_world = pr + dr * math.cos(rad_angle) - dc * math.sin(rad_angle)
-                c_world = pc + dr * math.sin(rad_angle) + dc * math.cos(rad_angle)
-                cx_c, cy_c = self._tmpl_to_canvas(r_world, c_world)
+            for t, r in corners_t_r:
+                rw = pr + t * cos_p - r * sin_p
+                cw = pc - t * sin_p - r * cos_p
+                cx_c, cy_c = self._tmpl_to_canvas(rw, cw)
                 canvas_corners.extend([cx_c, cy_c])
-
             rect_item = self._canvas.create_polygon(
                 *canvas_corners, outline=rect_color, fill="", width=1,
             )
             items.append(rect_item)
 
-            # Arrow from center of rectangle pointing inward
-            tip_r = pr - (length1 * 0.4) * math.cos(rad_angle)
-            tip_c = pc - (length1 * 0.4) * math.sin(rad_angle)
-            tail_r = pr + (length1 * 0.4) * math.cos(rad_angle)
-            tail_c = pc + (length1 * 0.4) * math.sin(rad_angle)
-            tx, ty = self._tmpl_to_canvas(tip_r, tip_c)
-            sx, sy = self._tmpl_to_canvas(tail_r, tail_c)
+            # ---- arrow pointing toward centre ----
+            # tail = little bit outward,  tip = little bit inward (→ centre)
+            tail_row = pr + half_l1 * 0.6 * sin_p
+            tail_col = pc + half_l1 * 0.6 * cos_p
+            tip_row  = pr - half_l1 * 0.6 * sin_p
+            tip_col  = pc - half_l1 * 0.6 * cos_p
+            sx, sy = self._tmpl_to_canvas(tail_row, tail_col)
+            tx, ty = self._tmpl_to_canvas(tip_row,  tip_col)
             arr = self._canvas.create_line(
                 sx, sy, tx, ty, fill=arrow_color, width=1, arrow=tk.LAST,
             )
