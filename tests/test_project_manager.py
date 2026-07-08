@@ -127,7 +127,7 @@ class TestManifestSchema(TestCase):
     """Test manifest JSON schema compatibility."""
 
     def test_manifest_version(self):
-        self.assertEqual(MANIFEST_VERSION, 1)
+        self.assertEqual(MANIFEST_VERSION, 2)
 
     def test_manifest_serializable(self):
         """A minimal manifest should be JSON-serializable."""
