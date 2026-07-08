@@ -205,8 +205,6 @@ class FitCircleDialog(BaseParamDialog):
             row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 5))
         row += 1
 
-        self._add_float_entry(main, "Radius Min (最小半径)", "radius_min", 80.0, row, 0.0, 10000.0); row += 1
-        self._add_float_entry(main, "Radius Max (最大半径)", "radius_max", 120.0, row, 0.0, 10000.0); row += 1
         self._add_int_entry(main, "Num Measures (测量线数)", "num_measures", 12, row, 3, 360); row += 1
         self._add_float_entry(main, "Measure Length1 (径向半长)", "measure_length1", 20.0, row, 0.1, 1000.0); row += 1
         self._add_float_entry(main, "Measure Length2 (切向半宽)", "measure_length2", 10.0, row, 0.1, 1000.0); row += 1

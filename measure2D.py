@@ -510,10 +510,10 @@ class CircleMeasureObject(_BaseMeasureObject):
     def __init__(self,
                  center: Tuple[float, float],
                  radius: float,
-                 radius_min: float,
-                 radius_max: float,
                  measure_length1: float,
                  measure_length2: float,
+                 radius_min: Optional[float] = None,
+                 radius_max: Optional[float] = None,
                  num_measures: int = 12,
                  sigma: float = 1.0,
                  threshold: float = 30.0,
@@ -526,8 +526,8 @@ class CircleMeasureObject(_BaseMeasureObject):
         参数:
             center: 圆心坐标 (row, col)
             radius: 预期半径
-            radius_min: 最小半径
-            radius_max: 最大半径
+            radius_min: 最小半径（默认 None → radius - measure_length1）
+            radius_max: 最大半径（默认 None → radius + measure_length1）
             measure_length1: 测量矩形径向半长度
             measure_length2: 测量矩形切向半宽度
             num_measures: 圆周测量点数（默认12）
@@ -539,10 +539,10 @@ class CircleMeasureObject(_BaseMeasureObject):
         """
         self.center = np.array(center, dtype=np.float64)
         self.radius = radius
-        self.radius_min = radius_min
-        self.radius_max = radius_max
         self.measure_length1 = measure_length1
         self.measure_length2 = measure_length2
+        self.radius_min = radius_min if radius_min is not None else radius - measure_length1
+        self.radius_max = radius_max if radius_max is not None else radius + measure_length1
         self.num_measures = num_measures
         self.sigma = sigma
         self.threshold = threshold
@@ -946,8 +946,7 @@ class CircleMeasureObject(_BaseMeasureObject):
         Raises:
             ValueError: If required keys are missing.
         """
-        required = ("center", "radius", "radius_min", "radius_max",
-                    "measure_length1", "measure_length2")
+        required = ("center", "radius", "measure_length1", "measure_length2")
         for key in required:
             if key not in data:
                 raise ValueError(
@@ -956,10 +955,10 @@ class CircleMeasureObject(_BaseMeasureObject):
         return cls(
             center=tuple(data["center"]),
             radius=float(data["radius"]),
-            radius_min=float(data["radius_min"]),
-            radius_max=float(data["radius_max"]),
             measure_length1=float(data["measure_length1"]),
             measure_length2=float(data["measure_length2"]),
+            radius_min=data.get("radius_min"),   # None triggers auto-compute
+            radius_max=data.get("radius_max"),
             num_measures=int(data.get("num_measures", 12)),
             sigma=float(data.get("sigma", 1.0)),
             threshold=float(data.get("threshold", 30.0)),
@@ -1042,10 +1041,10 @@ class MetrologyModel:
     def add_circle_measure(self,
                            center: Tuple[float, float],
                            radius: float,
-                           radius_min: float,
-                           radius_max: float,
                            measure_length1: float,
                            measure_length2: float,
+                           radius_min: Optional[float] = None,
+                           radius_max: Optional[float] = None,
                            num_measures: int = 12,
                            sigma: float = 1.0,
                            threshold: float = 30.0,
@@ -1054,17 +1053,17 @@ class MetrologyModel:
                            end_phi: float = 2 * np.pi) -> int:
         """
         添加圆测量对象
-        
+
         返回:
             index: 测量对象索引
         """
         obj = CircleMeasureObject(
             center=center,
             radius=radius,
-            radius_min=radius_min,
-            radius_max=radius_max,
             measure_length1=measure_length1,
             measure_length2=measure_length2,
+            radius_min=radius_min,
+            radius_max=radius_max,
             num_measures=num_measures,
             sigma=sigma,
             threshold=threshold,

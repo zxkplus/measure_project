@@ -11,6 +11,7 @@ Tools are defined in the straightened template coordinate space (origin at top-l
 
 from __future__ import annotations
 
+import math
 import tkinter as tk
 from enum import Enum, auto
 from tkinter import ttk
@@ -652,17 +653,33 @@ class TemplateView(tk.Frame):
         return items
 
     def _draw_fit_circle_overlay(self, params: dict, color: str) -> List[int]:
-        """Draw a fit circle ROI with search radius boundaries."""
+        """Draw a fit circle ROI with search boundaries and measurement rectangles."""
         items = []
         center = params["center"]
         radius = params["radius"]
-        r_min = params.get("radius_min", None)
-        r_max = params.get("radius_max", None)
+        measure_length1 = params.get("measure_length1", 20.0)
+        measure_length2 = params.get("measure_length2", 10.0)
+        num_measures = params.get("num_measures", 12)
+
+        # radius_min / radius_max auto-derived from measure_length1
+        r_min = params.get("radius_min")
+        if r_min is None:
+            r_min = radius - measure_length1
+        r_max = params.get("radius_max")
+        if r_max is None:
+            r_max = radius + measure_length1
 
         cx, cy = self._tmpl_to_canvas(center[0], center[1])
 
+        # --- Measurement rectangles (blue outlines + arrows) ---
+        if num_measures > 0:
+            self._draw_circle_measure_rectangles(
+                items, center, radius, measure_length1, measure_length2,
+                num_measures, params.get("start_phi", 0.0),
+                params.get("end_phi", 2 * math.pi),
+            )
+
         # --- Search radius boundaries (dashed) ---
-        # radius_min: cyan dashed circle — inner search boundary
         if r_min is not None and r_min > 0:
             r_min_px = max(1, int(r_min * self._scale))
             circ_min = self._canvas.create_oval(
@@ -670,7 +687,6 @@ class TemplateView(tk.Frame):
                 outline="cyan", width=1, dash=(6, 4))
             items.append(circ_min)
 
-        # radius_max: orange dashed circle — outer search boundary
         if r_max is not None and r_max > 0 and r_max > (r_min or 0):
             r_max_px = max(1, int(r_max * self._scale))
             circ_max = self._canvas.create_oval(
@@ -691,6 +707,75 @@ class TemplateView(tk.Frame):
         items.extend([cross_h, cross_v])
 
         return items
+
+    def _draw_circle_measure_rectangles(
+        self, items: list, center: tuple, radius: float,
+        length1: float, length2: float, num: int,
+        start_phi: float, end_phi: float,
+    ):
+        """Draw measurement rectangles and radial arrows around the circle.
+
+        Each rectangle is drawn as a rotated box centered on the expected
+        circle, oriented radially inward toward the center.  An arrowhead
+        indicates the search direction.
+        """
+        cr, cc = center
+        rect_color = "#4488FF"   # blue — measurement probe
+        arrow_color = "#4488FF"
+
+        if end_phi <= start_phi:
+            phi_range = end_phi + 2 * math.pi - start_phi
+        else:
+            phi_range = end_phi - start_phi
+
+        for i in range(num):
+            if num > 1:
+                phi = start_phi + i / (num - 1) * phi_range
+            else:
+                phi = start_phi + phi_range / 2
+
+            # Point on the expected circle
+            pr = cr + radius * math.sin(phi)
+            pc = cc + radius * math.cos(phi)
+
+            # Rectangle is centered at (pr, pc), oriented radially:
+            #   angle = phi + pi  (pointing inward)
+            rad_angle = phi + math.pi
+            cos_a = math.cos(rad_angle)
+            sin_a = math.sin(rad_angle)
+
+            # Four corners of the rotated rectangle
+            # local (u, v): u = along radial, v = tangential
+            half_l1, half_l2 = length1 / 2.0, length2 / 2.0
+            corners_local = [
+                (-half_l1, -half_l2),  # far-left
+                (-half_l1,  half_l2),  # far-right
+                ( half_l1,  half_l2),  # near-right
+                ( half_l1, -half_l2),  # near-left
+            ]
+            canvas_corners = []
+            for dr, dc in corners_local:
+                r_world = pr + dr * math.cos(rad_angle) - dc * math.sin(rad_angle)
+                c_world = pc + dr * math.sin(rad_angle) + dc * math.cos(rad_angle)
+                cx_c, cy_c = self._tmpl_to_canvas(r_world, c_world)
+                canvas_corners.extend([cx_c, cy_c])
+
+            rect_item = self._canvas.create_polygon(
+                *canvas_corners, outline=rect_color, fill="", width=1,
+            )
+            items.append(rect_item)
+
+            # Arrow from center of rectangle pointing inward
+            tip_r = pr - (length1 * 0.4) * math.cos(rad_angle)
+            tip_c = pc - (length1 * 0.4) * math.sin(rad_angle)
+            tail_r = pr + (length1 * 0.4) * math.cos(rad_angle)
+            tail_c = pc + (length1 * 0.4) * math.sin(rad_angle)
+            tx, ty = self._tmpl_to_canvas(tip_r, tip_c)
+            sx, sy = self._tmpl_to_canvas(tail_r, tail_c)
+            arr = self._canvas.create_line(
+                sx, sy, tx, ty, fill=arrow_color, width=1, arrow=tk.LAST,
+            )
+            items.append(arr)
 
     def _draw_template_match_overlay(self, params: dict, color: str) -> List[int]:
         """Draw a template match point region.
@@ -1008,8 +1093,6 @@ class TemplateView(tk.Frame):
         params = {
             "center": center,
             "radius": max(5.0, radius),
-            "radius_min": max(2.0, radius * 0.5),
-            "radius_max": max(10.0, radius * 1.5),
             "measure_length1": 20.0,
             "measure_length2": 10.0,
             "num_measures": 12,
@@ -1021,10 +1104,8 @@ class TemplateView(tk.Frame):
         }
 
         dlg_params = FitCircleDialog.ask(self, params={
-            "radius_min": params["radius_min"],
-            "radius_max": params["radius_max"],
-            "num_measures": 12, "measure_length1": 20.0,
-            "measure_length2": 10.0, "sigma": 1.0,
+            "measure_length1": 20.0, "measure_length2": 10.0,
+            "num_measures": 12, "sigma": 1.0,
             "threshold": 30.0, "transition": "all",
         })
 
