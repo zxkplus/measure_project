@@ -731,8 +731,8 @@ class TemplateView(tk.Frame):
         else:
             phi_range = end_phi - start_phi
 
-        half_l1 = length1 / 2.0  # radial half-length
-        half_l2 = length2 / 2.0  # tangential half-length
+        half_l1 = length1         # measure_length1 is already a half-length
+        half_l2 = length2         # measure_length2 is already a half-length
 
         # Local corners in (tangential, radial) = (t, r) where
         #  r > 0  means "toward centre",  r < 0  means "away from centre"
