@@ -1316,10 +1316,10 @@ class FitCircleObject(MeasureObject):
         label: str,
         center: Tuple[float, float],
         radius: float,
-        radius_min: float,
-        radius_max: float,
         measure_length1: float,
         measure_length2: float,
+        radius_min: Optional[float] = None,
+        radius_max: Optional[float] = None,
         num_measures: int = 12,
         sigma: float = 1.0,
         threshold: float = 30.0,
@@ -1332,10 +1332,10 @@ class FitCircleObject(MeasureObject):
         self._teach_radius = float(radius)
         self._calibrated_center = (float(center[0]), float(center[1]))
         self._calibrated_radius = float(radius)
-        self.radius_min = radius_min
-        self.radius_max = radius_max
         self.measure_length1 = measure_length1
         self.measure_length2 = measure_length2
+        self.radius_min = radius_min if radius_min is not None else radius - measure_length1
+        self.radius_max = radius_max if radius_max is not None else radius + measure_length1
         self.num_measures = num_measures
         self.sigma = sigma
         self.threshold = threshold
@@ -1412,10 +1412,10 @@ class FitCircleObject(MeasureObject):
             label=label,
             center=tuple(data["teach_center"]),
             radius=data["teach_radius"],
-            radius_min=data["radius_min"],
-            radius_max=data["radius_max"],
             measure_length1=data["measure_length1"],
             measure_length2=data["measure_length2"],
+            radius_min=data.get("radius_min"),
+            radius_max=data.get("radius_max"),
             num_measures=data.get("num_measures", 12),
             sigma=data.get("sigma", 1.0),
             threshold=data.get("threshold", 30.0),
