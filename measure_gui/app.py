@@ -322,7 +322,7 @@ class MeasureApp:
 
     def _save_project(self):
         """Save the current project. Uses current project dir or prompts for one."""
-        if self._workflow is None or self._workflow._template_point is None:
+        if self._workflow is None or self._workflow._alignment.template_point is None:
             messagebox.showwarning("提示", "请先创建模板")
             return
 
@@ -352,7 +352,7 @@ class MeasureApp:
 
     def _save_project_as(self):
         """Save project to a new directory (always prompts)."""
-        if self._workflow is None or self._workflow._template_point is None:
+        if self._workflow is None or self._workflow._alignment.template_point is None:
             messagebox.showwarning("提示", "请先创建模板")
             return
 
@@ -537,7 +537,7 @@ class MeasureApp:
 
     def _execute(self):
         """Execute multi-target measurement on the inspection image."""
-        if self._workflow is None or self._workflow._template_point is None:
+        if self._workflow is None or self._workflow._alignment.template_point is None:
             messagebox.showwarning("提示", "请先创建/加载模板")
             return
 
