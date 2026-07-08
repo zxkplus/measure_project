@@ -663,13 +663,9 @@ class TemplateView(tk.Frame):
         measure_length2 = params.get("measure_length2", 10.0)
         num_measures = params.get("num_measures", 12)
 
-        # radius_min / radius_max auto-derived from measure_length1
-        r_min = params.get("radius_min")
-        if r_min is None:
-            r_min = radius - measure_length1
-        r_max = params.get("radius_max")
-        if r_max is None:
-            r_max = radius + measure_length1
+        # radius_min / radius_max always derived from measure_length1
+        r_min = radius - measure_length1
+        r_max = radius + measure_length1
 
         cx, cy = self._tmpl_to_canvas(center[0], center[1])
 
