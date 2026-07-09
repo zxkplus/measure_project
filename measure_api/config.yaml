@@ -41,3 +41,21 @@
    match_score_threshold: 0.5
    angle_range_deg: 30
    max_matches: 0
+
+ # ── 模板匹配性能参数（可通过 config.local.yaml 覆盖） ──
+ matching:
+   # 角度搜索范围 ±度
+   angle_range_deg: 30
+   # 角度精搜索步长（度）
+   angle_step: 1.0
+   # 角度粗搜索步长（度）
+   coarse_angle_step: 5.0
+   # 是否启用 coarse-to-fine 两阶段搜索
+   coarse_fine: true
+   # NMS 重叠阈值 (0-1)
+   overlap: 0.3
+   # 模板降采样：>0 时先降采样做粗匹配再精定位
+   # 0 = 禁用, 1 = 2x, 2 = 4x 降采样
+   pyramid_decimate: 0
+   # 降采样后的模板最大边长（像素）
+   pyramid_max_template_size: 400
