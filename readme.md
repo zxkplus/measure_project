@@ -4,9 +4,9 @@ Halcon 1D Measure - Python 实现
 <div align="center">
 
 
-<img alt="Python Version" src="https://img.shields.io/badge/python-3.6%2B-blue.svg">
+<img alt="Python Version" src="https://img.shields.io/badge/python-3.9%2B-blue.svg">
 <img alt="License" src="https://img.shields.io/badge/license-MIT-green.svg">
-<img alt="OpenCV" src="https://img.shields.io/badge/opencv-4.0%2B-orange.svg">
+<img alt="OpenCV" src="https://img.shields.io/badge/opencv-4.5%2B-orange.svg">
 
 
 纯 Python 实现的 Halcon 一维测量工具，无需依赖 Halcon 商业库
@@ -83,10 +83,10 @@ pip install -r requirements.txt
 
 
 依赖	版本	必需	说明
-Python	≥ 3.6	✓	运行环境
-NumPy	≥ 1.16	✓	数值计算
-OpenCV	≥ 4.0	✓	图像处理
-SciPy	≥ 1.2	✓	科学计算
+Python	≥ 3.9	✓	运行环境
+NumPy	≥ 1.21	✓	数值计算
+OpenCV	≥ 4.5	✓	图像处理
+SciPy	≥ 1.7	✓	科学计算
 Matplotlib	≥ 3.0	可选	可视化
 Pillow	≥ 8.0	GUI	图像格式转换
 
@@ -175,7 +175,7 @@ if result:
 4. 模板匹配测量
 
 ```python
-from measure_template import TemplatePoint, DistanceMeasure, CannyPreprocessor
+from measure.measure_template import TemplatePoint, DistanceMeasure, CannyPreprocessor
 
 # 从参考图创建两个模板点
 pt_a = TemplatePoint(ref_img, click_row=200, click_col=150, template_size=80)
@@ -497,7 +497,7 @@ vis = dm.visualize(image)
 **MeasurementWorkflow 类** — 统一可组合测量工作流
 
 ```python
-from measure_workflow import MeasurementWorkflow, TemplatePointObject, EdgePointObject, FitLineObject, TwoPointsDistanceObject
+from measure.measure_workflow import MeasurementWorkflow, TemplatePointObject, EdgePointObject, FitLineObject, TwoPointsDistanceObject
 
 wf = MeasurementWorkflow()
 
@@ -710,44 +710,55 @@ cv2.imwrite('example3_result.png', vis_img)
 
 plaintext
 measure_project/
-├── measure1D.py                  # 一维边缘检测核心
-├── measure2D.py                  # 几何测量 (直线/圆拟合)
-├── measure_template.py           # 模板匹配 + 预处理器
-├── measure_workflow.py           # 统一可组合测量工作流
+├── measure/                       # 统一测量模块
+│   ├── __init__.py                # 模块初始化，导出主要类
+│   ├── constants.py               # 常量定义 (EPS 等)
+│   ├── signal_ops.py              # 信号处理工具
+│   ├── transforms.py              # 坐标变换
+│   ├── viz.py                     # 可视化工具
+│   ├── measure1D.py               # 一维边缘检测核心
+│   ├── measure2D.py               # 几何测量 (直线/圆拟合)
+│   ├── measure_calibration.py     # 相机与立体校准
+│   ├── measure_template.py        # 模板匹配 + 预处理器
+│   ├── measure_workflow.py        # 统一可组合测量工作流
+│   └── multi_target_workflow.py   # 多目标检测流水线
 │
-├── measure_gui/                  # GUI 图形界面包 (Tkinter)
-│   ├── utils.py                  # 几何变换工具 (裁图摆正/坐标映射)
-│   ├── multi_target.py           # 多目标测量编排器
-│   ├── app.py                    # 主窗口 (整合所有组件)
-│   ├── image_canvas.py           # 图像查看器 + 旋转 ROI 交互绘制
-│   ├── template_view.py          # 摆正模板预览 + 测量工具交互添加
-│   ├── tool_panel.py             # 左侧测量工具栏
-│   ├── result_panel.py           # 底部结果展示面板
-│   └── dialogs.py                # 参数编辑对话框
+├── measure_gui/                   # GUI 图形界面包 (Tkinter)
+│   ├── utils.py                   # 几何变换工具 (裁图摆正/坐标映射)
+│   ├── multi_target.py            # 多目标测量编排器
+│   ├── app.py                     # 主窗口 (整合所有组件)
+│   ├── image_canvas.py            # 图像查看器 + 旋转 ROI 交互绘制
+│   ├── template_view.py           # 摆正模板预览 + 测量工具交互添加
+│   ├── tool_panel.py              # 左侧测量工具栏
+│   ├── result_panel.py            # 底部结果展示面板
+│   └── dialogs.py                 # 参数编辑对话框
 │
-├── test_1d_measure.py            # 一维测量测试
-├── test_2d_measure.py            # 二维测量测试
-├── test_template_measure.py      # 模板匹配测试
-├── test_measure_workflow.py      # 工作流测试
+├── measure_api/                   # REST API 服务
+│   ├── server.py                  # API 服务器
+│   ├── project.py                 # 项目管理
+│   └── quality.py                 # 质量检测
 │
-├── data/sample/                  # 样例图片 (gitignored)
-├── run_gui.py                    # GUI 启动脚本
-├── README.md                     # 项目文档
-└── CLAUDE.md                     # 开发指南
+├── tests/                         # 测试套件
+│   ├── test_1d_measure.py         # 一维测量测试
+│   ├── test_2d_measure.py         # 二维测量测试
+│   ├── test_template_measure.py   # 模板匹配测试
+│   ├── test_measure_workflow.py   # 工作流测试
+│   └── test_measure_calibration.py        # 校准测试
+│
+├── data/sample/                   # 样例图片 (gitignored)
+├── project_manager.py             # 项目序列化/加载
+├── run_gui.py                     # GUI 启动脚本
+├── README.md                      # 项目文档
+└── CLAUDE.md                      # 开发指南
 
 
-
-❓ 常见问题
-Q1: 为什么边缘检测结果与预期不符？
-
-
-A: 可能的原因：
-
-
-阈值设置不当 - 尝试调整 threshold 参数
-测量方向错误 - 检查 angle 参数是否正确
-图像质量问题 - 增大 sigma 参数以平滑噪声
-Q2: 如何选择合适的阈值？
+使用示例:
+```python
+from measure import Halcon1DMeasure, LineMeasureObject, CircleMeasureObject
+from measure import CameraCalibration, StereoRigCalibration
+from measure import TemplatePoint, DistanceMeasure
+from measure import MeasurementWorkflow, MultiTargetWorkflow
+```
 
 
 A: 建议：
@@ -760,7 +771,7 @@ A: 建议：
 Q3: 为什么 45 度角测量时边缘点看起来"垂直"？
 
 
-A: 这是正常现象。测量线段从起点到终点，覆盖 180° 的角度范围。在 45° 角时，起点方向是 -135°，终点方向是 +45°，看起来像"垂直"，但实际上是正确的。详见 tests/FINAL_BUG_REPORT.py。
+A: 这是正常现象。测量线段从起点到终点，覆盖 180° 的角度范围。在 45° 角时，起点方向是 -135°，终点方向是 +45°，看起来像"垂直"，但实际上是正确的。
 Q4: 如何提高测量精度？
 
 

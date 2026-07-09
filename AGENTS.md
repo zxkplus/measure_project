@@ -4,29 +4,47 @@
 
 ```
 .
-├── measure1D.py              # 1-D edge detection (Halcon1DMeasure)
-├── measure2D.py              # 2-D fit: lines, circles, rectangles
-├── measure_calibration.py    # Camera & stereo‑rig calibration
-├── measure_template.py       # Template‑based matching
-├── measure_workflow.py       # Orchestrated measurement workflow
-├── multi_target_workflow.py  # Multi‑target detection pipeline
-├── project_manager.py        # Project serialization / load
-├── run_gui.py                # GUI entry point
-├── measurement/              # Core library package
-│   ├── constants.py, signal_ops.py, transforms.py, viz.py
-├── measure_gui/              # PyQt / OpenCV GUI panels
+├── measure/                    # Unified measurement module
+│   ├── __init__.py             # Module initialization, exports main classes
+│   ├── constants.py            # Constants (EPS, etc.)
+│   ├── signal_ops.py           # Signal processing utilities
+│   ├── transforms.py           # Coordinate transformations
+│   ├── viz.py                  # Visualization helpers
+│   ├── measure1D.py            # 1-D edge detection (Halcon1DMeasure)
+│   ├── measure2D.py            # 2-D fit: lines, circles, rectangles
+│   ├── measure_calibration.py  # Camera & stereo‑rig calibration
+│   ├── measure_template.py     # Template‑based matching
+│   ├── measure_workflow.py     # Orchestrated measurement workflow
+│   └── multi_target_workflow.py # Multi‑target detection pipeline
+├── project_manager.py          # Project serialization / load
+├── run_gui.py                  # GUI entry point
+├── measure_gui/                # PyQt / OpenCV GUI panels
 │   ├── tool_panel.py, alignment.py, result_panel.py, ...
-├── tests/                    # Pytest test suite
-│   ├── conftest.py           # Shared fixtures (headless mode, output dirs)
+├── measure_api/                # REST API for measurements
+│   ├── server.py, project.py, quality.py, ...
+├── tests/                      # Pytest test suite
+│   ├── conftest.py             # Shared fixtures (headless mode, output dirs)
 │   └── test_*.py
-├── data/sample/              # Sample images for testing
-└── output/                   # Generated test outputs (gitignored)
+├── data/sample/                # Sample images for testing
+└── output/                     # Generated test outputs (gitignored)
 ```
 
-The root modules (`measure*.py`) are standalone and importable directly. The `measurement/` package holds reusable primitives (signal processing, coordinate transforms, visualization). GUI code lives entirely inside `measure_gui/`.
+The `measure/` package consolidates all measurement-related code into a single, portable module. It includes:
+- **Core utilities**: constants, signal processing, coordinate transforms, visualization
+- **1D measurement**: Halcon-style 1D edge detection
+- **2D measurement**: Line, circle, and rectangle fitting
+- **Calibration**: Camera and stereo rig calibration
+- **Template matching**: Point-based template matching with subpixel refinement
+- **Workflow**: Composable measurement workflow system
+- **Multi-target**: Multi-target detection and measurement pipeline
 
-## Build, Test, and Development Commands
-
+Import examples:
+```python
+from measure import Halcon1DMeasure, LineMeasureObject, CircleMeasureObject
+from measure import CameraCalibration, StereoRigCalibration
+from measure import TemplatePoint, DistanceMeasure
+from measure import MeasurementWorkflow, MultiTargetWorkflow
+```
 | Command | Purpose |
 |---|---|
 | `python run_gui.py` | Launch the measurement GUI application. |

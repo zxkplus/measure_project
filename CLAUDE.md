@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-Pure Python reimplementation of Halcon's 1D/2D measurement tools (edge detection, line/circle fitting) without the commercial Halcon library. The project has a **flat file structure** — the README describes a package layout (`halcon_1d_measure/`, `examples/`, `tests/`) that does not exist on disk. All code lives in top-level `.py` files.
+Pure Python reimplementation of Halcon's 1D/2D measurement tools (edge detection, line/circle fitting) without the commercial Halcon library. The project uses a unified `measure/` package structure for all measurement-related code.
 
 ## Build / test / run
 
@@ -18,35 +18,35 @@ Run tests:
 
 ```bash
 # Run all tests with pytest
-pytest test_1d_measure.py test_2d_measure.py -v
+pytest tests/test_1d_measure.py tests/test_2d_measure.py -v
 
 # Run a single test file
-pytest test_1d_measure.py -v
+pytest tests/test_1d_measure.py -v
 
 # Run a specific test class/method
-pytest test_1d_measure.py::TestHalcon1DMeasure::test_measure_pos_1 -v
+pytest tests/test_1d_measure.py::TestHalcon1DMeasure::test_measure_pos_1 -v
 
 # Run the 2D test as a script (has its own __main__)
-python test_2d_measure.py
+python tests/test_2d_measure.py
 ```
 
 Run tests:
 
 ```bash
 # All tests
-pytest test_1d_measure.py test_2d_measure.py test_template_measure.py -v
+pytest tests/ -v
 
 # Template matching tests only
-pytest test_template_measure.py -v
+pytest tests/test_template_measure.py -v
 
 # With built-in test runner (visual demos included)
-python test_template_measure.py
+python tests/test_template_measure.py
 ```
 
 Run the 1D measure demo:
 
 ```bash
-python measure1D.py
+python -m measure.measure1D
 ```
 
 ## Architecture
