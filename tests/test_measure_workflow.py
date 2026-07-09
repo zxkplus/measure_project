@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 import pytest
 
-from measure_workflow import (
+from measure.measure_workflow import (
     AngleResult,
     CircleResult,
     DistanceResult,
@@ -39,7 +39,7 @@ from measure_workflow import (
     TwoPointsLineObject,
 )
 
-from measure_template import TemplatePoint
+from measure.measure_template import TemplatePoint
 
 
 # ===========================================================================

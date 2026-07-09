@@ -16,7 +16,7 @@ from typing import Tuple, List, Optional, Dict
 # 添加父目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from measure2D import LineMeasureObject, CircleMeasureObject, MetrologyModel
+from measure.measure2D import LineMeasureObject, CircleMeasureObject, MetrologyModel
 
 
 def create_test_image_with_line(width: int = 500, height: int = 400,

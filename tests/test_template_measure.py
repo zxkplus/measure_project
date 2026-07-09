@@ -16,7 +16,7 @@ from typing import Tuple
 # Ensure the module can be imported from the repo root
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from measure_template import (TemplatePoint, DistanceMeasure,
+from measure.measure_template import (TemplatePoint, DistanceMeasure,
                               RawPreprocessor, CannyPreprocessor,
                               SobelPreprocessor, CLAHEPreprocessor,
                               ThresholdPreprocessor,

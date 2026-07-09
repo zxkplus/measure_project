@@ -1,7 +1,7 @@
 import pytest
 import cv2
 import numpy as np
-from measure1D import Halcon1DMeasure,create_test_image
+from measure.measure1D import Halcon1DMeasure,create_test_image
 
 class TestHalcon1DMeasure:
     """测试Halcon1DMeasure类的各个功能"""

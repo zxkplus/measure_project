@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from measure_template import TemplatePoint
+from measure.measure_template import TemplatePoint
 from measure_gui.multi_target import (
     MultiTargetWorkflow,
     create_workflow_from_template_images

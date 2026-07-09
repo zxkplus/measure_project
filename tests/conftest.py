@@ -41,7 +41,7 @@ def _apply_headless(request) -> None:
     """Monkey-patch cv2 by default; use --show to see windows."""
     show = request.config.getoption("--show")
     if not show:
-        from measurement import _apply_headless_patch
+        from measure import _apply_headless_patch
         _apply_headless_patch()
 
 

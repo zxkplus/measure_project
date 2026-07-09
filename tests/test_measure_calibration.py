@@ -10,7 +10,7 @@ import tempfile
 import numpy as np
 import cv2
 import pytest
-from measure_calibration import CameraCalibration, StereoRigCalibration
+from measure.measure_calibration import CameraCalibration, StereoRigCalibration
 
 
 # ---------------------------------------------------------------------------
