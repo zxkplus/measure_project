@@ -34,6 +34,7 @@ Usage:
 """
 
 import base64
+import time
 import json
 import cv2
 import numpy as np
@@ -428,7 +429,9 @@ class TemplatePoint:
             r1, c1 = 0, 0
             search_img = gray
 
+        t_pre = time.perf_counter()
         search_img = self.preprocessor(search_img)
+        t_pre_end = time.perf_counter()
 
         # Validate image is large enough for template
         if search_img.shape[0] < self._crop_h or search_img.shape[1] < self._crop_w:
@@ -438,6 +441,7 @@ class TemplatePoint:
             )
 
         # Dispatch: fast path vs multi-angle/scale vs multi-target
+        t0 = time.perf_counter()
         if not self.rotation_invariant and not self.scale_invariant:
             if self.multi_target:
                 result = self._match_translation_multi(search_img, r1, c1)
@@ -451,6 +455,11 @@ class TemplatePoint:
 
         self.result = result
         return self.result
+        logger.info("[TIMING] TemplatePoint.measure: preproc=%+.1fms  match=%+.1fms  tmpl=%dx%d  search=%dx%d",
+                     (t_pre_end - t_pre) * 1000,
+                     (time.perf_counter() - t0) * 1000,
+                     self._crop_w, self._crop_h,
+                     search_img.shape[1], search_img.shape[0])
 
     def _match_translation_only(self, search_img: np.ndarray,
                                  r1: int, c1: int) -> Dict[str, Any]:

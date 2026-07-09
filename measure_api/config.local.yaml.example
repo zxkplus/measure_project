@@ -25,3 +25,11 @@
  #   match_score_threshold: 0.6
  #   angle_range_deg: 45
  #   max_matches: 0
+
+ # ── 模板匹配性能参数覆盖示例 ──
+ # matching:
+ #   angle_range_deg: 15           # 缩小搜索范围 ±15°（默认 ±30°），加速~2x
+ #   angle_step: 2.0               # 加大精搜索步长
+ #   coarse_angle_step: 10.0       # 加大粗搜索步长（默认 5.0），加速~40%
+ #   coarse_fine: true
+ #   overlap: 0.3
