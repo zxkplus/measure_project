@@ -31,6 +31,7 @@ import cv2
 import numpy as np
 
 from measure_api.logger import get_logger
+from measure_api.config import Config
 from measure_api.quality import compute_quality
 from measure_api.schemas import COMPOSED_DEPS, COMPOSED_TYPES, PRIMITIVE_TYPES
 from measure_api.visualizer import generate_overview_visual, generate_visual
@@ -244,6 +245,10 @@ class MeasureProject:
         match_score_threshold: float = 0.5,
         angle_range_deg: float = 30.0,
         max_matches: int = 0,
+        angle_step: float = 1.0,
+        coarse_angle_step: float = 5.0,
+        coarse_fine: bool = True,
+        overlap: float = 0.3,
     ) -> Dict[str, Any]:
         """
         Define the ROI template.
@@ -283,6 +288,18 @@ class MeasureProject:
         }
         preprocessor_obj = proc_map.get(preprocessor, RawPreprocessor())
 
+        # Apply global matching config as fallback for default parameters
+        _cfg_match = Config.load().get("matching", {}) or {}
+        if abs(angle_range_deg - 30.0) < 1e-9 and "angle_range_deg" in _cfg_match:
+            angle_range_deg = float(_cfg_match["angle_range_deg"])
+        if abs(angle_step - 1.0) < 1e-9 and "angle_step" in _cfg_match:
+            angle_step = float(_cfg_match["angle_step"])
+        if abs(coarse_angle_step - 5.0) < 1e-9 and "coarse_angle_step" in _cfg_match:
+            coarse_angle_step = float(_cfg_match["coarse_angle_step"])
+        if coarse_fine is True and "coarse_fine" in _cfg_match:
+            coarse_fine = bool(_cfg_match["coarse_fine"])
+        if abs(overlap - 0.3) < 1e-9 and "overlap" in _cfg_match:
+            overlap = float(_cfg_match["overlap"])
         self._workflow.teach_template(
             self._reference_image,
             center=tuple(center),
@@ -291,6 +308,10 @@ class MeasureProject:
             preprocessor=preprocessor_obj,
             match_score_threshold=float(match_score_threshold),
             angle_range=(-float(angle_range_deg), float(angle_range_deg)),
+            angle_step=float(angle_step),
+            coarse_angle_step=float(coarse_angle_step),
+            coarse_fine=bool(coarse_fine),
+            overlap=float(overlap),
             max_matches=int(max_matches),
         )
 
@@ -1099,8 +1120,9 @@ class MeasureProject:
         img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise ValueError(f"Failed to read inspection image: {path}")
+        t_read = time.perf_counter()
 
-        start = time.perf_counter()
+        t0 = time.perf_counter()
 
         try:
             raw_results = self._workflow.measure(img)
@@ -1109,12 +1131,16 @@ class MeasureProject:
             return {
                 "status": "error",
                 "error": str(e),
-                "elapsed_ms": round((time.perf_counter() - start) * 1000, 1),
+                "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
                 "num_targets": 0,
                 "targets": [],
             }
 
-        elapsed_ms = (time.perf_counter() - start) * 1000
+        t_after_workflow = time.perf_counter()
+        elapsed_ms = (t_after_workflow - t0) * 1000
+        elapsed_read_ms = (t0 - t_read) * 1000
+        logger.info("[TIMING] measure: read=%+.1fms  workflow=%+.1fms",
+                     elapsed_read_ms, elapsed_ms)
 
         # Convert TargetResult dataclass objects to plain dicts
         # Note: tr.measurements values are already plain dicts from
@@ -1143,12 +1169,16 @@ class MeasureProject:
         }
 
         if include_visual:
+            t_vis = time.perf_counter()
             visual_b64 = generate_overview_visual(img, targets)
+            logger.info("[TIMING] measure: generate_visual=%+.1fms",
+                         (time.perf_counter() - t_vis) * 1000)
             if visual_b64:
                 response["visual_b64"] = visual_b64
 
-        logger.info("measure() completed: %d targets in %.1fms",
-                    len(targets), elapsed_ms)
+        logger.info("measure() completed: %d targets in %.1fms (total)",
+                    len(targets), (time.perf_counter() - t0) * 1000)
+        return response
         return response
 
     # ------------------------------------------------------------------
