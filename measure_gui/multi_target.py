@@ -31,9 +31,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from measurement.constants import EPS
-from measurement.viz import to_bgr, draw_text_shadow
-from measure_workflow import (
+from measure.constants import EPS
+from measure.viz import to_bgr, draw_text_shadow
+from measure.measure_workflow import (
     EdgePairObject,
     EdgePointObject,
     FitCircleObject,
@@ -46,7 +46,7 @@ from measure_workflow import (
     TwoPointsDistanceObject,
     TwoPointsLineObject,
 )
-from measure_template import (
+from measure.measure_template import (
     CannyPreprocessor,
     CLAHEPreprocessor,
     Preprocessor,
@@ -592,7 +592,7 @@ class MultiTargetWorkflow:
                 self._debug_draw_tmpl_match_roi(vis, params, is_valid)
 
         # --- Pass 2: draw measurement results ---
-        from measure_workflow import CircleResult, LineResult, PointResult
+        from measure.measure_workflow import CircleResult, LineResult, PointResult
 
         for label, result in raw_results.items():
             if label == "_error" or not hasattr(result, "valid"):
@@ -1095,7 +1095,7 @@ class MultiTargetWorkflow:
                     tp = self._template_match_points.get(label)
                     if tp is not None:
                         match_result = tp.measure(patch)
-                        from measure_workflow import PointResult
+                        from measure.measure_workflow import PointResult
                         result = PointResult(
                             label=label,
                             row=match_result["matched_row"],
@@ -1132,7 +1132,7 @@ class MultiTargetWorkflow:
                         dc = p2.col - p1.col
                         norm = np.sqrt(dr**2 + dc**2)
                         if norm > EPS:
-                            from measure_workflow import LineResult
+                            from measure.measure_workflow import LineResult
                             a = dc / norm
                             b = -dr / norm
                             c = -(a * p1.row + b * p1.col)
@@ -1146,11 +1146,11 @@ class MultiTargetWorkflow:
                                       "length": norm},
                             )
                         else:
-                            from measure_workflow import LineResult
+                            from measure.measure_workflow import LineResult
                             result = LineResult(label=label, valid=False,
                                                meta={"reason": "coincident points"})
                     else:
-                        from measure_workflow import LineResult
+                        from measure.measure_workflow import LineResult
                         result = LineResult(label=label, valid=False,
                                            meta={"reason": "input points invalid"})
                     raw_results[label] = result
@@ -1162,10 +1162,10 @@ class MultiTargetWorkflow:
                         dr = p2.row - p1.row
                         dc = p2.col - p1.col
                         dist = np.sqrt(dr**2 + dc**2)
-                        from measure_workflow import DistanceResult
+                        from measure.measure_workflow import DistanceResult
                         result = DistanceResult(label=label, value=dist, valid=True)
                     else:
-                        from measure_workflow import DistanceResult
+                        from measure.measure_workflow import DistanceResult
                         result = DistanceResult(label=label, value=0.0, valid=False)
                     raw_results[label] = result
 
@@ -1176,10 +1176,10 @@ class MultiTargetWorkflow:
                         hasattr(line, "a") and hasattr(line, "b") and hasattr(line, "c")):
                         dist = abs(line.a * pt.row + line.b * pt.col + line.c) / \
                                np.sqrt(line.a**2 + line.b**2 + EPS)
-                        from measure_workflow import DistanceResult
+                        from measure.measure_workflow import DistanceResult
                         result = DistanceResult(label=label, value=dist, valid=True)
                     else:
-                        from measure_workflow import DistanceResult
+                        from measure.measure_workflow import DistanceResult
                         result = DistanceResult(label=label, value=0.0, valid=False)
                     raw_results[label] = result
 
@@ -1201,11 +1201,11 @@ class MultiTargetWorkflow:
                             angle_rad -= np.pi
                         while angle_rad < -np.pi / 2:
                             angle_rad += np.pi
-                        from measure_workflow import AngleResult
+                        from measure.measure_workflow import AngleResult
                         result = AngleResult(label=label,
                                             value_rad=abs(angle_rad), valid=True)
                     else:
-                        from measure_workflow import AngleResult
+                        from measure.measure_workflow import AngleResult
                         result = AngleResult(label=label, value_rad=0.0, valid=False)
                     raw_results[label] = result
 
@@ -1217,10 +1217,10 @@ class MultiTargetWorkflow:
                         dr = pt.row - circ.center_row
                         dc = pt.col - circ.center_col
                         dist = abs(np.sqrt(dr**2 + dc**2) - circ.radius)
-                        from measure_workflow import DistanceResult
+                        from measure.measure_workflow import DistanceResult
                         result = DistanceResult(label=label, value=dist, valid=True)
                     else:
-                        from measure_workflow import DistanceResult
+                        from measure.measure_workflow import DistanceResult
                         result = DistanceResult(label=label, value=0.0, valid=False)
                     raw_results[label] = result
 
@@ -1622,7 +1622,7 @@ def _map_result_to_original(result, M_inv: np.ndarray):
     Handles both 2x3 affine matrices (from :class:`AlignmentStrategy`) and
     legacy 3x3 rigid matrices (from :func:`crop_and_straighten`).
     """
-    from measure_workflow import (
+    from measure.measure_workflow import (
         CircleResult,
         DistanceResult,
         LineResult,

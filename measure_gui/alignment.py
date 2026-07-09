@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from measure_template import (
+from measure.measure_template import (
     Preprocessor,
     RawPreprocessor,
     TemplatePoint,

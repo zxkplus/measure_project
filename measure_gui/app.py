@@ -859,7 +859,7 @@ class MeasureApp:
             self._workflow = MultiTargetWorkflow()
 
         # Apply preprocessor selection
-        from measure_template import (
+        from measure.measure_template import (
             CannyPreprocessor,
             CLAHEPreprocessor,
             RawPreprocessor,
@@ -1112,7 +1112,7 @@ class MeasureApp:
         if self._workflow is None:
             self._workflow = MultiTargetWorkflow()
 
-        from measure_template import (
+        from measure.measure_template import (
             CannyPreprocessor, CLAHEPreprocessor, RawPreprocessor,
             SobelPreprocessor, ThresholdPreprocessor,
         )
