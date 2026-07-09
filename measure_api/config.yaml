@@ -1,0 +1,43 @@
+ # ── 日志设置 ──
+ log:
+   directory: "logs"
+   level: "INFO"
+   format: "[%(asctime)s.%(msecs)03d] [%(levelname)-7s] [%(name)s:%(lineno)d] [%(trace_id)s] %(message)s"
+   date_format: "%Y-%m-%d %H:%M:%S"
+   backup_days: 30
+   console_output: true
+ 
+ # ── 调用记录（可复现） ──
+ call_records:
+   enabled: true
+   directory: "call_records"
+   retention_days: 90
+   max_total_size_gb: 10
+   write_mode: "async"
+   async_buffer_size: 50
+   async_flush_interval_s: 5
+   record_request: true
+   record_response: true
+   record_visual: false
+   copy_images_on_measure: true
+   max_image_size_mb: 50
+ 
+ # ── 项目默认行为 ──
+ project:
+   save_intermediate_images: false
+   save_intermediate_dir: "debug"
+   test_on_add: true
+ 
+ # ── Flask 服务 ──
+ server:
+   host: "0.0.0.0"
+   port: 5000
+   debug: false
+   max_sessions: 10
+ 
+ # ── 默认模板参数 ──
+ defaults:
+   preprocessor: "raw"
+   match_score_threshold: 0.5
+   angle_range_deg: 30
+   max_matches: 0

@@ -6,3 +6,8 @@ propmt_history.txt
 output
 tests/output/
 codexplan
+logs/
+measure_api/logs/
+measure_api/call_records/
+measure_api/tests/output/
+call_records/

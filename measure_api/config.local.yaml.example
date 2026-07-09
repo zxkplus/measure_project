@@ -1,0 +1,27 @@
+ # ── 本地覆盖配置示例 ──
+ # 复制此文件为 config.local.yaml 放在同目录下生效。
+ # config.local.yaml 在加载时会覆盖 config.yaml 的对应字段。
+ # 此文件本身不会被加载，仅作为参考。
+ 
+ # log:
+ #   level: "DEBUG"               # 开发调试时用，生产建议 INFO
+ #   console_output: true
+ #   directory: "/var/log/measure_api"
+ 
+ # call_records:
+ #   enabled: true
+ #   directory: "/data/measure_api/call_records"
+ #   retention_days: 180
+ #   record_visual: true           # 调试时需要记录可视化快照
+ 
+ # project:
+ #   save_intermediate_images: true
+ 
+ # server:
+ #   port: 8080
+ #   max_sessions: 50
+ 
+ # defaults:
+ #   match_score_threshold: 0.6
+ #   angle_range_deg: 45
+ #   max_matches: 0
