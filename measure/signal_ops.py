@@ -9,7 +9,7 @@ profiles (200–2000 samples).
 from __future__ import annotations
 
 import numpy as np
-from measurement.constants import EPS
+from measure.constants import EPS
 
 
 def find_peaks_vectorized(

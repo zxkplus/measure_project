@@ -38,8 +38,8 @@ import json
 import cv2
 import numpy as np
 from typing import Tuple, Optional, Dict, Any, List, Protocol
-from measurement.constants import EPS
-from measurement.viz import to_bgr, to_gray, draw_text_shadow
+from measure.constants import EPS
+from measure.viz import to_bgr, to_gray, draw_text_shadow
 
 
 # =========================================================================

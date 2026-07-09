@@ -2,10 +2,10 @@ import cv2
 import numpy as np
 from typing import Tuple, List, Optional
 from scipy.ndimage import gaussian_filter1d
-from measurement.constants import EPS
-from measurement.viz import to_bgr, draw_text_shadow
-from measurement.signal_ops import find_peaks_vectorized, batch_refine_subpixel
-from measurement.transforms import compute_rotated_rect_corners
+from measure.constants import EPS
+from measure.viz import to_bgr, draw_text_shadow
+from measure.signal_ops import find_peaks_vectorized, batch_refine_subpixel
+from measure.transforms import compute_rotated_rect_corners
 
 class Halcon1DMeasure:
     """

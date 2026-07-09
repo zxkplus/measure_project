@@ -54,11 +54,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 import cv2
 import numpy as np
 
-from measure1D import Halcon1DMeasure
-from measure2D import CircleMeasureObject, LineMeasureObject
-from measurement.constants import EPS
-from measurement.viz import to_bgr, draw_text_shadow
-from measure_template import (
+from measure.measure1D import Halcon1DMeasure
+from measure.measure2D import CircleMeasureObject, LineMeasureObject
+from measure.constants import EPS
+from measure.viz import to_bgr, draw_text_shadow
+from measure.measure_template import (
     Preprocessor,
     RawPreprocessor,
     TemplatePoint,

@@ -15,7 +15,7 @@ from typing import Tuple
 import cv2
 import numpy as np
 
-from measurement.constants import (
+from measure.constants import (
     BLACK,
     DEFAULT_FONT,
     DEFAULT_FONT_SCALE,
@@ -164,7 +164,7 @@ def display_or_save(
         ``cv2.waitKey`` delay in ms.  Use ``-1`` to suppress the window
         even in ``'show'`` mode.
     """
-    from measurement.constants import DISPLAY_MODE, OUTPUT_DIR
+    from measure.constants import DISPLAY_MODE, OUTPUT_DIR
 
     mode = DISPLAY_MODE
 

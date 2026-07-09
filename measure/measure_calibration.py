@@ -34,8 +34,8 @@ import json
 import numpy as np
 import cv2
 from typing import Tuple, List, Optional, Dict, Any
-from measurement.constants import EPS
-from measurement.viz import to_bgr, draw_text_shadow
+from measure.constants import EPS
+from measure.viz import to_bgr, draw_text_shadow
 
 
 # =========================================================================

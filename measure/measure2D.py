@@ -11,9 +11,9 @@ import json
 import cv2
 import numpy as np
 from typing import Tuple, List, Optional, Dict, Any
-from measure1D import Halcon1DMeasure
-from measurement.constants import EPS
-from measurement.viz import to_bgr, draw_text_shadow
+from measure.measure1D import Halcon1DMeasure
+from measure.constants import EPS
+from measure.viz import to_bgr, draw_text_shadow
 
 
 _MEASURE2D_TYPE_REGISTRY: Dict[str, type] = {}

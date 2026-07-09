@@ -42,10 +42,10 @@ from typing import Dict, Any, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from measure_template import TemplatePoint, RawPreprocessor, Preprocessor
-from measurement.constants import EPS
-from measurement.viz import to_bgr, draw_text_shadow
-from measure_workflow import (
+from measure.measure_template import TemplatePoint, RawPreprocessor, Preprocessor
+from measure.constants import EPS
+from measure.viz import to_bgr, draw_text_shadow
+from measure.measure_workflow import (
     MeasurementWorkflow,
     PointResult,
     LineResult,
@@ -840,7 +840,7 @@ class MultiTargetWorkflow:
         if pp_json is not None:
             pp_str = str(pp_json) if isinstance(pp_json, np.ndarray) else pp_json
             pp_data = json.loads(pp_str)
-            from measure_template import _deserialize_preprocessor
+            from measure.measure_template import _deserialize_preprocessor
             preprocessor = _deserialize_preprocessor(pp_data)
         else:
             preprocessor = None
