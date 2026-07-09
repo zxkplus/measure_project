@@ -11,3 +11,4 @@ measure_api/logs/
 measure_api/call_records/
 measure_api/tests/output/
 call_records/
+config.local.yaml
