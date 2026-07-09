@@ -1,0 +1,4 @@
+interface:
+  display_name: "Measure API"
+  short_description: "Industrial measurement API for modeling and batch inspection"
+  default_prompt: "How do I use the measure API to measure bottle diameters?"
