@@ -14,8 +14,8 @@ from typing import Any, Dict, Optional, Tuple
 import cv2
 import numpy as np
 
-from measurement.viz import to_bgr
-from measure_workflow import (
+from measure.viz import to_bgr
+from measure.measure_workflow import (
     CircleResult,
     GeometricResult,
     LineResult,

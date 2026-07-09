@@ -43,7 +43,7 @@ logger = get_logger("project")
 
 from measure_gui.multi_target import _OBJECT_FACTORIES  # noqa: E402
 from measure_gui.multi_target import MultiTargetWorkflow as _MTW  # noqa: E402
-from measure_workflow import MeasurementWorkflow  # noqa: E402
+from measure.measure_workflow import MeasurementWorkflow  # noqa: E402
 
 
 # ----------------------------------------------------------------------------
@@ -266,7 +266,7 @@ class MeasureProject:
         if self._workflow is None:
             raise RuntimeError("Workflow not initialized. Call load_reference() first.")
 
-        from measure_template import (
+        from measure.measure_template import (
             CannyPreprocessor,
             CLAHEPreprocessor,
             RawPreprocessor,

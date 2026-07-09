@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from measure_workflow import (
+from measure.measure_workflow import (
     CircleResult,
     EdgePairObject,
     EdgePointObject,
