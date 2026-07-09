@@ -17,6 +17,7 @@ Architecture:
 
 from __future__ import annotations
 
+#from measure_api.config import Config
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -167,6 +168,7 @@ class AlignmentStrategy:
         self._max_matches = max_matches
         self._overlap = float(overlap)
         self._coarse_fine = coarse_fine
+        self._coarse_angle_step = coarse_angle_step
         self._coarse_angle_step = coarse_angle_step
 
     # -- inspection -----------------------------------------------------------
