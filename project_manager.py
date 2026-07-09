@@ -6,7 +6,7 @@ import numpy as np
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
-from measure_template import TemplatePoint, Preprocessor
+from measure.measure_template import TemplatePoint, Preprocessor
 
 
 class MultiTargetWorkflow:
