@@ -204,6 +204,17 @@ class ToolPanel(ttk.Frame):
             self._overlap_label.config(text=f"{pct}%")
         self._overlap_var.trace_add("write", _update_overlap_label)
 
+        # Pyramid downsampling
+        ttk.Label(tmpl_frame, text="金字塔降采样").pack(anchor=tk.W, **pad)
+        self._pyramid_var = tk.StringVar(value="4x (推荐)")
+        pyramid_combo = ttk.Combobox(
+            tmpl_frame, textvariable=self._pyramid_var,
+            values=["禁用", "2x", "4x (推荐)", "8x"],
+            state="readonly", width=18,
+        )
+        pyramid_combo.pack(fill=tk.X, **pad)
+        # 无 callback，创建模板时直接读取
+
         # ROI display (read-only)
         self._roi_label = ttk.Label(tmpl_frame, text="ROI: (未设置)", foreground="gray")
         self._roi_label.pack(anchor=tk.W, **pad)

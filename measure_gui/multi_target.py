@@ -805,6 +805,8 @@ class MultiTargetWorkflow:
         overlap: float = 0.3,
         coarse_fine: bool = True,
         coarse_angle_step: float = 5.0,
+        pyramid_decimate: int = 0,
+        pyramid_max_template_size: int = 400,
     ):
         """
         Define the template from a rotated bounding box on the reference image.
@@ -823,6 +825,8 @@ class MultiTargetWorkflow:
                      0 = no overlap at all (default 0.3).
             coarse_fine: Use two-stage coarse-to-fine search.
             coarse_angle_step: Step size for coarse angle search.
+            pyramid_decimate: Pyramid decimation level (0=disabled).
+            pyramid_max_template_size: Max template side length after decimation.
         """
         self._alignment.teach(
             reference_image, center, size, angle_deg,
@@ -831,6 +835,8 @@ class MultiTargetWorkflow:
             angle_range=angle_range, angle_step=angle_step,
             max_matches=max_matches, overlap=overlap,
             coarse_fine=coarse_fine, coarse_angle_step=coarse_angle_step,
+            pyramid_decimate=pyramid_decimate,
+            pyramid_max_template_size=pyramid_max_template_size,
         )
 
         # Convenience: keep local references to frequently-accessed items
@@ -1738,6 +1744,8 @@ class MultiTargetWorkflow:
         overlap: float = 0.3,
         coarse_fine: bool = True,
         coarse_angle_step: float = 5.0,
+        pyramid_decimate: int = 0,
+        pyramid_max_template_size: int = 400,
     ):
         """
         Define the template from a rotated bounding box on the reference image.
@@ -1756,6 +1764,8 @@ class MultiTargetWorkflow:
                      0 = no overlap at all (default 0.3).
             coarse_fine: Use two-stage coarse-to-fine search.
             coarse_angle_step: Step size for coarse angle search.
+            pyramid_decimate: Pyramid decimation level (0=disabled).
+            pyramid_max_template_size: Max template side length after decimation.
         """
         self._alignment.teach(
             reference_image, center, size, angle_deg,
@@ -1764,6 +1774,8 @@ class MultiTargetWorkflow:
             angle_range=angle_range, angle_step=angle_step,
             max_matches=max_matches, overlap=overlap,
             coarse_fine=coarse_fine, coarse_angle_step=coarse_angle_step,
+            pyramid_decimate=pyramid_decimate,
+            pyramid_max_template_size=pyramid_max_template_size,
         )
 
         # Convenience: keep local references to frequently-accessed items

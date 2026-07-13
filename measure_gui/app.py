@@ -815,6 +815,17 @@ class MeasureApp:
                 self._ref_canvas.set_mode(CanvasMode.DRAW_ROI)
                 self._ref_canvas.clear_control_points()
 
+    def _parse_pyramid_decimate(self) -> int:
+        """Parse the pyramid decimation level from the tool panel combobox."""
+        val = self.tool_panel._pyramid_var.get()
+        mapping = {
+            "禁用": 0,
+            "2x": 1,
+            "4x (推荐)": 2,
+            "8x": 3,
+        }
+        return mapping.get(val, 2)
+
     # ------------------------------------------------------------------
     # Template creation
     # ------------------------------------------------------------------
@@ -900,6 +911,8 @@ class MeasureApp:
             overlap=self.tool_panel._overlap_var.get(),
             coarse_fine=True,
             coarse_angle_step=5.0,
+            pyramid_decimate=self._parse_pyramid_decimate(),
+            pyramid_max_template_size=400,
         )
 
         # For multi-point, register control points with the alignment
