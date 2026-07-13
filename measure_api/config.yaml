@@ -56,6 +56,6 @@
    overlap: 0.3
    # 模板降采样：>0 时先降采样做粗匹配再精定位
    # 0 = 禁用, 1 = 2x, 2 = 4x 降采样
-   pyramid_decimate: 0
+   pyramid_decimate: 2
    # 降采样后的模板最大边长（像素）
    pyramid_max_template_size: 400
