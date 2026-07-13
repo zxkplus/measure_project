@@ -300,6 +300,9 @@ class MeasureProject:
             coarse_fine = bool(_cfg_match["coarse_fine"])
         if abs(overlap - 0.3) < 1e-9 and "overlap" in _cfg_match:
             overlap = float(_cfg_match["overlap"])
+        # Read pyramid config from matching config
+        pyramid_decimate = int(_cfg_match.get("pyramid_decimate", 0))
+        pyramid_max_template_size = int(_cfg_match.get("pyramid_max_template_size", 400))
         self._workflow.teach_template(
             self._reference_image,
             center=tuple(center),
@@ -313,6 +316,8 @@ class MeasureProject:
             coarse_fine=bool(coarse_fine),
             overlap=float(overlap),
             max_matches=int(max_matches),
+            pyramid_decimate=int(pyramid_decimate),
+            pyramid_max_template_size=int(pyramid_max_template_size),
         )
 
         self._phase = PHASE_TEMPLATE_READY
