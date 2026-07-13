@@ -35,12 +35,15 @@ Usage:
 
 import base64
 import time
+import logging
 import json
 import cv2
 import numpy as np
 from typing import Tuple, Optional, Dict, Any, List, Protocol
 from measure.constants import EPS
 from measure.viz import to_bgr, to_gray, draw_text_shadow
+
+logger = logging.getLogger(__name__)
 
 
 # =========================================================================
@@ -291,7 +294,9 @@ class TemplatePoint:
                  coarse_scale_step: float = 0.1,
                  multi_target: bool = False,
                  max_matches: int = 0,
-                 overlap: float = 0.3):
+                 overlap: float = 0.3,
+                 pyramid_decimate: int = 0,
+                 pyramid_max_template_size: int = 400):
         """
         Initialize a template point from a reference image.
 
@@ -325,6 +330,12 @@ class TemplatePoint:
             overlap: Maximum allowed IoU overlap between detected targets in [0, 1].
                      0 = no overlap at all (most aggressive NMS). Higher values
                      allow more overlap between detected boxes (default 0.3).
+            pyramid_decimate: Pyramid decimation level for coarse search.
+                              0 = disabled. 1 = downsample 2x, 2 = 4x, etc.
+                              (default 0, disabled).
+            pyramid_max_template_size: Maximum template side length (px) after
+                                       decimation. Used to auto-compute the
+                                       pyramid scale factor (default 400).
         """
         self.click_row = click_row
         self.click_col = click_col
@@ -344,6 +355,8 @@ class TemplatePoint:
         self.multi_target = multi_target
         self.max_matches = max_matches
         self.overlap = float(overlap)
+        self.pyramid_decimate = int(pyramid_decimate)
+        self.pyramid_max_template_size = int(pyramid_max_template_size)
 
         # Crop the template region (clamped to image bounds)
         gray = self._to_gray(reference_image)
@@ -368,6 +381,12 @@ class TemplatePoint:
         # Apply preprocessor to template crop
         self.edge_template = self.preprocessor(crop)
 
+        # Pre-compute pyramid scale factor for coarse matching
+        if self.pyramid_decimate > 0 and self.pyramid_max_template_size > 0:
+            self._pyramid_scale = self._compute_pyramid_scale()
+        else:
+            self._pyramid_scale = 1.0
+
         # Canny-specific: warn if edge content is too sparse
         if isinstance(self.preprocessor, CannyPreprocessor):
             edge_ratio = np.count_nonzero(self.edge_template) / self.edge_template.size
@@ -377,6 +396,183 @@ class TemplatePoint:
 
         # Result storage
         self.result: Optional[Dict[str, Any]] = None
+
+    # ------------------------------------------------------------------
+    # Pyramid (image pyramid) helpers
+    # ------------------------------------------------------------------
+
+    def _compute_pyramid_scale(self) -> float:
+        """
+        Compute the scale factor for the pyramid coarse search.
+
+        Ensures the larger dimension of the template (after preprocessor)
+        fits within pyramid_max_template_size. The result is clamped to [0, 1).
+
+        Returns:
+            Scale factor in (0.0, 1.0]. 1.0 means no downsampling.
+        """
+        max_dim = max(self._crop_h, self._crop_w)
+        if max_dim <= 0:
+            return 1.0
+        return min(1.0, self.pyramid_max_template_size / float(max_dim))
+
+    def _pyramid_downsample(self, image: np.ndarray) -> np.ndarray:
+        """
+        Downsample an image by the pre-computed pyramid scale factor.
+
+        Args:
+            image: Input image (any shape).
+
+        Returns:
+            Downsampled image (or original if scale == 1.0).
+        """
+        if self._pyramid_scale >= 1.0:
+            return image
+        new_w = max(1, int(round(image.shape[1] * self._pyramid_scale)))
+        new_h = max(1, int(round(image.shape[0] * self._pyramid_scale)))
+        return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+    def _pyramid_upscale_coord(self, row: float, col: float) -> tuple[float, float]:
+        """
+        Map coordinates from the downsampled space back to the original space.
+
+        Args:
+            row: Row coordinate in the downsampled image.
+            col: Column coordinate in the downsampled image.
+
+        Returns:
+            (orig_row, orig_col) in the original image coordinate space.
+        """
+        if self._pyramid_scale >= 1.0:
+            return row, col
+        inv = 1.0 / self._pyramid_scale
+        return row * inv, col * inv
+
+    def _run_fine_search_on_roi(
+        self,
+        search_img: np.ndarray,
+        r1: int,
+        c1: int,
+        coarse_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Given a coarse match result, run a fine search on a small ROI
+        around the detected position in the original (full-res) search image.
+
+        Args:
+            search_img: Full-resolution preprocessed search image.
+            r1, c1: Top-left offset of the search region in the original image.
+            coarse_result: Result dict from a coarse match call.
+
+        Returns:
+            Refined result dict with coordinates in the original image space.
+        """
+        # Map the coarse match center to original coordinates
+        coarse_center_row = coarse_result.get('matched_row', 0.0)
+        coarse_center_col = coarse_result.get('matched_col', 0.0)
+        coarse_best_rotation = coarse_result.get('best_rotation_deg', 0.0)
+        coarse_best_scale = coarse_result.get('best_scale', 1.0)
+        coarse_score = coarse_result.get('match_score', 0.0)
+        coarse_valid = coarse_result.get('valid', False)
+
+        # Compute ROI in the full-res search image
+        roi_size = max(self._crop_h, self._crop_w) * 1.2
+        half_roi = roi_size / 2.0
+
+        # Convert to search-image-local coordinates (relative to r1, c1)
+        local_center_row = coarse_center_row - r1
+        local_center_col = coarse_center_col - c1
+
+        roi_r1 = max(0, int(local_center_row - half_roi))
+        roi_r2 = min(search_img.shape[0], int(local_center_row + half_roi))
+        roi_c1 = max(0, int(local_center_col - half_roi))
+        roi_c2 = min(search_img.shape[1], int(local_center_col + half_roi))
+
+        if roi_r2 - roi_r1 < self._crop_h or roi_c2 - roi_c1 < self._crop_w:
+            # ROI too small for template - fall back to coarse result
+            return coarse_result
+
+        # Crop ROI from full-res search image
+        roi_img = search_img[roi_r1:roi_r2, roi_c1:roi_c2]
+
+        # --- Fine-stage 2x downsampling for extra speed ---
+        # Downsample both the ROI and the edge_template by 2x
+        _orig_edge_template = self.edge_template
+        _orig_fine_h = self._crop_h
+        _orig_fine_w = self._crop_w
+        # Only downscale if ROI is large enough
+        fine_scale = 0.5
+        fine_roi = cv2.resize(roi_img, (0, 0), fx=fine_scale, fy=fine_scale, interpolation=cv2.INTER_LINEAR)
+        fine_tmpl = cv2.resize(self.edge_template, (0, 0), fx=fine_scale, fy=fine_scale, interpolation=cv2.INTER_LINEAR)
+        self.edge_template = fine_tmpl
+        self._crop_h = fine_tmpl.shape[0]
+        self._crop_w = fine_tmpl.shape[1]
+
+        # Save and temporarily override matching parameters for fine search
+        _orig_rotation = self.rotation_invariant
+        _orig_angle_range = self.angle_range
+        _orig_angle_step = self.angle_step
+        _orig_scale_invariant = self.scale_invariant
+        _orig_scale_range = self.scale_range
+        _orig_scale_step = self.scale_step
+        _orig_coarse_fine = self.coarse_fine
+        _orig_multi_target = self.multi_target
+
+        # Fine search: only search around the coarse best angle/scale
+        if self.rotation_invariant:
+            fine_angle_half = max(self.angle_step * 1.5, 2.0)
+            self.angle_range = (coarse_best_rotation - fine_angle_half,
+                                coarse_best_rotation + fine_angle_half)
+        else:
+            self.angle_range = (0.0, 0.0)
+        if self.scale_invariant:
+            fine_scale_half = max(self.scale_step * 1.5, 0.03)
+            self.scale_range = (coarse_best_scale - fine_scale_half,
+                                coarse_best_scale + fine_scale_half)
+        else:
+            self.scale_range = (1.0, 1.0)
+        # Disable coarse-fine for the fine search (we already found the region)
+        self.coarse_fine = False
+        self.multi_target = False
+
+        # Run the appropriate match method on the ROI
+        if not self.rotation_invariant and not self.scale_invariant:
+            fine_result = self._match_translation_only(roi_img, roi_r1 + r1, roi_c1 + c1)
+        else:
+            fine_result = self._match_multi_angle_scale(roi_img, roi_r1 + r1, roi_c1 + c1)
+
+        # Restore original parameters
+        self.rotation_invariant = _orig_rotation
+        self.angle_range = _orig_angle_range
+        self.angle_step = _orig_angle_step
+        self.scale_invariant = _orig_scale_invariant
+        self.scale_range = _orig_scale_range
+        self.scale_step = _orig_scale_step
+        self.coarse_fine = _orig_coarse_fine
+        self.multi_target = _orig_multi_target
+
+        # Restore original template
+        self.edge_template = _orig_edge_template
+        self._crop_h = _orig_fine_h
+        self._crop_w = _orig_fine_w
+
+        # Map fine match coordinates from downsampled space back to original space
+        if fine_result.get('valid', False):
+            fine_row = fine_result['matched_row']
+            fine_col = fine_result['matched_col']
+            # fine_result is in the coordinate space of (roi_r1 + r1, roi_c1 + c1)
+            # Subtract the offset, upscale by fine_scale, add back the offset
+            orig_row = (roi_r1 + r1) + (fine_row - (roi_r1 + r1)) / fine_scale
+            orig_col = (roi_c1 + c1) + (fine_col - (roi_c1 + c1)) / fine_scale
+            fine_result['matched_row'] = orig_row
+            fine_result['matched_col'] = orig_col
+
+        # If fine search has a higher score or is valid, use it
+        if fine_result.get('valid', False) or coarse_valid:
+            if fine_result.get('match_score', 0.0) >= coarse_score * 0.9:
+                return fine_result
+
+        return coarse_result
 
     # ------------------------------------------------------------------
     # Core measurement
@@ -442,24 +638,146 @@ class TemplatePoint:
 
         # Dispatch: fast path vs multi-angle/scale vs multi-target
         t0 = time.perf_counter()
-        if not self.rotation_invariant and not self.scale_invariant:
-            if self.multi_target:
-                result = self._match_translation_multi(search_img, r1, c1)
+        if self._pyramid_scale < 1.0:
+            # === Pyramid coarse-to-fine ===
+            t_pyr_start = time.perf_counter()
+            # Step 1: coarse match on downsampled image
+            pyramid_search = self._pyramid_downsample(search_img)
+            t_downsample = time.perf_counter()
+            # Also downsample the template dimensions for validation
+            _orig_crop_h, _orig_crop_w = self._crop_h, self._crop_w
+            # Temporarily adjust template size check for pyramid
+            pyr_h = max(1, int(round(self._crop_h * self._pyramid_scale)))
+            pyr_w = max(1, int(round(self._crop_w * self._pyramid_scale)))
+            self._crop_h = pyr_h
+            self._crop_w = pyr_w
+
+            if pyramid_search.shape[0] < pyr_h or pyramid_search.shape[1] < pyr_w:
+                # Pyramid too small, fall back to original
+                self._crop_h, self._crop_w = _orig_crop_h, _orig_crop_w
+                if not self.rotation_invariant and not self.scale_invariant:
+                    if self.multi_target:
+                        result = self._match_translation_multi(search_img, r1, c1)
+                    else:
+                        result = self._match_translation_only(search_img, r1, c1)
+                else:
+                    if self.multi_target:
+                        result = self._match_multi_angle_scale_multi(search_img, r1, c1)
+                    else:
+                        result = self._match_multi_angle_scale(search_img, r1, c1)
+                t_coarse = time.perf_counter()
+                t_fine = t_coarse  # no fine search
+                logger.info("[TIMING] Pyramid: downsample=%(ds)8.1fms  coarse=%(co)8.1fms  fine=%(fi)8.1fms  total=%(to)8.1fms  FALLBACK no coarse match",
+                             {"ds": (t_downsample - t_pyr_start) * 1000,
+                              "co": (t_coarse - t_downsample) * 1000,
+                              "fi": 0.0,
+                              "to": (t_fine - t_pyr_start) * 1000})
             else:
-                result = self._match_translation_only(search_img, r1, c1)
+                # Coarse match on pyramid
+                # Temporarily downsample edge_template to match pyramid search
+                _orig_tmpl = self.edge_template
+                self.edge_template = self._pyramid_downsample(self.edge_template)
+                if not self.rotation_invariant and not self.scale_invariant:
+                    coarse_result = self._match_translation_only(pyramid_search, r1, c1)
+                else:
+                    # Temporarily disable coarse-fine (we handle it via pyramid)
+                    _orig_cf = self.coarse_fine
+                    self.coarse_fine = True  # keep coarse-fine but on downsampled image
+                    if self.multi_target:
+                        coarse_result = self._match_multi_angle_scale_multi(pyramid_search, r1, c1)
+                    else:
+                        coarse_result = self._match_multi_angle_scale(pyramid_search, r1, c1)
+                    self.coarse_fine = _orig_cf
+
+                # Restore original template dimensions and template
+                self._crop_h, self._crop_w = _orig_crop_h, _orig_crop_w
+                self.edge_template = _orig_tmpl
+                t_coarse = time.perf_counter()
+
+                if not coarse_result.get('valid', False):
+                    result = coarse_result  # propagate invalid result
+                    t_coarse = time.perf_counter()
+                    t_fine = t_coarse  # no fine search
+                    logger.info("[TIMING] Pyramid: downsample=%(ds)8.1fms  coarse=%(co)8.1fms  fine=%(fi)8.1fms  total=%(to)8.1fms  COARSE_INVALID",
+                                 {"ds": (t_downsample - t_pyr_start) * 1000,
+                                  "co": (t_coarse - t_downsample) * 1000,
+                                  "fi": 0.0,
+                                  "to": (t_fine - t_pyr_start) * 1000})
+                else:
+                    # Step 2: fine search on full-res around coarse candidate(s)
+                    if self.multi_target:
+                        matches = coarse_result.get('matches', [])
+                        if not matches and coarse_result.get('valid', False):
+                            matches = [coarse_result]
+                        refined_matches = []
+                        for m in matches:
+                            # Upscale the match center coordinates
+                            m_center_row = self._pyramid_upscale_coord(
+                                m['matched_row'] - r1, 0)[0] + r1
+                            m_center_col = self._pyramid_upscale_coord(
+                                0, m['matched_col'] - c1)[1] + c1
+                            m['matched_row'] = m_center_row
+                            m['matched_col'] = m_center_col
+                            # Run fine search on full-res
+                            refined = self._run_fine_search_on_roi(search_img, r1, c1, m)
+                            refined_matches.append(refined)
+
+                        if refined_matches:
+                            result = self._build_multi_result(refined_matches)
+                        else:
+                            result = coarse_result
+                        t_fine = time.perf_counter()
+                        coarse_hits = len(matches)
+                        logger.info("[TIMING] Pyramid: downsample=%(ds)8.1fms  coarse=%(co)8.1fms  fine=%(fi)8.1fms  total=%(to)8.1fms  multi_target=%(mt)d  pyr_size=%(pw)dx%(ph)d  scale=%(sc).3f",
+                                     {"ds": (t_downsample - t_pyr_start) * 1000,
+                                      "co": (t_coarse - t_downsample) * 1000,
+                                      "fi": (t_fine - t_coarse) * 1000,
+                                      "to": (t_fine - t_pyr_start) * 1000,
+                                      "mt": coarse_hits,
+                                      "pw": pyramid_search.shape[1], "ph": pyramid_search.shape[0],
+                                      "sc": self._pyramid_scale})
+                    else:
+                        # Upscale coarse match center
+                        coarse_center_r = coarse_result.get('matched_row', r1)
+                        coarse_center_c = coarse_result.get('matched_col', c1)
+                        coarse_result['matched_row'] = self._pyramid_upscale_coord(
+                            coarse_center_r - r1, 0)[0] + r1
+                        coarse_result['matched_col'] = self._pyramid_upscale_coord(
+                            0, coarse_center_c - c1)[1] + c1
+
+                        result = self._run_fine_search_on_roi(search_img, r1, c1, coarse_result)
+                        t_fine = time.perf_counter()
+                        logger.info("[TIMING] Pyramid: downsample=%(ds)8.1fms  coarse=%(co)8.1fms  fine=%(fi)8.1fms  total=%(to)8.1fms  pyr_size=%(pw)dx%(ph)d  scale=%(sc).3f",
+                                     {"ds": (t_downsample - t_pyr_start) * 1000,
+                                      "co": (t_coarse - t_downsample) * 1000,
+                                      "fi": (t_fine - t_coarse) * 1000,
+                                      "to": (t_fine - t_pyr_start) * 1000,
+                                      "pw": pyramid_search.shape[1], "ph": pyramid_search.shape[0],
+                                      "sc": self._pyramid_scale})
         else:
-            if self.multi_target:
-                result = self._match_multi_angle_scale_multi(search_img, r1, c1)
+            # === Original code path (no pyramid) ===
+            if not self.rotation_invariant and not self.scale_invariant:
+                if self.multi_target:
+                    result = self._match_translation_multi(search_img, r1, c1)
+                else:
+                    result = self._match_translation_only(search_img, r1, c1)
             else:
-                result = self._match_multi_angle_scale(search_img, r1, c1)
+                if self.multi_target:
+                    result = self._match_multi_angle_scale_multi(search_img, r1, c1)
+                else:
+                    result = self._match_multi_angle_scale(search_img, r1, c1)
 
         self.result = result
+
+        # Detailed timing breakdown
+        t_total = time.perf_counter() - t0
+        logger.info("[TIMING] TemplatePoint.measure: preproc=%(pre)8.1fms  total=%(total)8.1fms  tmpl=%(tw)dx%(th)d  search=%(sw)dx%(sh)d  pyramid_scale=%(ps).3f",
+                     {"pre": (t_pre_end - t_pre) * 1000,
+                      "total": t_total * 1000,
+                      "tw": self._crop_w, "th": self._crop_h,
+                      "sw": search_img.shape[1], "sh": search_img.shape[0],
+                      "ps": self._pyramid_scale})
         return self.result
-        logger.info("[TIMING] TemplatePoint.measure: preproc=%+.1fms  match=%+.1fms  tmpl=%dx%d  search=%dx%d",
-                     (t_pre_end - t_pre) * 1000,
-                     (time.perf_counter() - t0) * 1000,
-                     self._crop_w, self._crop_h,
-                     search_img.shape[1], search_img.shape[0])
 
     def _match_translation_only(self, search_img: np.ndarray,
                                  r1: int, c1: int) -> Dict[str, Any]:
@@ -1340,6 +1658,8 @@ class TemplatePoint:
             multi_target=self.multi_target,
             max_matches=self.max_matches,
             overlap=self.overlap,
+            pyramid_decimate=self.pyramid_decimate,
+            pyramid_max_template_size=self.pyramid_max_template_size,
         )
 
     @classmethod
@@ -1414,6 +1734,12 @@ class TemplatePoint:
         obj.multi_target = bool(data.get('multi_target', False))
         obj.max_matches = int(data.get('max_matches', 0))
         obj.overlap = float(data.get('overlap', 0.3))
+        obj.pyramid_decimate = int(data.get('pyramid_decimate', 0))
+        obj.pyramid_max_template_size = int(data.get('pyramid_max_template_size', 400))
+        if obj.pyramid_decimate > 0 and obj.pyramid_max_template_size > 0:
+            obj._pyramid_scale = obj._compute_pyramid_scale()
+        else:
+            obj._pyramid_scale = 1.0
 
         return obj
 
@@ -1466,6 +1792,8 @@ class TemplatePoint:
             "multi_target": self.multi_target,
             "max_matches": self.max_matches,
             "overlap": self.overlap,
+            "pyramid_decimate": self.pyramid_decimate,
+            "pyramid_max_template_size": self.pyramid_max_template_size,
         }
 
     @classmethod
@@ -1528,6 +1856,12 @@ class TemplatePoint:
         obj.multi_target = bool(data.get("multi_target", False))
         obj.max_matches = int(data.get("max_matches", 0))
         obj.overlap = float(data.get("overlap", 0.3))
+        obj.pyramid_decimate = int(data.get("pyramid_decimate", 0))
+        obj.pyramid_max_template_size = int(data.get("pyramid_max_template_size", 400))
+        if obj.pyramid_decimate > 0 and obj.pyramid_max_template_size > 0:
+            obj._pyramid_scale = obj._compute_pyramid_scale()
+        else:
+            obj._pyramid_scale = 1.0
 
         return obj
 
