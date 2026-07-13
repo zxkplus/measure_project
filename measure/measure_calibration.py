@@ -416,6 +416,12 @@ class StereoRigCalibration:
         # Homographies (image → board plane, 3×3)
         self.H_A: Optional[np.ndarray] = None
         self.H_B: Optional[np.ndarray] = None
+        # Stereo calibration: relative pose camera B -> camera A
+        self.R: Optional[np.ndarray] = None       # 3x3 rotation B->A
+        self.T: Optional[np.ndarray] = None       # 3x1 translation B->A
+        self.E: Optional[np.ndarray] = None       # 3x3 essential matrix
+        self.F: Optional[np.ndarray] = None       # 3x3 fundamental matrix
+        self.stereo_rms: float = 0.0              # stereo calibration RMS error
 
         # Canvas transform (physical-mm → canvas-pixels, 2×3 affine)
         self.canvas_affine: Optional[np.ndarray] = None
@@ -624,6 +630,313 @@ class StereoRigCalibration:
     # ------------------------------------------------------------------
     # stitch
     # ------------------------------------------------------------------
+    # calibrate_stereo -- compute relative pose (R, T) between cameras
+    # ------------------------------------------------------------------
+
+    def _build_model_points_3d(self) -> np.ndarray:
+        """Build 3D model points for the dot grid (N, 3), Z=0 plane."""
+        cols, rows = self.calib_a.grid_size
+        spacing = self.calib_a.circle_spacing_mm
+        pts = np.zeros((rows * cols, 3), dtype=np.float32)
+        for j in range(rows):
+            for i in range(cols):
+                pts[j * cols + i] = (i * spacing, j * spacing, 0.0)
+        return pts
+
+    def _detect_board_centers(self,
+                              img: np.ndarray,
+                              camera: str,
+                              blob_params: Optional[Dict[str, Any]] = None,
+                              ) -> Optional[np.ndarray]:
+        """Detect dot-grid centres on a single board image."""
+        calib = self.calib_a if camera == "A" else self.calib_b
+        cols, rows = calib.grid_size
+        flags = cv2.CALIB_CB_SYMMETRIC_GRID
+        detector = CameraCalibration._make_blob_detector(blob_params)
+        found, centers = cv2.findCirclesGrid(
+            img, (cols, rows), flags=flags, blobDetector=detector,
+        )
+        if not found:
+            return None
+        # Sub-pixel refinement
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+        cv2.cornerSubPix(img, centers, (5, 5), (-1, -1), criteria)
+        return centers.reshape(-1, 2).astype(np.float32)
+
+    def _solve_board_pose(self,
+                          img: np.ndarray,
+                          camera: str,
+                          blob_params: Optional[Dict[str, Any]] = None,
+                          ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """SolvePnP to get board pose (rvec, tvec) relative to camera."""
+        calib = self.calib_a if camera == "A" else self.calib_b
+        centers = self._detect_board_centers(img, camera, blob_params=blob_params)
+        if centers is None:
+            return None
+        model_pts = self._build_model_points_3d()
+        ret, rvec, tvec = cv2.solvePnP(
+            model_pts, centers, calib.K, calib.D,
+            flags=cv2.SOLVEPNP_ITERATIVE,
+        )
+        if not ret:
+            return None
+        return rvec, tvec
+
+    def calibrate_stereo(self,
+                         image_pairs: list,
+                         fix_intrinsics: bool = True,
+                         symmetric_grid: bool = True,
+                         blob_detector_params: Optional[Dict[str, Any]] = None,
+                         ) -> Dict[str, Any]:
+        """Run full stereo calibration using multiple image pairs.
+
+        Uses cv2.stereoCalibrate() with known per-camera intrinsics (K, D).
+        Computes the relative pose R, T between camera B and camera A,
+        as well as the essential (E) and fundamental (F) matrices.
+        """
+        calib_a = self.calib_a
+        calib_b = self.calib_b
+        cols, rows = calib_a.grid_size
+
+        if calib_a.K is None or calib_b.K is None:
+            raise RuntimeError("Both cameras must be individually calibrated first.")
+
+        flags_detect = (cv2.CALIB_CB_SYMMETRIC_GRID if symmetric_grid
+                        else cv2.CALIB_CB_ASYMMETRIC_GRID)
+        detector = CameraCalibration._make_blob_detector(blob_detector_params)
+
+        # Build model points once
+        model_points = self._build_model_points_3d()
+
+        obj_points: List[np.ndarray] = []    # 3D model points per pair
+        img_points_a: List[np.ndarray] = []  # 2D image points camera A
+        img_points_b: List[np.ndarray] = []  # 2D image points camera B
+
+        for idx, (img_a, img_b) in enumerate(image_pairs):
+            h, w = img_a.shape[:2]
+
+            # Detect in camera A
+            found_a, centers_a = cv2.findCirclesGrid(
+                img_a, (cols, rows), flags=flags_detect, blobDetector=detector,
+            )
+            if not found_a:
+                print(f"  Pair {idx + 1}: Camera A detection failed, skipping")
+                continue
+            # Sub-pixel refinement
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+            cv2.cornerSubPix(img_a, centers_a, (5, 5), (-1, -1), criteria)
+
+            # Detect in camera B
+            found_b, centers_b = cv2.findCirclesGrid(
+                img_b, (cols, rows), flags=flags_detect, blobDetector=detector,
+            )
+            if not found_b:
+                print(f"  Pair {idx + 1}: Camera B detection failed, skipping")
+                continue
+            cv2.cornerSubPix(img_b, centers_b, (5, 5), (-1, -1), criteria)
+
+            obj_points.append(model_points)
+            img_points_a.append(centers_a.reshape(-1, 2).astype(np.float32))
+            img_points_b.append(centers_b.reshape(-1, 2).astype(np.float32))
+
+        if len(obj_points) < 3:
+            raise ValueError(
+                f"Need at least 3 pairs with detected boards, got {len(obj_points)}"
+            )
+
+        print(f"  Stereo calibration on {len(obj_points)} pairs, "
+              f"image size {w}x{h}")
+
+        # cv2.stereoCalibrate flags
+        flags_stereo = cv2.CALIB_FIX_INTRINSIC if fix_intrinsics else 0
+
+        stereo_result = cv2.stereoCalibrate(
+            obj_points, img_points_a, img_points_b,
+            calib_a.K, calib_a.D,
+            calib_b.K, calib_b.D,
+            (w, h),
+            flags=flags_stereo,
+            criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6),
+        )
+        # Handle both 9- and 10-value return (OpenCV version dependent)
+        if len(stereo_result) == 10:
+            ret, K1, D1, K2, D2, R, T, E, F, per_view_errors = stereo_result
+        else:
+            ret, K1, D1, K2, D2, R, T, E, F = stereo_result
+            per_view_errors = None
+
+        self.R = R
+        self.T = T
+        self.E = E
+        self.F = F
+        self.stereo_rms = float(ret)
+
+        # Optionally update K/D with refined values
+        if not fix_intrinsics:
+            calib_a.K = K1
+            calib_a.D = D1
+            calib_b.K = K2
+            calib_b.D = D2
+
+        # Per-pair stereo reprojection errors via solvePnP
+        per_pair_errors: List[float] = []
+        for i in range(len(obj_points)):
+            # Camera A: board -> camera A via solvePnP
+            ret_a, rv_a, tv_a = cv2.solvePnP(
+                obj_points[i], img_points_a[i], K1, D1,
+                flags=cv2.SOLVEPNP_ITERATIVE,
+            )
+            p_a, _ = cv2.projectPoints(obj_points[i], rv_a, tv_a, K1, D1)
+            err_a = np.mean(np.linalg.norm(
+                img_points_a[i] - p_a.reshape(-1, 2), axis=1))
+            # Camera B: board -> camera B via solvePnP
+            ret_b, rv_b, tv_b = cv2.solvePnP(
+                obj_points[i], img_points_b[i], K2, D2,
+                flags=cv2.SOLVEPNP_ITERATIVE,
+            )
+            p_b, _ = cv2.projectPoints(obj_points[i], rv_b, tv_b, K2, D2)
+            err_b = np.mean(np.linalg.norm(
+                img_points_b[i] - p_b.reshape(-1, 2), axis=1))
+            per_pair_errors.append(float((err_a + err_b) / 2.0))
+
+        self.result = {
+            "R": self.R,
+            "T": self.T,
+            "E": self.E,
+            "F": self.F,
+            "stereo_rms": self.stereo_rms,
+            "num_pairs": len(obj_points),
+            "fix_intrinsics": fix_intrinsics,
+            "per_pair_errors": per_pair_errors,
+        }
+        return self.result
+
+    # ------------------------------------------------------------------
+    # stereo_project_points -- project points between cameras via R,T
+    # ------------------------------------------------------------------
+
+    def stereo_transform_to_camera_A(self,
+                                      pts_3d_in_B: np.ndarray,
+                                      ) -> np.ndarray:
+        """Transform 3D points from camera B's frame to camera A's frame.
+
+        NOTE: OpenCV stereoCalibrate returns R,T as cam1(A)->cam2(B).
+        X_B = R * X_A + T, so X_A = R^T * X_B - R^T * T
+        """
+        if self.R is None or self.T is None:
+            raise RuntimeError("Stereo calibration not done.")
+        return (self.R.T @ pts_3d_in_B.T - self.R.T @ self.T).T
+
+    def project_to_camera_image(self,
+                                pts_3d: np.ndarray,
+                                camera: str,
+                                rvec: Optional[np.ndarray] = None,
+                                tvec: Optional[np.ndarray] = None,
+                                ) -> np.ndarray:
+        """Project 3D points onto a camera's image plane.
+
+        Args:
+            pts_3d: (N, 3) points. If rvec/tvec are None, points are in
+                    camera coordinates (identity pose).
+            camera: 'A' or 'B'.
+        Returns:
+            (N, 2) projected image coordinates.
+        """
+        calib = self.calib_a if camera == "A" else self.calib_b
+        if rvec is None:
+            rvec = np.zeros((3, 1), dtype=np.float64)
+        if tvec is None:
+            tvec = np.zeros((3, 1), dtype=np.float64)
+        projected, _ = cv2.projectPoints(
+            pts_3d.astype(np.float64), rvec, tvec, calib.K, calib.D,
+        )
+        return projected.reshape(-1, 2)
+
+    def verify_stereo_on_board(self,
+                                img_a: np.ndarray,
+                                img_b: np.ndarray,
+                                ) -> Dict[str, Any]:
+        """Verify stereo calibration quality on a single pair of board images.
+
+        For an image pair showing the SAME board:
+        1. Detect board in both cameras -> get (rvec, tvec) per camera
+        2. Camera B dots: transform via R,T -> camera A coords -> project to A's image
+        3. Camera A dots: transform via R^T,-R^T*T -> camera B coords -> project to B's image
+        4. Compare projected vs. detected centres
+
+        Returns dict with error metrics and projected image coordinates.
+        """
+        if self.R is None or self.T is None:
+            raise RuntimeError("Stereo calibration not done. Call calibrate_stereo() first.")
+
+        model_pts = self._build_model_points_3d()
+
+        # Detect board centres (use tuned blob params for dot-grid board)
+        bp = {"minArea": 200, "maxArea": 20000, "minCircularity": 0.3, "minConvexity": 0.3}
+        pts_a = self._detect_board_centers(img_a, "A", blob_params=bp)
+        pts_b = self._detect_board_centers(img_b, "B", blob_params=bp)
+        if pts_a is None or pts_b is None:
+            return {"error": "Board detection failed"}
+
+        calib_a, calib_b = self.calib_a, self.calib_b
+
+        # solvePnP for each camera
+        ret_a, rvec_a, tvec_a = cv2.solvePnP(
+            model_pts, pts_a, calib_a.K, calib_a.D, flags=cv2.SOLVEPNP_ITERATIVE,
+        )
+        ret_b, rvec_b, tvec_b = cv2.solvePnP(
+            model_pts, pts_b, calib_b.K, calib_b.D, flags=cv2.SOLVEPNP_ITERATIVE,
+        )
+        if not ret_a or not ret_b:
+            return {"error": "solvePnP failed"}
+
+        R_a, _ = cv2.Rodrigues(rvec_a)
+        R_b, _ = cv2.Rodrigues(rvec_b)
+
+        # Camera B's dots in camera B frame
+        pts_3d_in_B = (R_b @ model_pts.T + tvec_b).T  # (N, 3)
+        # Transform to camera A frame via stereo R,T
+        # NOTE: OpenCV stereoCalibrate returns R,T as cam1(A)->cam2(B).
+        #   X_B = R * X_A + T, so X_A = R^T * X_B - R^T * T
+        pts_3d_in_A_from_B = (self.R.T @ pts_3d_in_B.T - self.R.T @ self.T).T  # (N, 3)
+        # Project to camera A's image
+        proj_a_from_b = self.project_to_camera_image(pts_3d_in_A_from_B, "A")
+
+        # Camera A's dots in camera A frame, projected (should match detection)
+        pts_3d_in_A = (R_a @ model_pts.T + tvec_a).T
+        proj_a = self.project_to_camera_image(pts_3d_in_A, "A")
+
+        # Camera A -> camera B (forward stereo transform)
+        # X_B = R * X_A + T
+        pts_3d_in_B_from_A = (self.R @ pts_3d_in_A.T + self.T).T
+        proj_b_from_a = self.project_to_camera_image(pts_3d_in_B_from_A, "B")
+
+        # Camera B's own board dots reprojected
+        proj_b = self.project_to_camera_image(pts_3d_in_B, "B")
+
+        # Errors
+        diff_a = np.linalg.norm(proj_a_from_b - pts_a, axis=1)
+        diff_b = np.linalg.norm(proj_b_from_a - pts_b, axis=1)
+        all_diffs = np.concatenate([diff_a, diff_b])
+
+        return {
+            "num_points": len(pts_a),
+            "mean_error_px": float(np.mean(all_diffs)),
+            "median_error_px": float(np.median(all_diffs)),
+            "max_error_px": float(np.max(all_diffs)),
+            "std_error_px": float(np.std(all_diffs)),
+            "diff_per_dot_a": diff_a.tolist(),
+            "diff_per_dot_b": diff_b.tolist(),
+            "pts_a_detected": pts_a.tolist(),
+            "pts_b_detected": pts_b.tolist(),
+            "pts_a_from_b_projected": proj_a_from_b.tolist(),
+            "pts_b_from_a_projected": proj_b_from_a.tolist(),
+            "rvec_a": rvec_a.tolist(),
+            "tvec_a": tvec_a.tolist(),
+            "rvec_b": rvec_b.tolist(),
+            "tvec_b": tvec_b.tolist(),
+        }
+    # ------------------------------------------------------------------
 
     def stitch(self,
                img_a: np.ndarray,
@@ -777,6 +1090,13 @@ class StereoRigCalibration:
             "calib_b": self.calib_b.to_dict(),
             "origin_offset_mm": list(self.origin_offset_mm),
         }
+        if self.R is not None:
+            data["R"] = self.R.tolist()
+            data["T"] = self.T.tolist()
+            data["E"] = self.E.tolist() if self.E is not None else None
+            data["F"] = (self.F.tolist()
+                         if isinstance(self.F, np.ndarray) else None)
+            data["stereo_rms"] = self.stereo_rms
         if self.H_A is not None:
             data["H_A"] = self.H_A.tolist()
             data["H_B"] = self.H_B.tolist()
@@ -796,6 +1116,14 @@ class StereoRigCalibration:
         obj = cls(calib_a, calib_b)
 
         obj.origin_offset_mm = tuple(data.get("origin_offset_mm", (0.0, 0.0)))
+        if "R" in data and data["R"] is not None:
+            obj.R = np.array(data["R"], dtype=np.float64)
+            obj.T = np.array(data["T"], dtype=np.float64)
+            obj.E = (np.array(data["E"], dtype=np.float64)
+                     if data.get("E") is not None else None)
+            obj.F = (np.array(data["F"], dtype=np.float64)
+                     if data.get("F") is not None else None)
+            obj.stereo_rms = data.get("stereo_rms", 0.0)
         if "H_A" in data and data["H_A"] is not None:
             obj.H_A = np.array(data["H_A"], dtype=np.float64)
             obj.H_B = np.array(data["H_B"], dtype=np.float64)
@@ -811,6 +1139,13 @@ class StereoRigCalibration:
         save_kwargs: Dict[str, Any] = {
             "metadata_json": json.dumps(data),
         }
+        if self.R is not None:
+            save_kwargs["R"] = self.R
+            save_kwargs["T"] = self.T
+            if self.E is not None:
+                save_kwargs["E"] = self.E
+            if self.F is not None:
+                save_kwargs["F"] = self.F
         if self.H_A is not None:
             save_kwargs["H_A"] = self.H_A
             save_kwargs["H_B"] = self.H_B
@@ -845,7 +1180,13 @@ class StereoRigCalibration:
             data["calib_b"] = calib_b.to_dict()
 
         obj = cls.from_dict(data)
-        # Overwrite H matrices from raw arrays for precision
+        # Overwrite matrices from raw arrays for precision
+        if "R" in packed:
+            obj.R = packed["R"]
+            obj.T = packed["T"]
+        if "E" in packed:
+            obj.E = packed["E"]
+            obj.F = packed["F"] if "F" in packed else None
         if "H_A" in packed:
             obj.H_A = packed["H_A"]
             obj.H_B = packed["H_B"]
