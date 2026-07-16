@@ -631,6 +631,36 @@ class MultiTargetWorkflow:
                     vis, label, (ct[0] + 5, ct[1] - 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA,
                 )
+                # 绘制最长半径和最短半径线
+                meta = getattr(result, "meta", {})
+                max_radius_point = meta.get("max_radius_point")
+                min_radius_point = meta.get("min_radius_point")
+                max_radius = meta.get("max_radius", 0)
+                min_radius = meta.get("min_radius", 0)
+                if max_radius_point:
+                    max_pt = (int(round(max_radius_point[0])), int(round(max_radius_point[1])))
+                    cv2.line(vis, ct, max_pt, (0, 0, 255), 2, cv2.LINE_AA)  # 红色
+                    cv2.circle(vis, max_pt, 4, (0, 0, 255), -1)
+                    # 显示最长半径值
+                    max_label = f"Rmax={max_radius:.1f}"
+                    max_label_pos = ((ct[0] + max_pt[0]) // 2, (ct[1] + max_pt[1]) // 2 - 10)
+                    cv2.putText(vis, max_label, max_label_pos,
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1, cv2.LINE_AA)
+                if min_radius_point:
+                    min_pt = (int(round(min_radius_point[0])), int(round(min_radius_point[1])))
+                    cv2.line(vis, ct, min_pt, (255, 0, 0), 2, cv2.LINE_AA)  # 蓝色
+                    cv2.circle(vis, min_pt, 4, (255, 0, 0), -1)
+                    # 显示最短半径值
+                    min_label = f"Rmin={min_radius:.1f}"
+                    min_label_pos = ((ct[0] + min_pt[0]) // 2, (ct[1] + min_pt[1]) // 2 + 15)
+                    cv2.putText(vis, min_label, min_label_pos,
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1, cv2.LINE_AA)
+                # 显示椭圆度
+                ellipticity = meta.get("ellipticity", 0)
+                if ellipticity > 0:
+                    ell_label = f"Ellipticity={ellipticity:.1f}"
+                    cv2.putText(vis, ell_label, (ct[0] + 5, ct[1] + 20),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
 
         # --- Pass 3: draw composed measurement connections ---
         for d in self._measurement_defs:
@@ -1570,6 +1600,36 @@ class MultiTargetWorkflow:
                     vis, label, (ct[0] + 5, ct[1] - 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA,
                 )
+                # 绘制最长半径和最短半径线
+                meta = getattr(result, "meta", {})
+                max_radius_point = meta.get("max_radius_point")
+                min_radius_point = meta.get("min_radius_point")
+                max_radius = meta.get("max_radius", 0)
+                min_radius = meta.get("min_radius", 0)
+                if max_radius_point:
+                    max_pt = (int(round(max_radius_point[0])), int(round(max_radius_point[1])))
+                    cv2.line(vis, ct, max_pt, (0, 0, 255), 2, cv2.LINE_AA)  # 红色
+                    cv2.circle(vis, max_pt, 4, (0, 0, 255), -1)
+                    # 显示最长半径值
+                    max_label = f"Rmax={max_radius:.1f}"
+                    max_label_pos = ((ct[0] + max_pt[0]) // 2, (ct[1] + max_pt[1]) // 2 - 10)
+                    cv2.putText(vis, max_label, max_label_pos,
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1, cv2.LINE_AA)
+                if min_radius_point:
+                    min_pt = (int(round(min_radius_point[0])), int(round(min_radius_point[1])))
+                    cv2.line(vis, ct, min_pt, (255, 0, 0), 2, cv2.LINE_AA)  # 蓝色
+                    cv2.circle(vis, min_pt, 4, (255, 0, 0), -1)
+                    # 显示最短半径值
+                    min_label = f"Rmin={min_radius:.1f}"
+                    min_label_pos = ((ct[0] + min_pt[0]) // 2, (ct[1] + min_pt[1]) // 2 + 15)
+                    cv2.putText(vis, min_label, min_label_pos,
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1, cv2.LINE_AA)
+                # 显示椭圆度
+                ellipticity = meta.get("ellipticity", 0)
+                if ellipticity > 0:
+                    ell_label = f"Ellipticity={ellipticity:.1f}"
+                    cv2.putText(vis, ell_label, (ct[0] + 5, ct[1] + 20),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
 
         # --- Pass 3: draw composed measurement connections ---
         for d in self._measurement_defs:
@@ -2463,6 +2523,10 @@ class MultiTargetWorkflow:
         tp.max_matches = wf._max_matches
         tp.overlap = wf._overlap
         tp.result = None
+        # 初始化 pyramid 相关属性
+        tp.pyramid_decimate = 0
+        tp.pyramid_max_template_size = 400
+        tp._pyramid_scale = 1.0
         wf._alignment._template_point = tp
 
         # For multi-point alignment, rebuild control point templates
@@ -2711,6 +2775,42 @@ def _draw_geometric_result(
             vis, pt, color, markerType=cv2.MARKER_CROSS,
             markerSize=8, thickness=1,
         )
+    # 绘制圆的最长半径和最短半径线
+    if hasattr(result, "type") and result.type == "circle":
+        center = (int(round(result.center_col)), int(round(result.center_row)))
+        radius = int(round(result.radius))
+        # 绘制圆
+        cv2.circle(vis, center, radius, color, 2, cv2.LINE_AA)
+        # 绘制最长半径和最短半径线
+        meta = getattr(result, "meta", {})
+        max_radius_point = meta.get("max_radius_point")
+        min_radius_point = meta.get("min_radius_point")
+        max_radius = meta.get("max_radius", 0)
+        min_radius = meta.get("min_radius", 0)
+        if max_radius_point:
+            max_pt = (int(round(max_radius_point[0])), int(round(max_radius_point[1])))
+            cv2.line(vis, center, max_pt, (0, 0, 255), 2, cv2.LINE_AA)  # 红色
+            cv2.circle(vis, max_pt, 4, (0, 0, 255), -1)
+            # 显示最长半径值
+            max_label = f"Rmax={max_radius:.1f}"
+            max_label_pos = ((center[0] + max_pt[0]) // 2, (center[1] + max_pt[1]) // 2 - 10)
+            cv2.putText(vis, max_label, max_label_pos,
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1, cv2.LINE_AA)
+        if min_radius_point:
+            min_pt = (int(round(min_radius_point[0])), int(round(min_radius_point[1])))
+            cv2.line(vis, center, min_pt, (255, 0, 0), 2, cv2.LINE_AA)  # 蓝色
+            cv2.circle(vis, min_pt, 4, (255, 0, 0), -1)
+            # 显示最短半径值
+            min_label = f"Rmin={min_radius:.1f}"
+            min_label_pos = ((center[0] + min_pt[0]) // 2, (center[1] + min_pt[1]) // 2 + 15)
+            cv2.putText(vis, min_label, min_label_pos,
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1, cv2.LINE_AA)
+        # 显示椭圆度
+        ellipticity = meta.get("ellipticity", 0)
+        if ellipticity > 0:
+            ell_label = f"Ellipticity={ellipticity:.1f}"
+            cv2.putText(vis, ell_label, (center[0] + 5, center[1] + 20),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
 
 
 def _format_result_dict(label: str, result: dict) -> str:

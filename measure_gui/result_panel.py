@@ -86,7 +86,7 @@ class ResultPanel(ttk.Frame):
         meas_frame = ttk.LabelFrame(right_frame, text="选中目标测量结果", padding=3)
         meas_frame.pack(fill=tk.BOTH, expand=True)
 
-        meas_columns = ("label", "type", "value", "error", "status")
+        meas_columns = ("label", "type", "value", "error", "ellipticity", "status")
         self._meas_tree = ttk.Treeview(
             meas_frame, columns=meas_columns, show="headings", height=6,
         )
@@ -94,12 +94,14 @@ class ResultPanel(ttk.Frame):
         self._meas_tree.heading("type", text="类型")
         self._meas_tree.heading("value", text="值")
         self._meas_tree.heading("error", text="误差")
+        self._meas_tree.heading("ellipticity", text="椭圆度")
         self._meas_tree.heading("status", text="状态")
 
         self._meas_tree.column("label", width=100)
         self._meas_tree.column("type", width=70)
         self._meas_tree.column("value", width=150)
         self._meas_tree.column("error", width=60)
+        self._meas_tree.column("ellipticity", width=80, anchor=tk.CENTER)
         self._meas_tree.column("status", width=50, anchor=tk.CENTER)
 
         meas_scroll = ttk.Scrollbar(meas_frame, orient=tk.VERTICAL,
@@ -228,14 +230,17 @@ class ResultPanel(ttk.Frame):
                 value_str = str(result) if valid else "-"
 
             error_str = ""
+            ellipticity_str = ""
             if isinstance(result, dict):
                 error_str = str(result.get("meta", {}).get("mean_error", ""))[:8]
+                ellipticity_str = str(result.get("meta", {}).get("ellipticity", ""))[:8]
             elif hasattr(result, "meta"):
                 error_str = str(result.meta.get("mean_error", ""))[:8]
+                ellipticity_str = str(result.meta.get("ellipticity", ""))[:8]
 
             self._meas_tree.insert(
                 "", tk.END,
-                values=(label, rtype, value_str, error_str, status_str),
+                values=(label, rtype, value_str, error_str, ellipticity_str, status_str),
             )
 
         # Notify

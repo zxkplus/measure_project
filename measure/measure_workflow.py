@@ -701,6 +701,10 @@ class TemplatePointObject(MeasureObject):
         tp.coarse_scale_step = data.get("coarse_scale_step", 0.1)
         tp.multi_target = data.get("multi_target", False)
         tp.max_matches = data.get("max_matches", 0)
+        # 初始化 pyramid 相关属性
+        tp.pyramid_decimate = data.get("pyramid_decimate", 0)
+        tp.pyramid_max_template_size = data.get("pyramid_max_template_size", 400)
+        tp._pyramid_scale = data.get("pyramid_scale", 1.0)
 
         obj._template_point = tp
         obj._teach_row = data["teach_row"]
@@ -1402,6 +1406,11 @@ class FitCircleObject(MeasureObject):
                     "num_points": raw["num_points"],
                     "mean_error": raw["mean_error"],
                     "max_error": raw["max_error"],
+                    "ellipticity": raw["ellipticity"],
+                    "max_radius": raw["max_radius"],
+                    "min_radius": raw["min_radius"],
+                    "max_radius_point": raw["max_radius_point"],
+                    "min_radius_point": raw["min_radius_point"],
                 },
             )
         self.result = result
@@ -1466,6 +1475,11 @@ class FitCircleObject(MeasureObject):
                 "num_points": self.result.meta.get("num_points", 0),
                 "mean_error": self.result.meta.get("mean_error", 0.0),
                 "max_error": self.result.meta.get("max_error", 0.0),
+                "ellipticity": self.result.meta.get("ellipticity", 0.0),
+                "max_radius": self.result.meta.get("max_radius", 0.0),
+                "min_radius": self.result.meta.get("min_radius", 0.0),
+                "max_radius_point": self.result.meta.get("max_radius_point"),
+                "min_radius_point": self.result.meta.get("min_radius_point"),
             }
         vis = obj.visualize(image, **kwargs)
         _draw_label(vis, self.label,

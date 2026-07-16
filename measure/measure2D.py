@@ -420,6 +420,36 @@ class LineMeasureObject(_BaseMeasureObject):
             cv2.arrowedLine(img, (int(end[1]), int(end[0])), tip,
                             color, thickness, tipLength=0.3)
     
+
+    def _draw_radius_lines(self, img: np.ndarray,
+                           max_color: Tuple[int, int, int],
+                           min_color: Tuple[int, int, int],
+                           thickness: int):
+        """绘制最长半径和最短半径线"""
+        if self.result is None:
+            return
+        
+        center = self.result['center']
+        max_point = self.result.get('max_radius_point')
+        min_point = self.result.get('min_radius_point')
+        
+        if max_point and min_point:
+            # 绘制最长半径（默认红色）
+            cv2.line(img,
+                    (int(center[1]), int(center[0])),
+                    (int(max_point[0]), int(max_point[1])),
+                    max_color, thickness + 1, cv2.LINE_AA)
+            
+            # 绘制最短半径（默认蓝色）
+            cv2.line(img,
+                    (int(center[1]), int(center[0])),
+                    (int(min_point[0]), int(min_point[1])),
+                    min_color, thickness + 1, cv2.LINE_AA)
+            
+            # 在端点绘制小圆点
+            cv2.circle(img, (int(max_point[0]), int(max_point[1])), 4, max_color, -1)
+            cv2.circle(img, (int(min_point[0]), int(min_point[1])), 4, min_color, -1)
+    
     def _draw_info(self, img: np.ndarray):
         """绘制信息文本"""
         h, w = img.shape[:2]
@@ -700,12 +730,31 @@ class CircleMeasureObject(_BaseMeasureObject):
         mean_error = np.mean(errors)
         max_error = np.max(errors)
         
+        # 计算椭圆度（最大直径 - 最小直径）
+        if n >= 3:
+            max_idx = np.argmax(distances)
+            min_idx = np.argmin(distances)
+            max_radius = distances[max_idx]
+            min_radius = distances[min_idx]
+            max_radius_point = (x[max_idx], y[max_idx])  # (col, row)
+            min_radius_point = (x[min_idx], y[min_idx])  # (col, row)
+            ellipticity = 2 * (max_radius - min_radius)
+        else:
+            ellipticity = 0.0
+            max_radius = min_radius = 0.0
+            max_radius_point = min_radius_point = None
+        
         return {
             'center': (yc, xc),  # (row, col)
             'radius': R,
             'num_points': n,
             'mean_error': mean_error,
-            'max_error': max_error
+            'max_error': max_error,
+            'ellipticity': ellipticity,
+            'max_radius': max_radius,
+            'min_radius': min_radius,
+            'max_radius_point': max_radius_point,  # (col, row)
+            'min_radius_point': min_radius_point,  # (col, row)
         }
     
     def visualize(self, image: np.ndarray,
@@ -715,12 +764,15 @@ class CircleMeasureObject(_BaseMeasureObject):
                   show_labels: bool = True,
                   show_center_lines: bool = False,
                   show_search_radii: bool = True,
+                  show_radius_lines: bool = True,
                   rect_color: Tuple[int, int, int] = (0, 255, 255),
                   edge_color: Tuple[int, int, int] = (0, 255, 0),
                   circle_color: Tuple[int, int, int] = (255, 0, 255),
                   center_color: Tuple[int, int, int] = (0, 0, 255),
                   radius_min_color: Tuple[int, int, int] = (255, 255, 0),
                   radius_max_color: Tuple[int, int, int] = (0, 165, 255),
+                  max_radius_color: Tuple[int, int, int] = (0, 0, 255),
+                  min_radius_color: Tuple[int, int, int] = (255, 0, 0),
                   line_thickness: int = 2,
                   point_radius: int = 5) -> np.ndarray:
         """
@@ -734,12 +786,15 @@ class CircleMeasureObject(_BaseMeasureObject):
             show_labels: 是否显示标签
             show_center_lines: 是否显示圆心到边缘点的连线
             show_search_radii: 是否显示搜索半径范围（radius_min / radius_max）
+            show_radius_lines: 是否显示最长/最短半径线
             rect_color: 矩形颜色 (B, G, R)
             edge_color: 边缘点颜色
             circle_color: 拟合圆颜色
             center_color: 圆心颜色
             radius_min_color: 最小搜索半径圆颜色 (B, G, R)
             radius_max_color: 最大搜索半径圆颜色 (B, G, R)
+            max_radius_color: 最长半径线颜色 (B, G, R)
+            min_radius_color: 最短半径线颜色 (B, G, R)
             line_thickness: 线条粗细
             point_radius: 点半径
 
@@ -765,6 +820,10 @@ class CircleMeasureObject(_BaseMeasureObject):
         # 4. 绘制拟合圆
         if show_fitted_circle and self.result is not None:
             self._draw_fitted_circle(vis_img, circle_color, center_color, line_thickness)
+
+        # 5. 绘制最长/最短半径线
+        if show_radius_lines and self.result is not None:
+            self._draw_radius_lines(vis_img, max_radius_color, min_radius_color, line_thickness)
 
         # 添加信息
         self._draw_info(vis_img)
@@ -887,6 +946,36 @@ class CircleMeasureObject(_BaseMeasureObject):
                 (int(center[1]), int(center[0]) + cross_size),
                 center_color, 1)
     
+
+    def _draw_radius_lines(self, img: np.ndarray,
+                           max_color: Tuple[int, int, int],
+                           min_color: Tuple[int, int, int],
+                           thickness: int):
+        """绘制最长半径和最短半径线"""
+        if self.result is None:
+            return
+        
+        center = self.result['center']
+        max_point = self.result.get('max_radius_point')
+        min_point = self.result.get('min_radius_point')
+        
+        if max_point and min_point:
+            # 绘制最长半径（默认红色）
+            cv2.line(img,
+                    (int(center[1]), int(center[0])),
+                    (int(max_point[0]), int(max_point[1])),
+                    max_color, thickness + 1, cv2.LINE_AA)
+            
+            # 绘制最短半径（默认蓝色）
+            cv2.line(img,
+                    (int(center[1]), int(center[0])),
+                    (int(min_point[0]), int(min_point[1])),
+                    min_color, thickness + 1, cv2.LINE_AA)
+            
+            # 在端点绘制小圆点
+            cv2.circle(img, (int(max_point[0]), int(max_point[1])), 4, max_color, -1)
+            cv2.circle(img, (int(min_point[0]), int(min_point[1])), 4, min_color, -1)
+    
     def _draw_info(self, img: np.ndarray):
         """绘制信息文本"""
         h, w = img.shape[:2]
@@ -916,6 +1005,15 @@ class CircleMeasureObject(_BaseMeasureObject):
             if r_min is not None and r_max is not None:
                 info5 = f'Search radii: [{r_min:.1f}, {r_max:.1f}] px'
                 draw_text_shadow(img, info5, (10, 130), color=(255, 255, 255), font_scale=0.5, thickness=1)
+            
+            # 椭圆度信息
+            if 'ellipticity' in self.result:
+                info6 = f'Ellipticity: {self.result["ellipticity"]:.2f} px'
+                draw_text_shadow(img, info6, (10, 150), color=(255, 255, 255), font_scale=0.5, thickness=1)
+                
+                if 'max_radius' in self.result and 'min_radius' in self.result:
+                    info7 = f'Radius range: [{self.result["min_radius"]:.2f}, {self.result["max_radius"]:.2f}]'
+                    draw_text_shadow(img, info7, (10, 170), color=(255, 255, 255), font_scale=0.5, thickness=1)
 
     # ------------------------------------------------------------------
     # Serialization
