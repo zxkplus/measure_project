@@ -125,6 +125,7 @@ class EdgePointDialog(BaseParamDialog):
             row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 5))
         row += 1
 
+        self._add_float_entry(main, "Length2 (采样框半宽)", "length2", 5.0, row, 1.0, 500.0); row += 1
         self._add_float_entry(main, "Sigma (平滑)", "sigma", 1.0, row, 0.0, 100.0); row += 1
         self._add_float_entry(main, "Threshold (阈值)", "threshold", 30.0, row, 0.0, 255.0); row += 1
         self._add_combo(main, "Transition (边缘方向)", "transition",
@@ -152,6 +153,7 @@ class EdgePairDialog(BaseParamDialog):
             row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 5))
         row += 1
 
+        self._add_float_entry(main, "Length2 (采样框半宽)", "length2", 5.0, row, 1.0, 500.0); row += 1
         self._add_float_entry(main, "Sigma (平滑)", "sigma", 1.0, row, 0.0, 100.0); row += 1
         self._add_float_entry(main, "Threshold (阈值)", "threshold", 30.0, row, 0.0, 255.0); row += 1
         self._add_combo(main, "Transition (边缘对方向)", "transition",
