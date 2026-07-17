@@ -291,7 +291,7 @@ class Halcon1DMeasure:
         """
         # 获取所有边缘
         row_edges, col_edges, amplitudes, _ = \
-            self.measure_pos(img, sigma, threshold, transition, select,False,debug)
+            self.measure_pos(img, sigma, threshold, "all", select, False, debug)
         
         if len(row_edges) < 2:
             return [], [], [], [], [], [], [], [], [],[]
