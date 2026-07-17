@@ -160,6 +160,15 @@ def _result_to_dict(result) -> Dict[str, Any]:
 # ===========================================================================
 
 # Maps object_type string -> (constructor_fn, params_from_dict_fn)
+
+class _VirtualPoint:
+    """Lightweight wrapper for virtual EdgePair endpoints in measurement_objects."""
+
+    def __init__(self, label: str, result: "PointResult"):
+        self.label = label
+        self.result = result
+        self._cached_measure = None
+
 _OBJECT_FACTORIES: Dict[str, Tuple] = {}
 
 
@@ -2307,6 +2316,15 @@ class MultiTargetWorkflow:
                     result = obj.measure(patch)
                     raw_results[label] = result
                     measurement_objects[label] = obj
+
+                    # EdgePair: split into two virtual EdgePoints for composed measurements
+                    if obj_type == "EdgePair" and result.valid:
+                        pa = obj.point_a
+                        pb = obj.point_b
+                        raw_results[label + "_A"] = pa
+                        raw_results[label + "_B"] = pb
+                        measurement_objects[label + "_A"] = _VirtualPoint(label + "_A", pa)
+                        measurement_objects[label + "_B"] = _VirtualPoint(label + "_B", pb)
                     if not result.valid:
                         all_valid = False
 
