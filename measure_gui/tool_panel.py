@@ -174,6 +174,17 @@ class ToolPanel(ttk.Frame):
                         lambda e: self._fire(self.on_angle_range_changed,
                                             self._angle_var.get()))
 
+        # Angle step
+        ttk.Label(tmpl_frame, text="角度搜索步长").pack(anchor=tk.W, **pad)
+        self._angle_step_var = tk.DoubleVar(value=1.0)
+        angle_step_combo = ttk.Combobox(
+            tmpl_frame, textvariable=self._angle_step_var,
+            values=[0.5, 1.0, 2.0, 5.0],
+            state="readonly", width=18,
+        )
+        angle_step_combo.pack(fill=tk.X, **pad)
+
+
         # Max matches
         ttk.Label(tmpl_frame, text="最大匹配数 (0=无限)").pack(anchor=tk.W, **pad)
         self._max_matches_var = tk.IntVar(value=0)
@@ -400,21 +411,24 @@ class ToolPanel(ttk.Frame):
                             score_threshold: float,
                             angle_range_half: float,
                             max_matches: int,
-                            overlap: float = 0.3):
+                            overlap: float = 0.3,
+                            angle_step_deg: float = 1.0):
         """Set matching parameter widgets programmatically (for project restore).
 
         Args:
             preprocessor_type: One of raw/canny/sobel/clahe/threshold.
-            score_threshold: Match score threshold (0.1–1.0).
-            angle_range_half: Half-range in degrees (e.g. 30 for ±30°).
+            score_threshold: Match score threshold (0.1-1.0).
+            angle_range_half: Half-range in degrees (e.g. 30 for +/-30 deg).
             max_matches: Max number of matches (0 = unlimited).
             overlap: Max allowed IoU overlap in [0, 1] (default 0.3).
+            angle_step_deg: Angle step in degrees (default 1.0).
         """
         self._preproc_var.set(preprocessor_type)
         self._score_var.set(score_threshold)
         self._angle_var.set(f"±{int(angle_range_half)}°")
         self._max_matches_var.set(max_matches)
         self._overlap_var.set(overlap)
+        self._angle_step_var.set(angle_step_deg)
 
     def get_alignment_mode(self) -> str:
         """Return 'single_box' or 'multi_point'."""

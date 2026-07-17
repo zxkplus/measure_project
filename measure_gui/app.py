@@ -668,6 +668,7 @@ class MeasureApp:
             "preprocessor_type": self.tool_panel._preproc_var.get(),
             "match_score_threshold": self.tool_panel._score_var.get(),
             "angle_range_deg": self._parse_angle_range(),
+            "angle_step_deg": self.tool_panel._angle_step_var.get(),
             "max_matches": self.tool_panel._max_matches_var.get(),
             "overlap": self.tool_panel._overlap_var.get(),
         }
@@ -906,7 +907,7 @@ class MeasureApp:
             preprocessor=preprocessor,
             match_score_threshold=self.tool_panel._score_var.get(),
             angle_range=angle_range,
-            angle_step=1.0,
+            angle_step=self.tool_panel._angle_step_var.get(),
             max_matches=self.tool_panel._max_matches_var.get(),
             overlap=self.tool_panel._overlap_var.get(),
             coarse_fine=True,
