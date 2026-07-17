@@ -377,6 +377,11 @@ def _build_profile_image(
 
     # --- ROI 区域 ---
     roi_y_start = label_h
+
+    # 计算曲线绘图区左右边界（ROI 与曲线共用，确保 X 轴一一对齐）
+    plot_x0_roi = margin + 30  # 左边留空给Y轴标签
+    plot_x1_roi = total_w - margin
+
     if roi_img is not None:
         # 确保是 BGR 格式
         if len(roi_img.shape) == 2:
@@ -386,11 +391,12 @@ def _build_profile_image(
             # 缩放到 roi_height 高度，宽度按比例
             scale = roi_height / roi_h
             new_w = int(roi_w * scale)
-            new_w = min(new_w, total_w - 2 * margin)
+            plot_roi_w = plot_x1_roi - plot_x0_roi
+            new_w = min(new_w, plot_roi_w)
             if new_w > 10:
                 roi_resized = cv2.resize(roi_img, (new_w, roi_height))
-                # 居中显示
-                x_offset = (total_w - new_w) // 2
+                # 与曲线共用相同的左边界居中
+                x_offset = plot_x0_roi + (plot_roi_w - new_w) // 2
                 canvas[roi_y_start:roi_y_start + roi_height, x_offset:x_offset + new_w] = roi_resized
                 # 边框
                 cv2.rectangle(canvas, (x_offset, roi_y_start),
@@ -400,7 +406,7 @@ def _build_profile_image(
     curve_y_start = roi_y_start + roi_height
     cv2.line(canvas, (0, curve_y_start), (total_w, curve_y_start), (200, 200, 200), 1)
 
-    plot_x0 = margin + 30  # 左边留空给Y轴标签
+    plot_x0 = plot_x0_roi  # 与 ROI 共用左边界
     plot_x1 = total_w - margin
     plot_y0 = curve_y_start + margin
     plot_y1 = curve_y_start + curve_height - margin
