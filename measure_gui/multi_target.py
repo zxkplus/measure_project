@@ -339,6 +339,7 @@ def _build_profile_image(
     threshold: float,
     label: str,
     obj_type: str,
+    length1: float = None,
     img_width: int = 600,
     roi_height: int = 80,
     curve_height: int = 150,
@@ -347,6 +348,17 @@ def _build_profile_image(
 
     上半部分：摆正的 ROI 小图（灰度转BGR）
     下半部分：gradient 曲线 + 阈值线
+
+    Args:
+        roi_img: ROI图像（可选）
+        gradient: 梯度数据
+        threshold: 阈值
+        label: 标签名称
+        obj_type: 对象类型
+        length1: 采样框半长（用于对齐曲线长度）
+        img_width: 输出图像宽度
+        roi_height: ROI区域高度
+        curve_height: 曲线区域高度
 
     Returns:
         BGR 图像
@@ -428,12 +440,33 @@ def _build_profile_image(
     cv2.putText(canvas, f"{g_min:.0f}", (margin, plot_y1),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.3, (120, 120, 120), 1, cv2.LINE_AA)
 
-    # 绘制 gradient 曲线
+    # 绘制 gradient 曲线（与采样框长度对齐）
     n = len(gradient)
     if n > 1 and plot_w > 0:
+        # 计算采样框的实际像素长度
+        sample_length = length1 * 2 if length1 else n
+        
+        # 计算曲线在绘图区域中的位置（居中显示）
+        # 假设采样框长度对应gradient数组的长度
+        curve_width = int(plot_w * min(1.0, sample_length / plot_w))
+        curve_x0 = plot_x0 + (plot_w - curve_width) // 2
+        curve_x1 = curve_x0 + curve_width
+        
+        # 绘制采样框长度的标记线
+        cv2.line(canvas, (curve_x0, plot_y1 + 2), (curve_x0, plot_y1 + 8), (100, 100, 100), 1)
+        cv2.line(canvas, (curve_x1, plot_y1 + 2), (curve_x1, plot_y1 + 8), (100, 100, 100), 1)
+        
+        # 绘制长度标签
+        length_text = f"{sample_length:.0f}px"
+        text_size = cv2.getTextSize(length_text, cv2.FONT_HERSHEY_SIMPLEX, 0.3, 1)[0]
+        text_x = (curve_x0 + curve_x1 - text_size[0]) // 2
+        cv2.putText(canvas, length_text, (text_x, plot_y1 + 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 100, 100), 1, cv2.LINE_AA)
+        
+        # 绘制曲线
         points = []
         for i in range(n):
-            x = plot_x0 + int(i * plot_w / (n - 1))
+            x = curve_x0 + int(i * curve_width / (n - 1))
             y = plot_y0 + int((gradient[i] - g_min) / g_range * plot_h)
             y = max(plot_y0, min(plot_y1, y))
             points.append([x, y])
@@ -856,6 +889,7 @@ class MultiTargetWorkflow:
             profile_img = _build_profile_image(
                 roi_img, measure.last_gradient, measure.last_threshold,
                 label, obj_type,
+                length1=measure.length1 if hasattr(measure, 'length1') else None,
             )
 
             # 保存
@@ -877,11 +911,11 @@ class MultiTargetWorkflow:
         length1 = params["length1"]      # half-length along probe direction
         length2 = params["length2"]      # half-width perpendicular
 
-        # Direction vector (same as template_view._draw_edge_probe)
-        dr = -np.cos(angle)
-        dc = np.sin(angle)
-        # Perpendicular
-        pr = dc
+        # Direction vector (matching measure1D convention: 0=right, pi/2=down)
+        dr = np.sin(angle)
+        dc = np.cos(angle)
+        # Perpendicular direction (rotate 90 degrees counterclockwise)
+        pr = -dc
         pc = dr
 
         corners = np.array([
@@ -1871,6 +1905,7 @@ class MultiTargetWorkflow:
             profile_img = _build_profile_image(
                 roi_img, measure.last_gradient, measure.last_threshold,
                 label, obj_type,
+                length1=measure.length1 if hasattr(measure, 'length1') else None,
             )
 
             # 保存
@@ -1893,11 +1928,11 @@ class MultiTargetWorkflow:
         length1 = params["length1"]      # half-length along probe direction
         length2 = params["length2"]      # half-width perpendicular
 
-        # Direction vector (same as template_view._draw_edge_probe)
-        dr = -np.cos(angle)
-        dc = np.sin(angle)
-        # Perpendicular
-        pr = dc
+        # Direction vector (matching measure1D convention: 0=right, pi/2=down)
+        dr = np.sin(angle)
+        dc = np.cos(angle)
+        # Perpendicular direction (rotate 90 degrees counterclockwise)
+        pr = -dc
         pc = dr
 
         corners = np.array([

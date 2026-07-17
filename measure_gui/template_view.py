@@ -570,11 +570,11 @@ class TemplateView(tk.Frame):
         length2 = params["length2"]
 
         # Direction vector of probe
-        dr = -np.cos(angle)  # row direction
-        dc = np.sin(angle)   # col direction
+        dr = np.sin(angle)  # row direction (down is positive)
+        dc = np.cos(angle)  # col direction (right is positive)
 
-        # Perpendicular direction
-        pr = dc
+        # Perpendicular direction (rotate 90 degrees counterclockwise)
+        pr = -dc
         pc = dr
 
         # 4 corners of the probe rectangle
@@ -927,7 +927,7 @@ class TemplateView(tk.Frame):
             dr = row - start_r
             dc = col - start_c
             length = np.sqrt(dr**2 + dc**2)
-            angle = np.arctan2(dc, -dr)  # angle in radians
+            angle = np.arctan2(dr, dc)  # angle in radians (matching new convention)
 
             # Preview (draw temporary rectangle)
             self._canvas.delete("preview")
@@ -1026,7 +1026,7 @@ class TemplateView(tk.Frame):
         dr = end_row - start_r
         dc = end_col - start_c
         length = np.sqrt(dr**2 + dc**2)
-        angle = np.arctan2(dc, -dr)
+        angle = np.arctan2(dr, dc)
 
         params = {
             "row": start_r,
@@ -1044,12 +1044,16 @@ class TemplateView(tk.Frame):
         # Show dialog for algorithm params
         if obj_type == "EdgePoint":
             dlg_params = EdgePointDialog.ask(self, params={
+                "length1": params["length1"],
+                "length2": params["length2"],
                 "sigma": 1.0, "threshold": 30.0,
                 "transition": "all", "select": "first",
                 "interpolation": "linear",
             })
         else:
             dlg_params = EdgePairDialog.ask(self, params={
+                "length1": params["length1"],
+                "length2": params["length2"],
                 "sigma": 1.0, "threshold": 30.0,
                 "transition": "negative", "select": "first",
                 "interpolation": "linear",
