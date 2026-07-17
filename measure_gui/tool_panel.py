@@ -499,8 +499,18 @@ class ToolPanel(ttk.Frame):
         # Get available labels from the tree
         available_labels = list(self._tool_tree.get_children())
 
+        # Expand EdgePair labels to include virtual endpoints _A, _B
+        expanded_labels = []
+        for label in available_labels:
+            expanded_labels.append(label)
+            values = self._tool_tree.item(label, "values")
+            if len(values) > 2 and values[2] == "EdgePair":
+                expanded_labels.append(label + "_A")
+                expanded_labels.append(label + "_B")
+
+
         result = ComposedMeasureDialog.ask(
-            self, title=title, input_labels=available_labels,
+            self, title=title, input_labels=expanded_labels,
             param_keys=param_keys,
         )
 

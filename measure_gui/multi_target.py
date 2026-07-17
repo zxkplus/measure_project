@@ -2837,14 +2837,20 @@ def _get_defaults(object_type: str) -> Dict[str, Any]:
 
 
 def _references_label(defn: Dict[str, Any], target_label: str) -> bool:
-    """Check if a composed measurement references the given label."""
+    """Check if a composed measurement references the given label
+    or its virtual EdgePair endpoints (label_A, label_B)."""
     params = defn.get("params", {})
     for key in ["point_a_label", "point_b_label", "point_label",
                 "line_a_label", "line_b_label", "line_label",
                 "circle_label"]:
-        if params.get(key) == target_label:
+        val = params.get(key, "")
+        if val == target_label:
+            return True
+        # Also match virtual EdgePair endpoints (label_A, label_B)
+        if val in (target_label + "_A", target_label + "_B"):
             return True
     return False
+
 
 
 def _compute_target_box_corners(
