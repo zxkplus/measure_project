@@ -178,8 +178,8 @@ def _make_edge_point(label: str, **p) -> EdgePointObject:
         length2=p["length2"],
         sigma=p.get("sigma", 1.0),
         threshold=p.get("threshold", 30.0),
-        transition=p.get("transition", "all"),
-        select=p.get("select", "first"),
+        transition="all",
+        select="first",
         interpolation=p.get("interpolation", "linear"),
     )
 
@@ -194,8 +194,8 @@ def _make_edge_pair(label: str, **p) -> EdgePairObject:
         length2=p["length2"],
         sigma=p.get("sigma", 1.0),
         threshold=p.get("threshold", 30.0),
-        transition=p.get("transition", "negative"),
-        select=p.get("select", "first"),
+        transition="all",
+        select="endpoints",
         interpolation=p.get("interpolation", "linear"),
     )
 
@@ -1336,51 +1336,6 @@ def _register_factory(type_name: str, factory, param_keys: List[str]):
 
 
 # Primitive factories: each takes (label, **params) and returns a MeasureObject
-def _make_edge_point(label: str, **p) -> EdgePointObject:
-    return EdgePointObject(
-        label=label,
-        row=p["row"],
-        col=p["col"],
-        angle=p["angle"],
-        length1=p["length1"],
-        length2=p["length2"],
-        sigma=p.get("sigma", 1.0),
-        threshold=p.get("threshold", 30.0),
-        transition=p.get("transition", "all"),
-        select=p.get("select", "first"),
-        interpolation=p.get("interpolation", "linear"),
-    )
-
-
-def _make_edge_pair(label: str, **p) -> EdgePairObject:
-    return EdgePairObject(
-        label=label,
-        row=p["row"],
-        col=p["col"],
-        angle=p["angle"],
-        length1=p["length1"],
-        length2=p["length2"],
-        sigma=p.get("sigma", 1.0),
-        threshold=p.get("threshold", 30.0),
-        transition=p.get("transition", "negative"),
-        select=p.get("select", "first"),
-        interpolation=p.get("interpolation", "linear"),
-    )
-
-
-def _make_fit_line(label: str, **p) -> FitLineObject:
-    return FitLineObject(
-        label=label,
-        start=p["start"],
-        end=p["end"],
-        measure_length1=p["measure_length1"],
-        measure_length2=p["measure_length2"],
-        num_measures=p.get("num_measures", 10),
-        sigma=p.get("sigma", 1.0),
-        threshold=p.get("threshold", 30.0),
-        transition=p.get("transition", "all"),
-    )
-
 
 def _make_fit_circle(label: str, **p) -> FitCircleObject:
     return FitCircleObject(
@@ -2849,8 +2804,7 @@ class MultiTargetWorkflow:
 def _get_defaults(object_type: str) -> Dict[str, Any]:
     """Get default parameters for each measurement type."""
     defaults = {
-        "EdgePoint": {"sigma": 1.0, "threshold": 30.0, "transition": "all",
-                       "select": "first", "interpolation": "linear"},
+        "EdgePoint": {"sigma": 1.0, "threshold": 30.0, "interpolation": "linear"},
         "EdgePair": {"sigma": 1.0, "threshold": 30.0, "interpolation": "linear"},
         "FitLine": {"num_measures": 10, "sigma": 1.0, "threshold": 30.0,
                      "transition": "all"},
