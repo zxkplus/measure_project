@@ -290,11 +290,11 @@ def _make_point_circle_distance(label: str, **p) -> PointCircleDistanceObject:
 _OBJECT_FACTORIES = {
     "EdgePoint": (_make_edge_point, [
         "row", "col", "angle", "length1", "length2",
-        "sigma", "threshold", "transition", "select", "interpolation",
+        "sigma", "threshold", "interpolation",
     ]),
     "EdgePair": (_make_edge_pair, [
         "row", "col", "angle", "length1", "length2",
-        "sigma", "threshold", "transition", "select", "interpolation",
+        "sigma", "threshold", "interpolation",
     ]),
     "FitLine": (_make_fit_line, [
         "start", "end", "measure_length1", "measure_length2",
@@ -1458,11 +1458,11 @@ def _make_point_circle_distance(label: str, **p) -> PointCircleDistanceObject:
 _OBJECT_FACTORIES = {
     "EdgePoint": (_make_edge_point, [
         "row", "col", "angle", "length1", "length2",
-        "sigma", "threshold", "transition", "select", "interpolation",
+        "sigma", "threshold", "interpolation",
     ]),
     "EdgePair": (_make_edge_pair, [
         "row", "col", "angle", "length1", "length2",
-        "sigma", "threshold", "transition", "select", "interpolation",
+        "sigma", "threshold", "interpolation",
     ]),
     "FitLine": (_make_fit_line, [
         "start", "end", "measure_length1", "measure_length2",
