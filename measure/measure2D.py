@@ -187,8 +187,8 @@ class LineMeasureObject(_BaseMeasureObject):
                 row=rect['center'][0],
                 col=rect['center'][1],
                 angle=rect['angle'],
-                length1=rect['length2'],  # 沿测量方向
-                length2=rect['length1'],  # 垂直测量方向
+                length1=rect['length1'],  # 沿测量方向的半长度
+                length2=rect['length2'],  # 垂直测量方向的半宽度
                 interpolation='linear'
             )
             

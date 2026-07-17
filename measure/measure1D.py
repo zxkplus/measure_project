@@ -67,8 +67,8 @@ class Halcon1DMeasure:
         计算仿射变换矩阵和逆矩阵（带类级别缓存）。
         """
         angle_deg = np.degrees(self.angle)
-        target_cx = self.length1 / 2.0
-        target_cy = self.length2 / 2.0
+        target_cx = self.length1  # 半长就是从中心到边缘的距离
+        target_cy = self.length2  # 半宽就是从中心到边缘的距离
 
         # Cache lookup
         cache_key = (round(angle_deg, 5), round(target_cx, 5),
@@ -94,10 +94,10 @@ class Halcon1DMeasure:
 
     def extract_roi(self, img: np.ndarray) -> np.ndarray:
         """
-        提取ROI并转换为正矩形 (length2, length1)。
+        提取ROI并转换为正矩形 (length2*2, length1*2)。
         """
         interp_flag = self._INTERP_FLAGS.get(self.interpolation, cv2.INTER_LINEAR)
-        target_size = (int(self.length1), int(self.length2))
+        target_size = (int(self.length1 * 2), int(self.length2 * 2))
         aligned_img = cv2.warpAffine(
             img,
             self.rotation_matrix,
@@ -157,7 +157,7 @@ class Halcon1DMeasure:
         """
         # Step 1: 提取并对齐ROI
         aligned = self.extract_roi(img)
-        h, w = aligned.shape  # h = length2, w = length1
+        h, w = aligned.shape  # h = length2*2, w = length1*2
         
         # Step 2: 提取水平方向的灰度轮廓
         # 对每一列求平均，得到一维轮廓
@@ -246,7 +246,7 @@ class Halcon1DMeasure:
         # Step 8: 转换为原图坐标
         # 在正矩形中，边缘位于 (x, y)，其中 x 是水平位置，y 是垂直中心
         points_aligned = np.array([
-            [pos, self.length2 / 2] for pos in refined_positions
+            [pos, self.length2] for pos in refined_positions
         ])
         
         points_original = self._transform_points_to_original(points_aligned)
