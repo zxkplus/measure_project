@@ -2314,19 +2314,20 @@ class MultiTargetWorkflow:
                     factory, _ = _OBJECT_FACTORIES[obj_type]
                     obj = factory(label, **params)
                     result = obj.measure(patch)
-                    raw_results[label] = result
                     measurement_objects[label] = obj
 
-                    # EdgePair: split into two virtual EdgePoints for composed measurements
                     if obj_type == "EdgePair" and result.valid:
+                        # Store two virtual endpoints instead of center
                         pa = obj.point_a
                         pb = obj.point_b
                         raw_results[label + "_A"] = pa
                         raw_results[label + "_B"] = pb
                         measurement_objects[label + "_A"] = _VirtualPoint(label + "_A", pa)
                         measurement_objects[label + "_B"] = _VirtualPoint(label + "_B", pb)
-                    if not result.valid:
-                        all_valid = False
+                    else:
+                        raw_results[label] = result
+                        if not result.valid:
+                            all_valid = False
 
                 elif obj_type == "TemplateMatchPoint":
                     # Template-matching point: use pre-built TemplatePoint
