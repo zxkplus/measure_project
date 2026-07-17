@@ -297,7 +297,19 @@ class Halcon1DMeasure:
         
         if len(row_edges) < 2:
             return [], [], [], [], [], [], [], [], [],[]
-        
+
+        # select='endpoints': 取第一个和最后一个边缘作为端点，不做极性配对
+        if select == 'endpoints':
+            a, b = 0, len(row_edges) - 1
+            center_row = (row_edges[a] + row_edges[b]) / 2
+            center_col = (col_edges[a] + col_edges[b]) / 2
+            dx = col_edges[b] - col_edges[a]
+            dy = row_edges[b] - row_edges[a]
+            intra = np.sqrt(dx**2 + dy**2)
+            return ([row_edges[a]], [col_edges[a]], [amplitudes[a]],
+                    [row_edges[b]], [col_edges[b]], [amplitudes[b]],
+                    [center_row], [center_col], [intra], [])
+
         # 配对逻辑
         pairs_row1, pairs_col1, pairs_amp1 = [], [], []
         pairs_row2, pairs_col2, pairs_amp2 = [], [], []

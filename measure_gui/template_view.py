@@ -1036,8 +1036,7 @@ class TemplateView(tk.Frame):
             "length2": max(2.0, length * 0.1),
             "sigma": 1.0,
             "threshold": 30.0,
-            "transition": "all" if obj_type == "EdgePoint" else "negative",
-            "select": "first",
+            "transition": "all",
             "interpolation": "linear",
         }
 
@@ -1047,7 +1046,6 @@ class TemplateView(tk.Frame):
                 "length1": params["length1"],
                 "length2": params["length2"],
                 "sigma": 1.0, "threshold": 30.0,
-                "transition": "all", "select": "first",
                 "interpolation": "linear",
             })
         else:
@@ -1055,7 +1053,6 @@ class TemplateView(tk.Frame):
                 "length1": params["length1"],
                 "length2": params["length2"],
                 "sigma": 1.0, "threshold": 30.0,
-                "transition": "negative", "select": "first",
                 "interpolation": "linear",
             })
 

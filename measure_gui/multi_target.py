@@ -2851,8 +2851,7 @@ def _get_defaults(object_type: str) -> Dict[str, Any]:
     defaults = {
         "EdgePoint": {"sigma": 1.0, "threshold": 30.0, "transition": "all",
                        "select": "first", "interpolation": "linear"},
-        "EdgePair": {"sigma": 1.0, "threshold": 30.0, "transition": "negative",
-                      "select": "first", "interpolation": "linear"},
+        "EdgePair": {"sigma": 1.0, "threshold": 30.0, "interpolation": "linear"},
         "FitLine": {"num_measures": 10, "sigma": 1.0, "threshold": 30.0,
                      "transition": "all"},
         "FitCircle": {"num_measures": 12, "sigma": 1.0, "threshold": 30.0,

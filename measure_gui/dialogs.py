@@ -129,10 +129,6 @@ class EdgePointDialog(BaseParamDialog):
         self._add_float_entry(main, "Length2 (采样框半宽)", "length2", 5.0, row, 1.0, 500.0); row += 1
         self._add_float_entry(main, "Sigma (平滑)", "sigma", 1.0, row, 0.0, 100.0); row += 1
         self._add_float_entry(main, "Threshold (阈值)", "threshold", 30.0, row, 0.0, 255.0); row += 1
-        self._add_combo(main, "Transition (边缘方向)", "transition",
-                       ["all", "positive", "negative"], "all", row); row += 1
-        self._add_combo(main, "Select (选择)", "select",
-                       ["first", "last", "all"], "first", row); row += 1
         self._add_combo(main, "Interpolation (插值)", "interpolation",
                        ["linear", "cubic", "nearest"], "linear", row); row += 1
 
@@ -158,10 +154,6 @@ class EdgePairDialog(BaseParamDialog):
         self._add_float_entry(main, "Length2 (采样框半宽)", "length2", 5.0, row, 1.0, 500.0); row += 1
         self._add_float_entry(main, "Sigma (平滑)", "sigma", 1.0, row, 0.0, 100.0); row += 1
         self._add_float_entry(main, "Threshold (阈值)", "threshold", 30.0, row, 0.0, 255.0); row += 1
-        self._add_combo(main, "Transition (边缘对方向)", "transition",
-                       ["negative", "positive", "all"], "negative", row); row += 1
-        self._add_combo(main, "Select (选择)", "select",
-                       ["first", "last", "all"], "first", row); row += 1
         self._add_combo(main, "Interpolation (插值)", "interpolation",
                        ["linear", "cubic", "nearest"], "linear", row); row += 1
 

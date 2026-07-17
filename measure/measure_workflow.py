@@ -558,6 +558,22 @@ class TemplatePointObject(MeasureObject):
         self._multi_target = multi_target
         self._max_matches = max_matches
 
+    @property
+    def point_a(self):
+        if self.result and self.result.valid and self.result.meta:
+            m = self.result.meta
+            if 'edge_a_row' in m:
+                return PointResult(label=self.label + '_A', row=m['edge_a_row'], col=m['edge_a_col'], valid=True)
+        return PointResult(label=self.label + '_A', valid=False)
+
+    @property
+    def point_b(self):
+        if self.result and self.result.valid and self.result.meta:
+            m = self.result.meta
+            if 'edge_b_row' in m:
+                return PointResult(label=self.label + '_B', row=m['edge_b_row'], col=m['edge_b_col'], valid=True)
+        return PointResult(label=self.label + '_B', valid=False)
+
     def result_type(self) -> str:
         return "point"
 
@@ -778,6 +794,22 @@ class EdgePointObject(MeasureObject):
         self.select = select
         self.interpolation = interpolation
 
+    @property
+    def point_a(self):
+        if self.result and self.result.valid and self.result.meta:
+            m = self.result.meta
+            if 'edge_a_row' in m:
+                return PointResult(label=self.label + '_A', row=m['edge_a_row'], col=m['edge_a_col'], valid=True)
+        return PointResult(label=self.label + '_A', valid=False)
+
+    @property
+    def point_b(self):
+        if self.result and self.result.valid and self.result.meta:
+            m = self.result.meta
+            if 'edge_b_row' in m:
+                return PointResult(label=self.label + '_B', row=m['edge_b_row'], col=m['edge_b_col'], valid=True)
+        return PointResult(label=self.label + '_B', valid=False)
+
     def result_type(self) -> str:
         return "point"
 
@@ -936,6 +968,22 @@ class TemplateMatchPointObject(MeasureObject):
         self._angle_range = (-angle_range_half, angle_range_half)
         self._template_point: Any = _template_point  # TemplatePoint instance
 
+    @property
+    def point_a(self):
+        if self.result and self.result.valid and self.result.meta:
+            m = self.result.meta
+            if 'edge_a_row' in m:
+                return PointResult(label=self.label + '_A', row=m['edge_a_row'], col=m['edge_a_col'], valid=True)
+        return PointResult(label=self.label + '_A', valid=False)
+
+    @property
+    def point_b(self):
+        if self.result and self.result.valid and self.result.meta:
+            m = self.result.meta
+            if 'edge_b_row' in m:
+                return PointResult(label=self.label + '_B', row=m['edge_b_row'], col=m['edge_b_col'], valid=True)
+        return PointResult(label=self.label + '_B', valid=False)
+
     def result_type(self) -> str:
         return "point"
 
@@ -1043,8 +1091,8 @@ class EdgePairObject(MeasureObject):
         length2: float,
         sigma: float = 1.0,
         threshold: float = 30.0,
-        transition: str = "negative",
-        select: str = "first",
+        transition: str = "all",
+        select: str = "endpoints",
         interpolation: str = "linear",
     ):
         super().__init__(label)
@@ -1061,6 +1109,22 @@ class EdgePairObject(MeasureObject):
         self.transition = transition
         self.select = select
         self.interpolation = interpolation
+
+    @property
+    def point_a(self):
+        if self.result and self.result.valid and self.result.meta:
+            m = self.result.meta
+            if 'edge_a_row' in m:
+                return PointResult(label=self.label + '_A', row=m['edge_a_row'], col=m['edge_a_col'], valid=True)
+        return PointResult(label=self.label + '_A', valid=False)
+
+    @property
+    def point_b(self):
+        if self.result and self.result.valid and self.result.meta:
+            m = self.result.meta
+            if 'edge_b_row' in m:
+                return PointResult(label=self.label + '_B', row=m['edge_b_row'], col=m['edge_b_col'], valid=True)
+        return PointResult(label=self.label + '_B', valid=False)
 
     def result_type(self) -> str:
         return "point"
@@ -1100,6 +1164,11 @@ class EdgePairObject(MeasureObject):
         )
 
         if centers_row:
+            # 端点坐标（用于组合测量引用）
+            edge_a_row = pairs_row1[0] if pairs_row1 else self._calibrated_row
+            edge_a_col = pairs_col1[0] if pairs_col1 else self._calibrated_col
+            edge_b_row = pairs_row2[0] if pairs_row2 else self._calibrated_row
+            edge_b_col = pairs_col2[0] if pairs_col2 else self._calibrated_col
             result = PointResult(
                 label=self.label,
                 row=centers_row[0],
@@ -1109,6 +1178,10 @@ class EdgePairObject(MeasureObject):
                     "num_pairs_found": len(centers_row),
                     "intra_distance": intra_dist[0] if intra_dist else 0.0,
                     "inter_distance": inter_dist[0] if inter_dist else 0.0,
+                    "edge_a_row": edge_a_row,
+                    "edge_a_col": edge_a_col,
+                    "edge_b_row": edge_b_row,
+                    "edge_b_col": edge_b_col,
                 },
             )
         else:
