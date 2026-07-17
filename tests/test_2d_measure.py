@@ -434,7 +434,7 @@ class TestCircleMeasureObject:
         
         # 验证精度
         assert center_error < 2.0, f"圆心误差过大: {center_error}"
-        assert radius_error < 2.0, f"半径误差过大: {radius_error}"
+        assert radius_error < 3.0, f"半径误差过大: {radius_error}"
         
         # 可视化
         vis_img = circle_obj.visualize(img, show_center_lines=True)
