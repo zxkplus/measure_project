@@ -339,7 +339,6 @@ def _build_profile_image(
     threshold: float,
     label: str,
     obj_type: str,
-    length1: float = None,
     img_width: int = 600,
     roi_height: int = 80,
     curve_height: int = 150,
@@ -355,7 +354,6 @@ def _build_profile_image(
         threshold: 阈值
         label: 标签名称
         obj_type: 对象类型
-        length1: 采样框半长（用于对齐曲线长度）
         img_width: 输出图像宽度
         roi_height: ROI区域高度
         curve_height: 曲线区域高度
@@ -443,12 +441,13 @@ def _build_profile_image(
     # 绘制 gradient 曲线（与采样框长度对齐）
     n = len(gradient)
     if n > 1 and plot_w > 0:
-        # 计算采样框的实际像素长度
-        sample_length = length1 * 2 if length1 else n
-        
-        # 计算曲线在绘图区域中的位置（居中显示）
-        # 假设采样框长度对应gradient数组的长度
-        curve_width = int(plot_w * min(1.0, sample_length / plot_w))
+        # 使用与上方 ROI 相同的缩放比例，使曲线与 ROI 显示宽度对齐
+        if roi_img is not None and roi_img.shape[0] > 0:
+            roi_h = roi_img.shape[0]
+            scale = roi_height / roi_h
+            curve_width = int(n * scale)
+        else:
+            curve_width = plot_w
         curve_x0 = plot_x0 + (plot_w - curve_width) // 2
         curve_x1 = curve_x0 + curve_width
         
@@ -456,8 +455,8 @@ def _build_profile_image(
         cv2.line(canvas, (curve_x0, plot_y1 + 2), (curve_x0, plot_y1 + 8), (100, 100, 100), 1)
         cv2.line(canvas, (curve_x1, plot_y1 + 2), (curve_x1, plot_y1 + 8), (100, 100, 100), 1)
         
-        # 绘制长度标签
-        length_text = f"{sample_length:.0f}px"
+        # 绘制宽度标签（纯数字，对应gradient数据点个数）
+        length_text = f"{n}pts"
         text_size = cv2.getTextSize(length_text, cv2.FONT_HERSHEY_SIMPLEX, 0.3, 1)[0]
         text_x = (curve_x0 + curve_x1 - text_size[0]) // 2
         cv2.putText(canvas, length_text, (text_x, plot_y1 + 18),
@@ -889,7 +888,6 @@ class MultiTargetWorkflow:
             profile_img = _build_profile_image(
                 roi_img, measure.last_gradient, measure.last_threshold,
                 label, obj_type,
-                length1=measure.length1 if hasattr(measure, 'length1') else None,
             )
 
             # 保存
@@ -1905,7 +1903,6 @@ class MultiTargetWorkflow:
             profile_img = _build_profile_image(
                 roi_img, measure.last_gradient, measure.last_threshold,
                 label, obj_type,
-                length1=measure.length1 if hasattr(measure, 'length1') else None,
             )
 
             # 保存
