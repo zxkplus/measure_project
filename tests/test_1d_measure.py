@@ -60,7 +60,7 @@ class TestHalcon1DMeasure:
     def sample_image_real_3(self):
         """创建一个测试用的简单图像"""
         #读取一张真实的图片
-        img = cv2.imread('data/sample/bottleneck_3.jpg', cv2.IMREAD_GRAYSCALE)
+        img = cv2.imread('data/sample/bottleneck_5.jpg', cv2.IMREAD_GRAYSCALE)
         #将图片缩小2倍
         img = cv2.resize(img, (img.shape[1]//3, img.shape[0]//3))
         return img
@@ -69,7 +69,7 @@ class TestHalcon1DMeasure:
     def sample_image_real_4(self):
         """创建一个测试用的简单图像"""
         #读取一张真实的图片
-        img = cv2.imread('data/sample/bottleneck_4.bmp', cv2.IMREAD_GRAYSCALE)
+        img = cv2.imread('data/sample/bottleneck_6.bmp', cv2.IMREAD_GRAYSCALE)
         #将图片缩小2倍
         img = cv2.resize(img, (img.shape[1], img.shape[0]))
         return img
@@ -78,7 +78,7 @@ class TestHalcon1DMeasure:
     def sample_image_real_5(self):
         """创建一个测试用的简单图像"""
         #读取一张真实的图片
-        img = cv2.imread('data/sample/bottleneck_5.bmp', cv2.IMREAD_GRAYSCALE)
+        img = cv2.imread('data/sample/bottleneck_7.bmp', cv2.IMREAD_GRAYSCALE)
         #将图片缩小2倍
         img = cv2.resize(img, (img.shape[1]//3, img.shape[0]//3))
         return img
@@ -210,30 +210,36 @@ class TestHalcon1DMeasure:
             return False
         
 
-    def test_measure_pairs(self, sample_image_real_3):
+    def test_measure_pairs(self, sample_image_real_2):
        # 创建测试图像
-        img = sample_image_real_3
-        
+        img = sample_image_real_2
+
+        import os
+        output_dir = os.path.join(os.path.dirname(__file__), "output", "test_measure_pairs")
+        os.makedirs(output_dir, exist_ok=True)
+
         # 创建测量对象
         measure = Halcon1DMeasure(
             row=1500 / 3,
-            col=1294 / 3,
+            col=1294 / 3 + 250,
             angle=np.pi/2,
             length1=900,
             length2=50,
             interpolation='linear'
         )
+        measure._debug_save_dir = output_dir
         
         print("\n执行测量（debug=True）...")
         print("将显示多个调试窗口，请按任意键继续...")
         
         try:
-            measure.draw_roi_on_image(img,wait_time=1000)
+            roi_image = measure.draw_roi_on_image(img,wait_time=0)
+            cv2.imwrite('roi_image.png', roi_image)
             # 执行边缘对检测
             print("\n执行边缘对检测...")
             (row1, col1, amp1, row2, col2, amp2, 
             center_row, center_col, intra_dist, inter_dist) = \
-                measure.measure_pairs(img, sigma=15, threshold=40.0, 
+                measure.measure_pairs(img, sigma=1, threshold=15.0, 
                                 transition='all', select='all',debug=True)
             
             print(f"\n✓ 边缘对检测成功！")
@@ -250,13 +256,13 @@ class TestHalcon1DMeasure:
             
             # 显示边缘对检测结果
             print("\n显示边缘对检测结果...")
-            measure.display_results(img, row_edges=None, col_edges=None, amplitudes=None,
+            result = measure.display_results(img, row_edges=None, col_edges=None, amplitudes=None,
                                 row1=row1, col1=col1, amp1=amp1,
                                 row2=row2, col2=col2, amp2=amp2,
                                 centers_row=center_row, centers_col=center_col,
                                 intra_dist=intra_dist, inter_dist=inter_dist,
                                 window_name='Pair Detection Results', wait_time=500000)
-            
+            cv2.imwrite('result_image.png', result)
             print("\n✓ 测试成功完成！")
             
             return True
