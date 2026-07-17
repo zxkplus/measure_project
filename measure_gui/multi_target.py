@@ -329,6 +329,121 @@ _OBJECT_FACTORIES = {
 
 
 # ===========================================================================
+# Profile debug image builder
+# ===========================================================================
+
+
+def _build_profile_image(
+    roi_img: Optional[np.ndarray],
+    gradient: np.ndarray,
+    threshold: float,
+    label: str,
+    obj_type: str,
+    img_width: int = 600,
+    roi_height: int = 80,
+    curve_height: int = 150,
+) -> np.ndarray:
+    """生成 ROI + 曲线上下拼接的 profile 调试图。
+
+    上半部分：摆正的 ROI 小图（灰度转BGR）
+    下半部分：gradient 曲线 + 阈值线
+
+    Returns:
+        BGR 图像
+    """
+    margin = 10
+    label_h = 25  # 标签区域高度
+    total_h = label_h + roi_height + curve_height
+    total_w = img_width
+
+    canvas = np.ones((total_h, total_w, 3), dtype=np.uint8) * 240
+
+    # --- 标签区域 ---
+    type_str = "EdgePt" if obj_type == "EdgePoint" else "EdgePr"
+    label_text = f"{label} ({type_str}) threshold={threshold:.1f}"
+    cv2.putText(canvas, label_text, (margin, 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 60, 60), 1, cv2.LINE_AA)
+    cv2.line(canvas, (0, label_h), (total_w, label_h), (200, 200, 200), 1)
+
+    # --- ROI 区域 ---
+    roi_y_start = label_h
+    if roi_img is not None:
+        # 确保是 BGR 格式
+        if len(roi_img.shape) == 2:
+            roi_img = cv2.cvtColor(roi_img, cv2.COLOR_GRAY2BGR)
+        roi_h, roi_w = roi_img.shape[:2]
+        if roi_h > 0 and roi_w > 0:
+            # 缩放到 roi_height 高度，宽度按比例
+            scale = roi_height / roi_h
+            new_w = int(roi_w * scale)
+            new_w = min(new_w, total_w - 2 * margin)
+            if new_w > 10:
+                roi_resized = cv2.resize(roi_img, (new_w, roi_height))
+                # 居中显示
+                x_offset = (total_w - new_w) // 2
+                canvas[roi_y_start:roi_y_start + roi_height, x_offset:x_offset + new_w] = roi_resized
+                # 边框
+                cv2.rectangle(canvas, (x_offset, roi_y_start),
+                              (x_offset + new_w, roi_y_start + roi_height), (180, 180, 180), 1)
+
+    # --- 曲线区域 ---
+    curve_y_start = roi_y_start + roi_height
+    cv2.line(canvas, (0, curve_y_start), (total_w, curve_y_start), (200, 200, 200), 1)
+
+    plot_x0 = margin + 30  # 左边留空给Y轴标签
+    plot_x1 = total_w - margin
+    plot_y0 = curve_y_start + margin
+    plot_y1 = curve_y_start + curve_height - margin
+    plot_h = plot_y1 - plot_y0
+    plot_w = plot_x1 - plot_x0
+
+    # 绘制边框
+    cv2.rectangle(canvas, (plot_x0, plot_y0), (plot_x1, plot_y1), (200, 200, 200), 1)
+
+    # 归一化 gradient
+    g_min = gradient.min()
+    g_max = gradient.max()
+    g_range = g_max - g_min
+    if g_range < 1e-6:
+        g_range = 1.0
+
+    # 绘制零线
+    zero_y = plot_y0 + int((0 - g_min) / g_range * plot_h)
+    zero_y = max(plot_y0, min(plot_y1, zero_y))
+    cv2.line(canvas, (plot_x0, zero_y), (plot_x1, zero_y), (180, 180, 180), 1, cv2.LINE_AA)
+
+    # 绘制阈值线
+    if threshold > 0:
+        thresh_pos_y = plot_y0 + int((threshold - g_min) / g_range * plot_h)
+        thresh_pos_y = max(plot_y0, min(plot_y1, thresh_pos_y))
+        cv2.line(canvas, (plot_x0, thresh_pos_y), (plot_x1, thresh_pos_y), (0, 0, 200), 1, cv2.LINE_AA)
+
+        thresh_neg_y = plot_y0 + int((-threshold - g_min) / g_range * plot_h)
+        thresh_neg_y = max(plot_y0, min(plot_y1, thresh_neg_y))
+        cv2.line(canvas, (plot_x0, thresh_neg_y), (plot_x1, thresh_neg_y), (0, 0, 200), 1, cv2.LINE_AA)
+
+    # 绘制 Y 轴标签
+    cv2.putText(canvas, f"{g_max:.0f}", (margin, plot_y0 + 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.3, (120, 120, 120), 1, cv2.LINE_AA)
+    cv2.putText(canvas, f"{g_min:.0f}", (margin, plot_y1),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.3, (120, 120, 120), 1, cv2.LINE_AA)
+
+    # 绘制 gradient 曲线
+    n = len(gradient)
+    if n > 1 and plot_w > 0:
+        points = []
+        for i in range(n):
+            x = plot_x0 + int(i * plot_w / (n - 1))
+            y = plot_y0 + int((gradient[i] - g_min) / g_range * plot_h)
+            y = max(plot_y0, min(plot_y1, y))
+            points.append([x, y])
+        points = np.array(points, dtype=np.int32)
+        cv2.polylines(canvas, [points], False, (0, 180, 180), 1, cv2.LINE_AA)
+
+    return canvas
+
+
+# ===========================================================================
 # MultiTargetWorkflow
 # ===========================================================================
 
@@ -702,6 +817,52 @@ class MultiTargetWorkflow:
         )
 
         return vis
+
+    def _save_profile_debug_images(
+        self,
+        target_index: int,
+        patch: np.ndarray,
+        measurement_objects: Dict[str, Any],
+    ) -> None:
+        """为每条 EdgePoint/EdgePair 保存独立的 profile 调试图。"""
+        if not self._debug_dir:
+            return
+
+        patch_gray = patch if len(patch.shape) == 2 else cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+
+        for d in self._measurement_defs:
+            obj_type = d["object_type"]
+            label = d["label"]
+            if obj_type not in ("EdgePoint", "EdgePair"):
+                continue
+
+            obj = measurement_objects.get(label)
+            if obj is None:
+                continue
+            measure = getattr(obj, "_cached_measure", None)
+            if measure is None or measure.last_gradient is None:
+                continue
+
+            # 提取摆正的 ROI
+            roi_img = None
+            try:
+                roi_img = measure.extract_roi(patch_gray)
+                if len(roi_img.shape) == 2:
+                    roi_img = cv2.cvtColor(roi_img, cv2.COLOR_GRAY2BGR)
+            except Exception:
+                pass
+
+            # 生成上下拼接图
+            profile_img = _build_profile_image(
+                roi_img, measure.last_gradient, measure.last_threshold,
+                label, obj_type,
+            )
+
+            # 保存
+            self._debug_save(
+                f"target_{target_index + 1:02d}_profile_{label}.png",
+                profile_img,
+            )
 
     # --- Per-type ROI drawing helpers ---
 
@@ -1672,6 +1833,53 @@ class MultiTargetWorkflow:
 
         return vis
 
+    def _save_profile_debug_images(
+        self,
+        target_index: int,
+        patch: np.ndarray,
+        measurement_objects: Dict[str, Any],
+    ) -> None:
+        """为每条 EdgePoint/EdgePair 保存独立的 profile 调试图。"""
+        if not self._debug_dir:
+            return
+
+        patch_gray = patch if len(patch.shape) == 2 else cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+
+        for d in self._measurement_defs:
+            obj_type = d["object_type"]
+            label = d["label"]
+            if obj_type not in ("EdgePoint", "EdgePair"):
+                continue
+
+            obj = measurement_objects.get(label)
+            if obj is None:
+                continue
+            measure = getattr(obj, "_cached_measure", None)
+            if measure is None or measure.last_gradient is None:
+                continue
+
+            # 提取摆正的 ROI
+            roi_img = None
+            try:
+                roi_img = measure.extract_roi(patch_gray)
+                if len(roi_img.shape) == 2:
+                    roi_img = cv2.cvtColor(roi_img, cv2.COLOR_GRAY2BGR)
+            except Exception:
+                pass
+
+            # 生成上下拼接图
+            profile_img = _build_profile_image(
+                roi_img, measure.last_gradient, measure.last_threshold,
+                label, obj_type,
+            )
+
+            # 保存
+            self._debug_save(
+                f"target_{target_index + 1:02d}_profile_{label}.png",
+                profile_img,
+            )
+
+
     # --- Per-type ROI drawing helpers ---
 
     @staticmethod
@@ -2089,6 +2297,7 @@ class MultiTargetWorkflow:
 
         # Run measurements directly on the straightened patch
         raw_results: Dict[str, Any] = {}  # label -> GeometricResult
+        measurement_objects: Dict[str, Any] = {}  # label -> MeasureObject (for debug profile)
         all_valid = True
         t_meas_start = time.perf_counter()
 
@@ -2104,6 +2313,7 @@ class MultiTargetWorkflow:
                     obj = factory(label, **params)
                     result = obj.measure(patch)
                     raw_results[label] = result
+                    measurement_objects[label] = obj
                     if not result.valid:
                         all_valid = False
 
@@ -2258,6 +2468,8 @@ class MultiTargetWorkflow:
             self._debug_save(
                 f"target_{index + 1:02d}_measured_{valid_str}.png", debug_vis
             )
+            # 保存 profile 调试图
+            self._save_profile_debug_images(index, patch, measurement_objects)
 
         # Map point results back to original image coordinates
         measurements = {}

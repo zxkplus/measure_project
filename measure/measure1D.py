@@ -42,6 +42,11 @@ class Halcon1DMeasure:
         self.length2 = length2
         self.interpolation = interpolation
         
+        # 缓存最近一次测量的 profile/gradient 数据（供 debug 可视化用）
+        self.last_profile: Optional[np.ndarray] = None
+        self.last_gradient: Optional[np.ndarray] = None
+        self.last_threshold: float = 0.0
+        
         # 计算仿射变换矩阵（将斜矩形转为正矩形）
         self.rotation_matrix = None
         self.inverse_matrix = None
@@ -157,6 +162,7 @@ class Halcon1DMeasure:
         # Step 2: 提取水平方向的灰度轮廓
         # 对每一列求平均，得到一维轮廓
         profile = np.mean(aligned, axis=0)  # shape: (length1,)
+        self.last_profile = profile  # 缓存供 debug 可视化
         
         # Debug 1: 显示原始灰度轮廓
         if debug:
@@ -176,6 +182,7 @@ class Halcon1DMeasure:
         
         # Step 4: 计算一阶导数
         gradient = np.gradient(profile_smooth)
+        self.last_gradient = gradient  # 缓存供 debug 可视化
         
         # Debug 3: 显示原始一阶导数
         if debug:
@@ -197,6 +204,7 @@ class Halcon1DMeasure:
         else:
             # 阈值范围 [0, 255]（默认，与Halcon一致）
             effective_threshold = threshold
+        self.last_threshold = effective_threshold  # 缓存供 debug 可视化
         
         # Debug 4: 显示缩放后的一阶导数
         if debug:
