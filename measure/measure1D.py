@@ -46,6 +46,8 @@ class Halcon1DMeasure:
         self.last_profile: Optional[np.ndarray] = None
         self.last_gradient: Optional[np.ndarray] = None
         self.last_threshold: float = 0.0
+        self._debug_save_dir = None  # debug image save dir
+        self._debug_step = 0
         
         # 计算仿射变换矩阵（将斜矩形转为正矩形）
         self.rotation_matrix = None
@@ -443,6 +445,21 @@ class Halcon1DMeasure:
         profile = np.mean(aligned, axis=0)
         return profile
     
+    def _debug_display(self, vis, window_name, wait_time=1000):
+        import os
+        if self._debug_save_dir:
+            os.makedirs(self._debug_save_dir, exist_ok=True)
+            self._debug_step += 1
+            safe_name = window_name.replace(' ', '_').replace(':', '_').replace('/', '_')
+            filename = os.path.join(
+                self._debug_save_dir,
+                f'{self._debug_step:02d}_{safe_name}.png'
+            )
+            cv2.imwrite(filename, vis)
+        cv2.imshow(window_name, vis)
+        cv2.waitKey(wait_time)
+        cv2.destroyAllWindows()
+
     def _debug_profile(self, profile: np.ndarray, title: str, 
                       color: Tuple[int, int, int] = (0, 255, 0),
                       zero_line: bool = False, window_name: str = 'Debug_Profile',wait_time = 1000):
@@ -498,9 +515,7 @@ class Halcon1DMeasure:
         range_text = f'[{profile_min:.1f}, {profile_max:.1f}]'
         draw_text_shadow(vis, range_text, (10, img_height - 10), color=(100, 100, 100), font_scale=0.4, thickness=1)
         
-        cv2.imshow(window_name, vis)
-        cv2.waitKey(wait_time)
-        cv2.destroyAllWindows()
+        self._debug_display(vis, window_name, wait_time)
     
     def _debug_profile_with_peaks(self, profile: np.ndarray, positions: List[float], 
                                   amplitudes: List[float], title: str,
@@ -580,9 +595,7 @@ class Halcon1DMeasure:
         stats_text = f'Peaks: {len(positions)} (+{sum(1 for a in amplitudes if a > 0)}/-{sum(1 for a in amplitudes if a < 0)})'
         draw_text_shadow(vis, stats_text, (10, img_height - 10), color=(100, 100, 100), font_scale=0.4, thickness=1)
         
-        cv2.imshow(window_name, vis)
-        cv2.waitKey(wait_time)
-        cv2.destroyAllWindows()
+        self._debug_display(vis, window_name, wait_time)
     
     def _debug_roi_with_peaks(self, roi: np.ndarray, positions: List[float], 
                              amplitudes: List[float], window_name: str = 'Debug_ROI_with_Peaks',wait_time=1000):
@@ -633,9 +646,7 @@ class Halcon1DMeasure:
         # 绘制边框
         cv2.rectangle(vis, (0, 0), (w-1, h-1), (0, 0, 0), 2)
         
-        cv2.imshow(window_name, vis)
-        cv2.waitKey(wait_time)
-        cv2.destroyAllWindows()
+        self._debug_display(vis, window_name, wait_time)
     
     def _debug_original_with_edges(self, img: np.ndarray, row_edges: List[float], 
                                    col_edges: List[float], amplitudes: List[float],
@@ -696,9 +707,7 @@ class Halcon1DMeasure:
         roi_info = f'ROI: ({self.col:.0f},{self.row:.0f}) {np.degrees(self.angle):.1f}°'
         draw_text_shadow(vis, roi_info, (10, 55), color=(255, 255, 255), font_scale=0.5, thickness=1)
         
-        cv2.imshow(window_name, vis)
-        cv2.waitKey(wait_time)
-        cv2.destroyAllWindows()
+        self._debug_display(vis, window_name, wait_time)
     
     def draw_roi_on_image(self, img: np.ndarray, 
                          rect_color: Tuple[int, int, int] = (0, 255, 0),
@@ -756,9 +765,7 @@ class Halcon1DMeasure:
         cv2.putText(vis_img, angle_text, text_pos,
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
         if wait_time != -1 and wait_time > 0:
-            cv2.imshow("draw_roi_on_image",vis_img)
-            cv2.waitKey(wait_time)
-            cv2.destroyAllWindows()
+            self._debug_display(vis_img, "draw_roi_on_image", wait_time)
         return vis_img
 
     def display_results(self, img: np.ndarray, 
@@ -877,16 +884,10 @@ class Halcon1DMeasure:
         # 添加ROI信息
         roi_info = f'ROI: ({self.col:.0f},{self.row:.0f}) {np.degrees(self.angle):.1f}°'
         draw_text_shadow(vis, roi_info, (10, 55), color=(255, 255, 255), font_scale=0.5, thickness=1)
-        
-        # 显示结果
         if wait_time >= 0:
-            cv2.imshow(window_name, vis)
-            cv2.waitKey(wait_time)
-            if wait_time > 0:
-                cv2.destroyAllWindows()
+            self._debug_display(vis, window_name, wait_time)
         
         return vis
-
 # 测试和可视化函数
 def create_test_image() -> np.ndarray:
     """创建测试图像：包含几个黑色条带"""
