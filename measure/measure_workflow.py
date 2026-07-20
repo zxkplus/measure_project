@@ -1391,6 +1391,24 @@ class FitLineObject(MeasureObject):
                 "max_error": r.meta.get("max_error", 0.0),
             }
         vis = obj.visualize(image, **kwargs)
+        # Draw original template line (cyan dashed) for comparison with fitted line
+        s = (int(self._calibrated_start[1]), int(self._calibrated_start[0]))
+        e = (int(self._calibrated_end[1]),   int(self._calibrated_end[0]))
+        # Manual dashed: draw short segments alternating black/cyan
+        dx, dy = e[0] - s[0], e[1] - s[1]
+        line_len = np.sqrt(dx**2 + dy**2)
+        if line_len > 1e-6:
+            ux, uy = dx / line_len, dy / line_len
+            dash_len = 12
+            gap_len = 8
+            pos = 0.0
+            while pos < line_len:
+                seg_start = (int(s[0] + pos * ux), int(s[1] + pos * uy))
+                seg_end_pos = min(pos + dash_len, line_len)
+                seg_end = (int(s[0] + seg_end_pos * ux), int(s[1] + seg_end_pos * uy))
+                cv2.line(vis, seg_start, seg_end, (0, 0, 0), 3)
+                cv2.line(vis, seg_start, seg_end, (255, 255, 0), 2)
+                pos += dash_len + gap_len
         # Draw label near line midpoint
         mid_col = (self._calibrated_start[1] + self._calibrated_end[1]) / 2
         mid_row = (self._calibrated_start[0] + self._calibrated_end[0]) / 2

@@ -666,7 +666,7 @@ class TemplateView(tk.Frame):
                     )
                     items.append(rect)
 
-                    # Bidirectional arrows along the perpendicular (search) direction
+                    # Single arrow showing the scan direction (perpendicular to line)
                     tail_r = pr - n_r * measure_length2 * 0.8
                     tail_c = pc - n_c * measure_length2 * 0.8
                     tip_r  = pr + n_r * measure_length2 * 0.8
@@ -675,7 +675,7 @@ class TemplateView(tk.Frame):
                     tx_a, ty_a = self._tmpl_to_canvas(tip_r,  tip_c)
                     arr = self._canvas.create_line(
                         sx_a, sy_a, tx_a, ty_a,
-                        fill=arrow_color, width=1, arrow=tk.BOTH,
+                        fill=arrow_color, width=1, arrow=tk.LAST,
                     )
                     items.append(arr)
 
