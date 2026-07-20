@@ -452,6 +452,8 @@ def _build_profile_image(
                 cv2.FONT_HERSHEY_SIMPLEX, 0.3, (120, 120, 120), 1, cv2.LINE_AA)
     cv2.putText(canvas, f"{g_min:.0f}", (margin, plot_y1),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.3, (120, 120, 120), 1, cv2.LINE_AA)
+    cv2.putText(canvas, "0", (margin, zero_y + 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.3, (80, 80, 80), 1, cv2.LINE_AA)
 
     # 绘制 gradient 曲线（与采样框长度对齐）
     n = len(gradient)
