@@ -460,7 +460,7 @@ def _build_profile_image(
         if roi_img is not None and roi_img.shape[0] > 0:
             roi_h = roi_img.shape[0]
             scale = roi_height / roi_h
-            curve_width = int(n * scale)
+            curve_width = min(int(n * scale), plot_w)
         else:
             curve_width = plot_w
         curve_x0 = plot_x0 + (plot_w - curve_width) // 2
