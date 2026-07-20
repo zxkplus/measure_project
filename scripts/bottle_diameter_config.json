@@ -1,0 +1,12 @@
+{
+    "model_path": "models/瓶身直径测量/",
+    "measurement_key": "TwoPointsDistance_2",
+
+    "diameter_range": {
+        "min_px": 1800.0,
+        "max_px": 1840.0
+    },
+    "max_diameter_variation_px": 5.0,
+
+    "target_index": 0
+}
