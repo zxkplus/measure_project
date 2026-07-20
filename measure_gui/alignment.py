@@ -238,7 +238,7 @@ class SingleBoxAlignment(AlignmentStrategy):
         matched_col: float,
         rotation_deg: float,
     ) -> AlignResult:
-        target_angle = self._box_angle_deg + rotation_deg
+        target_angle = self._box_angle_deg - rotation_deg
         patch, M_inv_3x3 = crop_and_straighten(
             inspection_image,
             (matched_row, matched_col),
@@ -453,7 +453,7 @@ class MultiPointAlignment(AlignmentStrategy):
         match successfully.
         """
         # Stage 1: rigid crop (same as SingleBoxAlignment)
-        target_angle = self._box_angle_deg + rotation_deg
+        target_angle = self._box_angle_deg - rotation_deg
         rigid_patch, M_rigid_3x3 = crop_and_straighten(
             inspection_image,
             (matched_row, matched_col),

@@ -1304,7 +1304,7 @@ class MultiTargetWorkflow:
         if not valid_match:
             # Even for invalid matches, store the absolute rotation for correct
             # box drawing in debug visualizations.
-            absolute_rotation = self._alignment.box_angle_deg + rotation_deg
+            absolute_rotation = self._alignment.box_angle_deg - rotation_deg
             return TargetResult(
                 id=index,
                 score=match_score,
@@ -2275,7 +2275,7 @@ class MultiTargetWorkflow:
         if not valid_match:
             # Even for invalid matches, store the absolute rotation for correct
             # box drawing in debug visualizations.
-            absolute_rotation = self._alignment.box_angle_deg + rotation_deg
+            absolute_rotation = self._alignment.box_angle_deg - rotation_deg
             return TargetResult(
                 id=index,
                 score=match_score,
@@ -2496,7 +2496,7 @@ class MultiTargetWorkflow:
         return TargetResult(
             id=index + 1,
             score=match_score,
-            rotation_deg=self._alignment.box_angle_deg + rotation_deg,
+            rotation_deg=self._alignment.box_angle_deg - rotation_deg,
             scale=scale,
             center_row=matched_row,
             center_col=matched_col,
@@ -2866,7 +2866,7 @@ def _compute_target_box_corners(
     return compute_rotated_box_corners(
         (target.center_row, target.center_col),
         size,
-        target.rotation_deg,
+        -target.rotation_deg,
     )
 
 
