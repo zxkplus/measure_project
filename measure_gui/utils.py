@@ -96,7 +96,7 @@ def crop_and_straighten(
     #   local_row = r - h/2
     #   local_col = c - w/2
     # We then rotate by +angle_deg and translate to (cy, cx) in the original.
-    theta = np.deg2rad(-angle_deg)
+    theta = np.deg2rad(angle_deg)
     cos_a = np.cos(theta)
     sin_a = np.sin(theta)
 
