@@ -176,8 +176,8 @@ class FitLineDialog(BaseParamDialog):
         row += 1
 
         self._add_int_entry(main, "Num Measures (测量线数)", "num_measures", 10, row, 2, 200); row += 1
-        self._add_float_entry(main, "Measure Length1 (半长)", "measure_length1", 10.0, row, 0.1, 1000.0); row += 1
-        self._add_float_entry(main, "Measure Length2 (半宽)", "measure_length2", 25.0, row, 0.1, 1000.0); row += 1
+        self._add_float_entry(main, "平均宽度 (Avg Width)", "measure_length1", 10.0, row, 0.1, 1000.0); row += 1
+        self._add_float_entry(main, "搜索深度 (Search Depth)", "measure_length2", 25.0, row, 0.1, 1000.0); row += 1
         self._add_float_entry(main, "Sigma (平滑)", "sigma", 1.0, row, 0.0, 100.0); row += 1
         self._add_float_entry(main, "Threshold (阈值)", "threshold", 30.0, row, 0.0, 255.0); row += 1
         self._add_combo(main, "Transition (边缘方向)", "transition",

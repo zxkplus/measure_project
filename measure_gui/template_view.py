@@ -614,8 +614,8 @@ class TemplateView(tk.Frame):
         start = params["start"]
         end = params["end"]
         num_measures = params.get("num_measures", 10)
-        measure_length1 = params.get("measure_length1", 10.0)  # half-length along line
-        measure_length2 = params.get("measure_length2", 25.0)  # half-width perpendicular
+        measure_length1 = params.get("measure_length1", 10.0)  # averaging half-width along line
+        measure_length2 = params.get("measure_length2", 25.0)  # search half-depth perpendicular
 
         sx, sy = self._tmpl_to_canvas(start[0], start[1])
         ex, ey = self._tmpl_to_canvas(end[0], end[1])
