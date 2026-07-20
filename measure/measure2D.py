@@ -103,7 +103,7 @@ class LineMeasureObject(_BaseMeasureObject):
             start: 直线起点 (row, col)
             end: 直线终点 (row, col)
             measure_length1: 测量矩形沿直线方向的半长度
-            measure_length2: 测量矩形垂直直线方向的半宽度
+            measure_length2: 测量矩形垂直直线方向的搜索深度
             num_measures: 测量点数（默认10）
             sigma: 高斯平滑参数（默认1.0）
             threshold: 边缘检测阈值（默认30.0）
@@ -187,8 +187,8 @@ class LineMeasureObject(_BaseMeasureObject):
                 row=rect['center'][0],
                 col=rect['center'][1],
                 angle=rect['angle'],
-                length1=rect['length1'],  # 沿测量方向的半长度
-                length2=rect['length2'],  # 垂直测量方向的半宽度
+                length1=rect['length2'],  # measure_length2 → 搜索深度(⊥直线)
+                length2=rect['length1'],  # measure_length1 → 平均宽度(沿直线)
                 interpolation='linear'
             )
             
@@ -198,7 +198,7 @@ class LineMeasureObject(_BaseMeasureObject):
                     image, self.sigma, self.threshold, self.transition, 'all'
                 )
                 
-                # 收集边缘点（只取第一个边缘，避免重复）
+                # 选择距离初始直线最近的边缘点
                 if len(row_edges) > 0:
                     # 选择最接近直线中心的边缘点
                     # 计算 ROI 中心到直线起点的距离

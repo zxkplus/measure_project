@@ -667,18 +667,17 @@ class TemplateView(tk.Frame):
                     items.append(rect)
 
                     # Bidirectional arrows along the perpendicular (search) direction
-                    for direction in (+1, -1):
-                        tail_r = pr + direction * n_r * measure_length2 * 0.3
-                        tail_c = pc + direction * n_c * measure_length2 * 0.3
-                        tip_r  = pr + direction * n_r * measure_length2 * 0.8
-                        tip_c  = pc + direction * n_c * measure_length2 * 0.8
-                        sx_a, sy_a = self._tmpl_to_canvas(tail_r, tail_c)
-                        tx_a, ty_a = self._tmpl_to_canvas(tip_r,  tip_c)
-                        arr = self._canvas.create_line(
-                            sx_a, sy_a, tx_a, ty_a,
-                            fill=arrow_color, width=1, arrow=tk.LAST,
-                        )
-                        items.append(arr)
+                    tail_r = pr - n_r * measure_length2 * 0.8
+                    tail_c = pc - n_c * measure_length2 * 0.8
+                    tip_r  = pr + n_r * measure_length2 * 0.8
+                    tip_c  = pc + n_c * measure_length2 * 0.8
+                    sx_a, sy_a = self._tmpl_to_canvas(tail_r, tail_c)
+                    tx_a, ty_a = self._tmpl_to_canvas(tip_r,  tip_c)
+                    arr = self._canvas.create_line(
+                        sx_a, sy_a, tx_a, ty_a,
+                        fill=arrow_color, width=1, arrow=tk.BOTH,
+                    )
+                    items.append(arr)
 
         return items
 

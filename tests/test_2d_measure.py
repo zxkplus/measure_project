@@ -295,11 +295,11 @@ class TestLineMeasureObject:
         line_obj = LineMeasureObject(
             start=start,
             end=end,
-            measure_length1=40,
+            measure_length1=50,
             measure_length2=100,
             num_measures=10,
-            sigma=5.0,
-            threshold=40
+            sigma=3.0,
+            threshold=15
         )
         
         # 执行测量
