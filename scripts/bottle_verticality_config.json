@@ -1,0 +1,5 @@
+{
+    "model_path": "models/瓶身垂直偏差/",
+    "threshold_px": 5.0,
+    "target_index": 0
+}
