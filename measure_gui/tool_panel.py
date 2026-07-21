@@ -61,11 +61,13 @@ class ToolPanel(ttk.Frame):
         self.on_tool_delete: Optional[Callable] = None
         self.on_alignment_mode_changed: Optional[Callable] = None
         self.on_export_csv: Optional[Callable] = None
+        self.on_debug_save_changed: Optional[Callable[[bool], None]] = None
         self.on_tool_visibility_changed: Optional[Callable] = None  # (label, visible) -> None
 
         # State
         self._template_created: bool = False
         self._tool_visibility: Dict[str, bool] = {}  # label -> bool
+        self._debug_save_enabled: bool = False
 
         self._build_ui()
 
@@ -294,11 +296,21 @@ class ToolPanel(ttk.Frame):
         exec_frame = ttk.Frame(f, padding=5)
         exec_frame.pack(fill=tk.X, padx=4, pady=5)
 
+        # Debug save checkbox
+        btn_frame = ttk.Frame(exec_frame)
+        btn_frame.pack(fill=tk.X)
+        self._debug_save_var = tk.BooleanVar(value=False)
+        self._debug_cb = ttk.Checkbutton(
+            btn_frame, text="保存调试图片",
+            variable=self._debug_save_var,
+            command=self._on_debug_save_toggle,
+        )
+        self._debug_cb.pack(side=tk.LEFT, padx=(0, 4))
         self._exec_btn = ttk.Button(
-            exec_frame, text="▶ 执行测量",
+            btn_frame, text="▶ 执行测量",
             command=lambda: self._fire(self.on_execute),
         )
-        self._exec_btn.pack(fill=tk.X, ipady=5)
+        self._exec_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=5)
 
         self._progress = ttk.Progressbar(exec_frame, mode="indeterminate")
         self._progress.pack(fill=tk.X, pady=2)
@@ -441,6 +453,20 @@ class ToolPanel(ttk.Frame):
         self._alignment_var.set(
             "多点仿射" if mode == "multi_point" else "旋转框"
         )
+
+    @property
+    def debug_save_enabled(self) -> bool:
+        """Whether debug image saving is enabled."""
+        return self._debug_save_enabled
+
+    @debug_save_enabled.setter
+    def debug_save_enabled(self, value: bool):
+        self._debug_save_enabled = value
+        self._debug_save_var.set(value)
+
+    def _on_debug_save_toggle(self):
+        self._debug_save_enabled = self._debug_save_var.get()
+        self._fire(self.on_debug_save_changed, self._debug_save_enabled)
 
     def set_progress(self, running: bool):
         """Start/stop the progress bar."""

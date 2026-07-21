@@ -186,6 +186,7 @@ class MeasureApp:
         self.tool_panel.on_export_csv = self._on_export_csv
         self.tool_panel.on_alignment_mode_changed = self._on_alignment_mode_changed
         self.tool_panel.on_tool_visibility_changed = self._on_tool_visibility_changed
+        self.tool_panel.on_debug_save_changed = self._on_debug_save_changed
 
         # Right side: vertical paned window
         self._right_pane = ttk.PanedWindow(self._main_pane, orient=tk.VERTICAL)
@@ -554,14 +555,8 @@ class MeasureApp:
             # Sync workflow params from tool panel
             self._sync_workflow_params()
 
-            # Set debug output directory (project_dir/debug_timestamp/)
-            if self._current_project_dir:
-                import time
-                debug_dir = os.path.join(
-                    self._current_project_dir,
-                    f"debug_{time.strftime('%Y%m%d_%H%M%S')}",
-                )
-                self._workflow.debug_dir = debug_dir
+            # Sync debug save toggle state (refresh dir timestamp)
+            self._on_debug_save_changed(self.tool_panel.debug_save_enabled)
 
             results = self._workflow.measure(self._inspection_image)
 
@@ -1041,6 +1036,20 @@ class MeasureApp:
         self.tool_panel.remove_tool_from_list(label)
 
         self._status_text.set(f"已删除测量工具: {label}")
+
+    def _on_debug_save_changed(self, enabled: bool):
+        """Toggle debug image saving."""
+        if self._workflow is None:
+            return
+        if enabled and self._current_project_dir:
+            import time
+            debug_dir = os.path.join(
+                self._current_project_dir,
+                f"debug_{time.strftime('%Y%m%d_%H%M%S')}",
+            )
+            self._workflow.debug_dir = debug_dir
+        else:
+            self._workflow.debug_dir = None
 
     def _on_tool_visibility_changed(self, label: str, visible: bool):
         """Toggle tool overlay visibility."""
