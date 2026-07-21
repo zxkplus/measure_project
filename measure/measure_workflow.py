@@ -676,6 +676,9 @@ class TemplatePointObject(MeasureObject):
             "coarse_fine": self._coarse_fine,
             "coarse_angle_step": self._coarse_angle_step,
             "coarse_scale_step": self._coarse_scale_step,
+            "pyramid_decimate": self._template_point.pyramid_decimate,
+            "pyramid_max_template_size": self._template_point.pyramid_max_template_size,
+            "pyramid_scale": self._template_point._pyramid_scale,
             "multi_target": self._multi_target,
             "max_matches": self._max_matches,
         }

@@ -2638,6 +2638,8 @@ class MultiTargetWorkflow:
             "overlap": self._overlap,
             "coarse_fine": self._coarse_fine,
             "coarse_angle_step": self._coarse_angle_step,
+            "pyramid_decimate": tp.pyramid_decimate,
+            "pyramid_max_template_size": tp.pyramid_max_template_size,
             "preprocessor_data": tp.preprocessor.serialize(),
             "click_row": tp.click_row,
             "click_col": tp.click_col,
@@ -2750,9 +2752,12 @@ class MultiTargetWorkflow:
         tp.overlap = wf._overlap
         tp.result = None
         # 初始化 pyramid 相关属性
-        tp.pyramid_decimate = 0
-        tp.pyramid_max_template_size = 400
-        tp._pyramid_scale = 1.0
+        tp.pyramid_decimate = meta.get("pyramid_decimate", 0)
+        tp.pyramid_max_template_size = meta.get("pyramid_max_template_size", 400)
+        tp._pyramid_scale = 1.0  # 由 calc_pyramid_scale 延迟计算
+        if tp.pyramid_decimate > 0 and tp.pyramid_max_template_size > 0:
+            max_dim = max(tp._crop_h, tp._crop_w)
+            tp._pyramid_scale = min(1.0, tp.pyramid_max_template_size / float(max_dim))
         wf._alignment._template_point = tp
 
         # For multi-point alignment, rebuild control point templates
