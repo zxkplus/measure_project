@@ -476,7 +476,9 @@ class TemplatePoint:
         coarse_valid = coarse_result.get('valid', False)
 
         # Compute ROI in the full-res search image
-        roi_size = max(self._crop_h, self._crop_w) * 1.2
+        # 金字塔模式下 ROI 基于降采样后的尺寸，避免全分辨率大 ROI 导致精搜索过慢
+        _pyr_scale = self._pyramid_scale if self._pyramid_scale < 1.0 else 1.0
+        roi_size = max(self._crop_h, self._crop_w) * 1.2 * _pyr_scale
         half_roi = roi_size / 2.0
 
         # Convert to search-image-local coordinates (relative to r1, c1)
@@ -501,7 +503,8 @@ class TemplatePoint:
         _orig_fine_h = self._crop_h
         _orig_fine_w = self._crop_w
         # Only downscale if ROI is large enough
-        fine_scale = 0.5
+        # 金字塔模式下精搜索与金字塔同比例，否则用 0.5
+        fine_scale = _pyr_scale if _pyr_scale < 1.0 else 0.5
         fine_roi = cv2.resize(roi_img, (0, 0), fx=fine_scale, fy=fine_scale, interpolation=cv2.INTER_LINEAR)
         fine_tmpl = cv2.resize(self.edge_template, (0, 0), fx=fine_scale, fy=fine_scale, interpolation=cv2.INTER_LINEAR)
         self.edge_template = fine_tmpl
