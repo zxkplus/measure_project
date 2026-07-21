@@ -249,6 +249,8 @@ class TemplateMatchPointDialog(BaseParamDialog):
             "angle_range_half": 15.0,
             "angle_step": 1.0,
             "use_subpixel": True,
+            "pyramid_decimate": 0,
+            "pyramid_max_template_size": 400,
         }
         if params:
             defaults.update(params)
@@ -279,5 +281,9 @@ class TemplateMatchPointDialog(BaseParamDialog):
         cb.grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
         self._vars["use_subpixel"] = var
         row += 1
+
+        self._add_combo(main, "金字塔降采样", "pyramid_decimate",
+                        ["禁用", "2x", "4x (推荐)", "8x"],
+                        "禁用", row); row += 1
 
         self._add_buttons(main, row + 1)
