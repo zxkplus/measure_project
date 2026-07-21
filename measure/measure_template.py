@@ -491,7 +491,51 @@ class TemplatePoint:
         roi_c2 = min(search_img.shape[1], int(local_center_col + half_roi))
 
         if roi_r2 - roi_r1 < self._crop_h or roi_c2 - roi_c1 < self._crop_w:
-            # ROI too small for template - fall back to coarse result
+            # ROI too small for full-res template
+            if self._pyramid_scale < 1.0:
+                # 金字塔模式：在降采样空间做精搜索，而非直接 fallback
+                pyr_scale = self._pyramid_scale
+                pyr_search = self._pyramid_downsample(search_img)
+                pyr_tmpl = self._pyramid_downsample(self.edge_template)
+
+                # coarse_center 是原始图像坐标，转为 search_img 局部坐标再降采样
+                pyr_center_row = (coarse_center_row - r1) * pyr_scale
+                pyr_center_col = (coarse_center_col - c1) * pyr_scale
+
+                # 取降采样空间的 ROI（比模板稍大）
+                p_roi_size = max(pyr_tmpl.shape[0], pyr_tmpl.shape[1]) * 1.5
+                p_half = p_roi_size / 2.0
+                pr1 = max(0, int(pyr_center_row - p_half))
+                pr2 = min(pyr_search.shape[0], int(pyr_center_row + p_half))
+                pc1 = max(0, int(pyr_center_col - p_half))
+                pc2 = min(pyr_search.shape[1], int(pyr_center_col + p_half))
+
+                if pr2 - pr1 >= pyr_tmpl.shape[0] and pc2 - pc1 >= pyr_tmpl.shape[1]:
+                    # 在降采样 ROI 上做单角度匹配
+                    pyr_roi = pyr_search[pr1:pr2, pc1:pc2]
+                    fine_heatmap = cv2.matchTemplate(pyr_roi, pyr_tmpl, cv2.TM_CCOEFF_NORMED)
+                    _, fine_score, _, fine_max_loc = cv2.minMaxLoc(fine_heatmap)
+
+                    # 亚像素精化
+                    fine_x, fine_y = float(fine_max_loc[0]), float(fine_max_loc[1])
+                    if self.use_subpixel and fine_heatmap.shape[0] >= 3 and fine_heatmap.shape[1] >= 3:
+                        try:
+                            sp_x, sp_y = self._refine_subpixel_2d(fine_heatmap, int(fine_y), int(fine_x))
+                            fine_x, fine_y = sp_x, sp_y
+                        except Exception:
+                            pass
+
+                    # 映射回全分辨率原始图像坐标
+                    orig_row = r1 + (pr1 + fine_y + pyr_tmpl.shape[0] / 2.0) / pyr_scale
+                    orig_col = c1 + (pc1 + fine_x + pyr_tmpl.shape[1] / 2.0) / pyr_scale
+
+                    result = dict(coarse_result)
+                    result['matched_row'] = orig_row
+                    result['matched_col'] = orig_col
+                    result['match_score'] = float(fine_score)
+                    result['fine_refined'] = True
+                    return result
+
             return coarse_result
 
         # Crop ROI from full-res search image
