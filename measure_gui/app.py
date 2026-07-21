@@ -534,12 +534,20 @@ class MeasureApp:
             # Sync debug save toggle state (refresh dir timestamp)
             self._on_debug_save_changed(self.tool_panel.debug_save_enabled)
 
+            import time
+            _t_start = time.perf_counter()
             results = self._workflow.measure(self._inspection_image)
+            _elapsed = time.perf_counter() - _t_start
+
+            # 生成带耗时的摘要文本
+            summary = self._workflow.summary_text()
+            summary += f"\n\n{'='*40}\n"
+            summary += f"执行耗时: {_elapsed*1000:.0f}ms ({_elapsed:.2f}s)"
 
             # Display results
             self.result_panel.set_results(
                 results,
-                self._workflow.summary_text(),
+                summary,
             )
 
             # Visualize on inspection canvas
