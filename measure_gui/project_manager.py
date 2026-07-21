@@ -265,7 +265,7 @@ class ProjectManager:
 
         # Enable execute button
         app.tool_panel.set_template_created(True)
-        app._exec_btn.state(["!disabled"])
+        # _exec_btn removed with toolbar in app.py, state managed by tool_panel
 
         # Update window title
         project_name = os.path.basename(project_dir)
@@ -309,7 +309,7 @@ class ProjectManager:
             app.tool_panel.add_tool_to_list(d["label"], d["object_type"])
 
         app.tool_panel.set_template_created(True)
-        app._exec_btn.state(["!disabled"])
+        # _exec_btn removed with toolbar in app.py, state managed by tool_panel
         app._status_text.set(f"项目已加载: {os.path.basename(filepath)} (旧格式)")
         app._notebook.select(0)
 
