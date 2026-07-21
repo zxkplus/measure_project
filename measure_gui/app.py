@@ -66,7 +66,6 @@ class MeasureApp:
 
         # Build UI
         self._build_menu()
-        self._build_toolbar()
         self._build_main_area()
         self._build_statusbar()
 
@@ -135,29 +134,6 @@ class MeasureApp:
         menubar.add_cascade(label="帮助", menu=help_menu)
         help_menu.add_command(label="使用说明", command=self._show_help)
         help_menu.add_command(label="关于", command=self._show_about)
-
-    def _build_toolbar(self):
-        toolbar = ttk.Frame(self.root)
-        toolbar.pack(fill=tk.X, padx=2, pady=2)
-
-        ttk.Button(toolbar, text="📁 参考图", command=self._load_reference).pack(side=tk.LEFT, padx=1)
-        ttk.Button(toolbar, text="📁 检测图", command=self._load_inspection).pack(side=tk.LEFT, padx=1)
-        ttk.Button(toolbar, text="💾 保存", command=self._save_project).pack(side=tk.LEFT, padx=1)
-        ttk.Button(toolbar, text="📂 加载", command=self._load_project).pack(side=tk.LEFT, padx=1)
-
-        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
-
-        self._exec_btn = ttk.Button(
-            toolbar, text="▶ 执行测量 (Ctrl+E)",
-            command=self._execute, style="Execute.TButton",
-        )
-        self._exec_btn.pack(side=tk.LEFT, padx=1)
-        self._exec_btn.state(["disabled"])
-
-        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
-
-        self._mode_label = ttk.Label(toolbar, text="教学模式", foreground="blue")
-        self._mode_label.pack(side=tk.LEFT, padx=5)
 
     def _build_main_area(self):
         # Horizontal PanedWindow
@@ -464,7 +440,7 @@ class MeasureApp:
                         self.tool_panel.add_tool_to_list(d["label"], d["object_type"])
 
                     self.tool_panel.set_template_created(True)
-                    self._exec_btn.state(["!disabled"])
+                    pass  # toolbar removed, state managed by tool_panel
 
                     # Save as full project now
                     ProjectManager.save_project(project_dir, self)
@@ -508,7 +484,7 @@ class MeasureApp:
         self.template_view.clear_tools()
         self.tool_panel.clear_tool_list()
         self.result_panel.clear_results()
-        self._exec_btn.state(["disabled"])
+        pass  # toolbar removed, state managed by tool_panel
 
         project_name = os.path.basename(project_dir)
         self.root.title(f"工业视觉测量系统 — {project_name}")
@@ -928,7 +904,7 @@ class MeasureApp:
 
         # Enable execute
         self.tool_panel.set_template_created(True)
-        self._exec_btn.state(["!disabled"])
+        pass  # toolbar removed, state managed by tool_panel
         self._status_text.set(f"模板已创建: {width:.0f}×{height:.0f} @ {angle_deg:.1f}°")
 
         # Popup notification
@@ -1237,11 +1213,11 @@ class MeasureApp:
         """Update mode based on active tab."""
         tab_idx = self._notebook.index(self._notebook.select())
         if tab_idx == 0:
-            self._mode_label.config(text="教学模式", foreground="blue")
+            pass  # toolbar removed, mode handled by tool_panel
             if self._ref_canvas.roi_center is None or not self._ref_canvas.roi_confirmed:
                 self._ref_canvas.set_mode(CanvasMode.DRAW_ROI)
         else:
-            self._mode_label.config(text="检测模式", foreground="green")
+            pass  # toolbar removed, mode handled by tool_panel
             self._insp_canvas.set_mode(CanvasMode.VIEW_RESULT)
 
     # ------------------------------------------------------------------
