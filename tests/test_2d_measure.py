@@ -7,6 +7,7 @@ Metrology 模块测试用例
 3. MetrologyModel - 模型管理器
 """
 
+import math
 import cv2
 import numpy as np
 import sys
@@ -165,35 +166,41 @@ class TestLineMeasureObject:
         print("测试：水平直线测量")
         print("="*60)
         
-        # 创建测试图像（水平直线）
+        # 创建测试图像（水平直线），线宽3px避免覆盖整个搜索区域
         img = create_test_image_with_line(
             width=500, height=400,
             line_angle=0,  # 水平
             line_position=(200, 250),  # row=200
-            line_thickness=100
+            line_thickness=3
         )
         
-        # 创建直线测量对象
+        # 创建直线测量对象（矩形容器沿 row=200 的水平线排列）
         line_obj = LineMeasureObject(
-            start=(250, 50),      # 起点 (row, col)
-            end=(250, 450),       # 终点 (row, col)
+            start=(200, 50),      # 起点 (row, col) — 对齐线位置
+            end=(200, 450),       # 终点 (row, col)
             measure_length1=10,   # 沿直线方向半长度
-            measure_length2=25,   # 垂直直线方向半宽度
-            num_measures=12,
+            measure_length2=25,   # 垂直直线方向半宽度（搜索深度）
+            num_measures=10,
             sigma=1.0,
             threshold=20.0
         )
         
         # 执行测量
         result = line_obj.measure(img)
-        line_obj.visualize(img,True,False,False,wait_time=1000)
-        # 验证结果
+        
+        # 验证线段有足够长度，而非退化成一个点
         assert result is not None, "测量结果不应为空"
-        assert result['num_points'] >= 10, f"边缘点数应>=10，实际为{result['num_points']}"
+        fitted_len = math.hypot(
+            result['end'][0] - result['start'][0],
+            result['end'][1] - result['start'][1],
+        )
+        assert fitted_len > 50, f"拟合线段长度不足（{fitted_len:.1f}px），疑似边缘点退化"
+        assert result['num_points'] >= 8, f"边缘点数应>=8，实际为{result['num_points']}"
         
         # 验证直线角度（应该接近水平，即接近0或π）
         angle_deg = np.degrees(result['angle'])
         print(f"拟合直线角度: {angle_deg:.2f}°")
+        print(f"拟合线段长度: {fitted_len:.1f} px")
         print(f"边缘点数: {result['num_points']}")
         print(f"拟合误差: {result['mean_error']:.4f} px")
         
@@ -223,19 +230,20 @@ class TestLineMeasureObject:
         print("测试：垂直直线测量")
         print("="*60)
         
-        # 创建测试图像（垂直直线）
+        # 创建测试图像（垂直直线），线宽3px
         img = create_test_image_with_line(
             width=500, height=400,
             line_angle=np.pi/2,  # 垂直
-            line_position=(200, 250)  # col=250
+            line_position=(200, 250),  # col=250
+            line_thickness=3
         )
         
         # 创建直线测量对象
         line_obj = LineMeasureObject(
-            start=(50, 250),      # 起点 (row, col)
+            start=(50, 250),      # 起点 (row, col) — 沿 col=250 垂直排列
             end=(350, 250),       # 终点 (row, col)
-            measure_length1=25,   # 沿直线方向半长度
-            measure_length2=10,   # 垂直直线方向半宽度
+            measure_length1=10,   # 沿直线方向半长度
+            measure_length2=25,   # 垂直直线方向半宽度（搜索深度）
             num_measures=10,
             sigma=1.0,
             threshold=20.0
@@ -246,8 +254,16 @@ class TestLineMeasureObject:
         
         assert result is not None, "测量结果不应为空"
         
+        # 验证线段有足够长度，而非退化成一个点
+        fitted_len = math.hypot(
+            result['end'][0] - result['start'][0],
+            result['end'][1] - result['start'][1],
+        )
+        assert fitted_len > 50, f"拟合线段长度不足（{fitted_len:.1f}px），疑似边缘点退化"
+        
         angle_deg = np.degrees(result['angle'])
         print(f"拟合直线角度: {angle_deg:.2f}°")
+        print(f"拟合线段长度: {fitted_len:.1f} px")
         print(f"边缘点数: {result['num_points']}")
         print(f"拟合误差: {result['mean_error']:.4f} px")
         
@@ -274,37 +290,48 @@ class TestLineMeasureObject:
         print("测试：斜线测量")
         print("="*60)
         
-        # 创建测试图像（45度斜线）
-        angle = np.pi / 6  # 45度
+        # 创建测试图像（30度斜线），线宽3px
+        angle = np.pi / 6  # 30度
         img = create_test_image_with_line(
             width=500, height=400,
             line_angle=angle,
             line_position=(200, 250),
-            line_thickness=100
+            line_thickness=3
         )
         
-        # 计算斜线的起点和终点
-        length = 300
-        center_row, center_col = 200, 350
-        start = (center_row - length/2 * np.sin(angle), 
-                 center_col - length/2 * np.cos(angle))
-        end = (center_row + length/2 * np.sin(angle), 
-               center_col + length/2 * np.cos(angle))
+        # 线穿过 (200,250)，沿30°方向取足够长度
+        half_len = 150
+        start = (200 - half_len * np.sin(angle),
+                 250 - half_len * np.cos(angle))
+        end = (200 + half_len * np.sin(angle),
+               250 + half_len * np.cos(angle))
         
         # 创建直线测量对象
         line_obj = LineMeasureObject(
             start=start,
             end=end,
-            measure_length1=50,
-            measure_length2=100,
+            measure_length1=15,   # 沿直线方向半长度
+            measure_length2=30,   # 搜索深度，保证跨过3px宽的线
             num_measures=10,
             sigma=3.0,
-            threshold=15
+            threshold=10.0
         )
         
         # 执行测量
         result = line_obj.measure(img)
         assert result is not None, "测量结果不应为空"
+        
+        # 验证线段有足够长度，而非退化成一个点
+        fitted_len = math.hypot(
+            result['end'][0] - result['start'][0],
+            result['end'][1] - result['start'][1],
+        )
+        assert fitted_len > 50, f"拟合线段长度不足（{fitted_len:.1f}px），疑似边缘点退化"
+        
+        # 验证角度与预期30°接近（线方向±180°内）
+        angle_deg = np.degrees(result['angle']) % 180
+        expected_deg = 30.0
+        assert abs(angle_deg - expected_deg) < 5,             f"拟合角度偏差过大: {angle_deg:.2f}° (预期{expected_deg}°)"
         
         # 可视化
         vis_img = line_obj.visualize(img)
@@ -313,15 +340,11 @@ class TestLineMeasureObject:
         cv2.imwrite(os.path.join(output_dir, 'test_diagonal_line.png'), vis_img)
         print(f"可视化结果已保存到: {output_dir}/test_diagonal_line.png")
         
-        cv2.imshow('Diagonal Line Measure', vis_img)
-        cv2.waitKey(1000)
-        
-        angle_deg = np.degrees(result['angle'])
-        print(f"拟合直线角度: {angle_deg:.2f}° (预期约45°)")
+        angle_deg_out = np.degrees(result['angle'])
+        print(f"拟合直线角度: {angle_deg_out:.2f}° (预期30°)")
+        print(f"拟合线段长度: {fitted_len:.1f} px")
         print(f"边缘点数: {result['num_points']}")
         print(f"拟合误差: {result['mean_error']:.4f} px")
-        
-       
         
         return True
     

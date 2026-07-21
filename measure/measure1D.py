@@ -74,7 +74,7 @@ class Halcon1DMeasure:
 
         # Cache lookup
         cache_key = (round(angle_deg, 5), round(target_cx, 5),
-                     round(target_cy, 5))
+                     round(target_cy, 5), round(self.row, 4), round(self.col, 4))
         if cache_key in self._matrix_cache:
             self.rotation_matrix, self.inverse_matrix = self._matrix_cache[cache_key]
             return
