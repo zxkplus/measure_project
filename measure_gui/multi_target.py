@@ -1111,6 +1111,22 @@ class MultiTargetWorkflow:
                     params.get("preprocessor_type", "raw"), RawPreprocessor()
                 )
                 angle_range_half = float(params.get("angle_range_half", 15.0))
+                _pd_raw = params.get("pyramid_decimate", 0)
+                _pd_map = {"禁用": 0, "2x": 1, "4x": 2, "8x": 3}
+                if isinstance(_pd_raw, str):
+                    # 兼容 "2x"/"4x"/"8x" 字符串和 "禁用" 中文
+                    pyramid_decimate = _pd_map.get(_pd_raw, 0)
+                else:
+                    try:
+                        pyramid_decimate = int(_pd_raw)
+                    except (ValueError, TypeError):
+                        pyramid_decimate = 0
+                # When pyramid is enabled, compute max_template_size to enforce
+                # downsampling: target scaled template side length ~ 200px
+                _pms = int(params.get("pyramid_max_template_size", 400))
+                if pyramid_decimate > 0:
+                    _ts = int(params.get("template_size", 40))
+                    _pms = min(_pms, max(_ts // 2, 80))
                 tp = TemplatePoint(
                     self._alignment.template_image,
                     click_row=float(params["row"]),
@@ -1125,6 +1141,8 @@ class MultiTargetWorkflow:
                     angle_range=(-angle_range_half, angle_range_half),
                     angle_step=float(params.get("angle_step", 1.0)),
                     multi_target=False,
+                    pyramid_decimate=pyramid_decimate,
+                    pyramid_max_template_size=_pms,
                 )
                 self._template_match_points[label] = tp
 
@@ -2082,6 +2100,22 @@ class MultiTargetWorkflow:
                     params.get("preprocessor_type", "raw"), RawPreprocessor()
                 )
                 angle_range_half = float(params.get("angle_range_half", 15.0))
+                _pd_raw = params.get("pyramid_decimate", 0)
+                _pd_map = {"禁用": 0, "2x": 1, "4x": 2, "8x": 3}
+                if isinstance(_pd_raw, str):
+                    # 兼容 "2x"/"4x"/"8x" 字符串和 "禁用" 中文
+                    pyramid_decimate = _pd_map.get(_pd_raw, 0)
+                else:
+                    try:
+                        pyramid_decimate = int(_pd_raw)
+                    except (ValueError, TypeError):
+                        pyramid_decimate = 0
+                # When pyramid is enabled, compute max_template_size to enforce
+                # downsampling: target scaled template side length ~ 200px
+                _pms = int(params.get("pyramid_max_template_size", 400))
+                if pyramid_decimate > 0:
+                    _ts = int(params.get("template_size", 40))
+                    _pms = min(_pms, max(_ts // 2, 80))
                 tp = TemplatePoint(
                     self._alignment.template_image,
                     click_row=float(params["row"]),
@@ -2096,6 +2130,8 @@ class MultiTargetWorkflow:
                     angle_range=(-angle_range_half, angle_range_half),
                     angle_step=float(params.get("angle_step", 1.0)),
                     multi_target=False,
+                    pyramid_decimate=pyramid_decimate,
+                    pyramid_max_template_size=_pms,
                 )
                 self._template_match_points[label] = tp
 
@@ -2839,7 +2875,9 @@ def _get_defaults(object_type: str) -> Dict[str, Any]:
         "TemplateMatchPoint": {"template_size": 40, "preprocessor_type": "raw",
                                 "match_score_threshold": 0.5,
                                 "angle_range_half": 15.0, "angle_step": 1.0,
-                                "use_subpixel": True},
+                                "use_subpixel": True,
+                                "pyramid_decimate": 0,
+                                "pyramid_max_template_size": 400},
     }
     return defaults.get(object_type, {})
 
