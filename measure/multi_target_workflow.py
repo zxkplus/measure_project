@@ -280,6 +280,8 @@ class RotatedTemplate:
         scale_range: Tuple[float, float] = (0.9, 1.1),
         scale_step: float = 0.02,
         max_matches: int = 0,
+        pyramid_decimate: int = 0,
+        pyramid_max_template_size: int = 400,
     ):
         """
         Initialize a rotated template from a reference image.
@@ -313,6 +315,8 @@ class RotatedTemplate:
         self._scale_range = scale_range
         self._scale_step = scale_step
         self._max_matches = max_matches
+        self._pyramid_decimate = pyramid_decimate
+        self._pyramid_max_template_size = pyramid_max_template_size
         self._preprocessor = preprocessor
 
         # Convert to grayscale
@@ -358,6 +362,8 @@ class RotatedTemplate:
             coarse_fine=True,
             multi_target=True,
             max_matches=max_matches,
+            pyramid_decimate=pyramid_decimate,
+            pyramid_max_template_size=pyramid_max_template_size,
         )
 
     @staticmethod
@@ -560,6 +566,8 @@ class MultiTargetWorkflow:
         scale_range: Tuple[float, float] = (0.9, 1.1),
         scale_step: float = 0.02,
         max_matches: int = 0,
+        pyramid_decimate: int = 0,
+        pyramid_max_template_size: int = 400,
     ) -> None:
         """
         Set the rotated-bbox template from a reference image.
@@ -591,6 +599,8 @@ class MultiTargetWorkflow:
             'scale_range': list(scale_range),
             'scale_step': scale_step,
             'max_matches': max_matches,
+            'pyramid_decimate': pyramid_decimate,
+            'pyramid_max_template_size': pyramid_max_template_size,
         }
 
         self._template = RotatedTemplate(
@@ -608,6 +618,8 @@ class MultiTargetWorkflow:
             scale_range=scale_range,
             scale_step=scale_step,
             max_matches=max_matches,
+            pyramid_decimate=pyramid_decimate,
+            pyramid_max_template_size=pyramid_max_template_size,
         )
 
     def add_measurement(self, measure_type: str, label: str, **params) -> None:
@@ -896,6 +908,8 @@ class MultiTargetWorkflow:
             coarse_fine=True,
             multi_target=True,
             max_matches=rt._max_matches,
+            pyramid_decimate=int(tp.get('pyramid_decimate', 0)),
+            pyramid_max_template_size=int(tp.get('pyramid_max_template_size', 400)),
         )
 
         obj._template = rt
