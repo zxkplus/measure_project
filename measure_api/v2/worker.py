@@ -40,7 +40,15 @@ PACKAGE_CONTRACT_VERSION = "2.0"
 
 
 def run_worker_task(kind: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
-    """Dispatch an operation payload inside the CPU subprocess."""
+    """Dispatch an operation payload inside the CPU subprocess.
+
+    Args:
+        kind: Registered worker task kind.
+        payload: Pickle-safe operation input.
+
+    Returns:
+        JSON-compatible task result.
+    """
     tasks = {
         "preview": _preview,
         "publish": _publish,
@@ -207,29 +215,39 @@ def _preview(payload: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _publish(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    definitions = payload["objects"]
-    reference_image = np.ascontiguousarray(payload["reference_image"], dtype=np.uint8)
-    workflow = _build_workflow(reference_image, definitions)
-    asset_dir = Path(str(payload["asset_dir"]))
-    asset_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        definitions = payload["objects"]
+        reference_image = np.ascontiguousarray(payload["reference_image"], dtype=np.uint8)
+        workflow = _build_workflow(reference_image, definitions)
+        asset_dir = Path(str(payload["asset_dir"]))
+        asset_dir.mkdir(parents=True, exist_ok=True)
 
-    workflow_path = asset_dir / "workflow.npz"
-    reference_path = asset_dir / "reference.npy"
-    manifest_path = asset_dir / "manifest.json"
-    workflow.save(str(workflow_path))
-    np.save(str(reference_path), reference_image, allow_pickle=False)
-    manifest = {
-        "contract_version": MODEL_CONTRACT_VERSION,
-        "calibration_model_id": payload["calibration_model_id"],
-        "asset_ref": payload["asset_ref"],
-        "objects": definitions,
-        "files": {
-            "workflow.npz": _file_sha256(workflow_path),
-            "reference.npy": _file_sha256(reference_path),
-        },
-    }
-    with manifest_path.open("w", encoding="utf-8") as stream:
-        json.dump(manifest, stream, ensure_ascii=True, sort_keys=True)
+        workflow_path = asset_dir / "workflow.npz"
+        reference_path = asset_dir / "reference.npy"
+        manifest_path = asset_dir / "manifest.json"
+        workflow.save(str(workflow_path))
+        np.save(str(reference_path), reference_image, allow_pickle=False)
+        manifest = {
+            "contract_version": MODEL_CONTRACT_VERSION,
+            "calibration_model_id": payload["calibration_model_id"],
+            "asset_ref": payload["asset_ref"],
+            "objects": definitions,
+            "files": {
+                "workflow.npz": _file_sha256(workflow_path),
+                "reference.npy": _file_sha256(reference_path),
+            },
+        }
+        with manifest_path.open("w", encoding="utf-8") as stream:
+            json.dump(manifest, stream, ensure_ascii=True, sort_keys=True)
+    except EngineError:
+        raise
+    except Exception as exc:
+        raise EngineError(
+            "model.asset_unavailable",
+            "model",
+            "Model asset could not be published",
+            details={"diagnostic": str(exc)},
+        ) from exc
     return {
         "calibration_model_id": payload["calibration_model_id"],
         "asset_ref": payload["asset_ref"],

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -16,7 +17,16 @@ SESSION_IDLE_TTL = timedelta(hours=8)
 
 
 class EngineError(Exception):
-    """Stable error returned by the application and HTTP interfaces."""
+    """Stable error returned by the application and HTTP interfaces.
+
+    Args:
+        code: Stable machine-readable error code.
+        category: Stable high-level error category.
+        message: Safe human-readable error summary.
+        retryable: Whether callers may safely retry the request.
+        details: Optional structured diagnostic fields.
+        trace_id: Optional request or operation correlation identifier.
+    """
 
     def __init__(
         self,
@@ -144,6 +154,7 @@ class EngineApplication:
     Args:
         asset_root: Engine-owned persistent directory for published assets.
         now: Injectable UTC clock used for deterministic session expiry tests.
+        operations: Optional operation manager implementation.
     """
 
     def __init__(
@@ -164,7 +175,14 @@ class EngineApplication:
         self._operations = operations
 
     def create_modeling_session(self, reference_image: np.ndarray) -> Dict[str, Any]:
-        """Create an in-memory modeling session from a private image snapshot."""
+        """Create an in-memory modeling session from a private image snapshot.
+
+        Args:
+            reference_image: Decoded image whose data is copied into the session.
+
+        Returns:
+            JSON-serializable session metadata.
+        """
         image = self._private_gray_snapshot(reference_image)
         created_at = self._now()
         session_id = uuid.uuid4().hex
@@ -179,18 +197,37 @@ class EngineApplication:
         return self._session_dict(session)
 
     def get_modeling_session(self, session_id: str) -> Dict[str, Any]:
-        """Return session metadata and refresh its idle expiry."""
+        """Return session metadata and refresh its idle expiry.
+
+        Args:
+            session_id: Server-generated modeling session identifier.
+
+        Returns:
+            JSON-serializable session metadata.
+        """
         session = self._session(session_id)
         self._touch(session)
         return self._session_dict(session)
 
     def delete_modeling_session(self, session_id: str) -> None:
-        """Explicitly discard an unpublished modeling session."""
+        """Explicitly discard an unpublished modeling session.
+
+        Args:
+            session_id: Server-generated modeling session identifier.
+        """
         self._session(session_id)
         del self._sessions[session_id]
 
     def create_object(self, session_id: str, request: Mapping[str, Any]) -> Dict[str, Any]:
-        """Create a measurement object with a server-owned stable ID."""
+        """Create a measurement object with a server-owned stable ID.
+
+        Args:
+            session_id: Modeling session that owns the object.
+            request: Object type, label, parameters, and optional dependencies.
+
+        Returns:
+            The normalized object definition including its immutable identifier.
+        """
         session = self._session(session_id)
         allowed_fields = {
             "object_type",
@@ -240,7 +277,16 @@ class EngineApplication:
         object_id: str,
         request: Mapping[str, Any],
     ) -> Dict[str, Any]:
-        """Update mutable object fields while preserving object identity and type."""
+        """Update mutable object fields while preserving object identity and type.
+
+        Args:
+            session_id: Modeling session that owns the object.
+            object_id: Immutable server-generated object identifier.
+            request: Mutable fields to replace.
+
+        Returns:
+            The normalized updated object definition.
+        """
         session = self._session(session_id)
         item = self._object(session, object_id)
         unknown = set(request) - {"label", "parameters", "input_object_ids"}
@@ -272,20 +318,40 @@ class EngineApplication:
         return item.as_dict()
 
     def list_objects(self, session_id: str) -> List[Dict[str, Any]]:
-        """List modeling objects in creation order."""
+        """List modeling objects in creation order.
+
+        Args:
+            session_id: Modeling session whose objects are requested.
+
+        Returns:
+            Object definitions in creation order.
+        """
         session = self._session(session_id)
         self._touch(session)
         return [item.as_dict() for item in session.objects]
 
     def get_object(self, session_id: str, object_id: str) -> Dict[str, Any]:
-        """Return one modeling object by immutable ID."""
+        """Return one modeling object by immutable ID.
+
+        Args:
+            session_id: Modeling session that owns the object.
+            object_id: Immutable server-generated object identifier.
+
+        Returns:
+            The normalized object definition.
+        """
         session = self._session(session_id)
         item = self._object(session, object_id)
         self._touch(session)
         return item.as_dict()
 
     def delete_object(self, session_id: str, object_id: str) -> None:
-        """Delete an unreferenced modeling object."""
+        """Delete an unreferenced modeling object.
+
+        Args:
+            session_id: Modeling session that owns the object.
+            object_id: Immutable server-generated object identifier.
+        """
         session = self._session(session_id)
         item = self._object(session, object_id)
         dependants = [
@@ -310,8 +376,21 @@ class EngineApplication:
         *,
         timeout_ms: int = 30_000,
         client_request_id: Optional[str] = None,
+        accepted_monotonic: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Preview all session objects as an engine operation."""
+        """Preview all session objects as an engine operation.
+
+        Args:
+            session_id: Modeling session to preview.
+            image: Optional inspection image; the reference image is used when omitted.
+            timeout_ms: Operation deadline measured from submission.
+            client_request_id: Optional caller correlation identifier.
+            accepted_monotonic: Request acceptance time used to calculate the deadline.
+
+        Returns:
+            The newly submitted operation record.
+        """
+        accepted = time.monotonic() if accepted_monotonic is None else accepted_monotonic
         timeout = self._timeout(timeout_ms, default=30_000, maximum=120_000)
         session = self._session(session_id)
         self._touch(session)
@@ -325,6 +404,7 @@ class EngineApplication:
             },
             timeout,
             client_request_id=client_request_id,
+            accepted_monotonic=accepted,
         )
 
     def publish(
@@ -334,8 +414,21 @@ class EngineApplication:
         *,
         timeout_ms: int = 60_000,
         client_request_id: Optional[str] = None,
+        accepted_monotonic: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Directly overwrite one calibration model's current native asset."""
+        """Directly overwrite one calibration model's current native asset.
+
+        Args:
+            session_id: Modeling session to publish.
+            calibration_model_id: Platform-owned identity for the published model.
+            timeout_ms: Operation deadline measured from submission.
+            client_request_id: Optional caller correlation identifier.
+            accepted_monotonic: Request acceptance time used to calculate the deadline.
+
+        Returns:
+            The newly submitted operation record.
+        """
+        accepted = time.monotonic() if accepted_monotonic is None else accepted_monotonic
         timeout = self._timeout(timeout_ms, default=60_000, maximum=300_000)
         if not isinstance(calibration_model_id, str) or not calibration_model_id:
             raise EngineError(
@@ -365,6 +458,7 @@ class EngineApplication:
             timeout,
             client_request_id=client_request_id,
             on_success=close_session,
+            accepted_monotonic=accepted,
         )
 
     def measure(
@@ -375,8 +469,22 @@ class EngineApplication:
         *,
         timeout_ms: int = 10_000,
         client_request_id: Optional[str] = None,
+        accepted_monotonic: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Measure a private image snapshot with one published model."""
+        """Measure a private image snapshot with one published model.
+
+        Args:
+            calibration_model_id: Platform-owned identity for the model.
+            asset_ref: Opaque engine reference to the current native asset.
+            image: Decoded inspection image whose data is copied before submission.
+            timeout_ms: Operation deadline measured from submission.
+            client_request_id: Optional caller correlation identifier.
+            accepted_monotonic: Request acceptance time used to calculate the deadline.
+
+        Returns:
+            The newly submitted operation record.
+        """
+        accepted = time.monotonic() if accepted_monotonic is None else accepted_monotonic
         timeout = self._timeout(timeout_ms, default=10_000, maximum=60_000)
         expected_ref = self._asset_ref(calibration_model_id)
         if asset_ref != expected_ref:
@@ -395,6 +503,7 @@ class EngineApplication:
             },
             timeout,
             client_request_id=client_request_id,
+            accepted_monotonic=accepted,
         )
 
     def export_model(
@@ -404,8 +513,21 @@ class EngineApplication:
         *,
         timeout_ms: int = 60_000,
         client_request_id: Optional[str] = None,
+        accepted_monotonic: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Export a published model as an immutable portable package."""
+        """Export a published model as an immutable portable package.
+
+        Args:
+            calibration_model_id: Platform-owned identity for the model.
+            asset_ref: Opaque engine reference to the current native asset.
+            timeout_ms: Operation deadline measured from submission.
+            client_request_id: Optional caller correlation identifier.
+            accepted_monotonic: Request acceptance time used to calculate the deadline.
+
+        Returns:
+            The newly submitted operation record.
+        """
+        accepted = time.monotonic() if accepted_monotonic is None else accepted_monotonic
         timeout = self._timeout(timeout_ms, default=60_000, maximum=300_000)
         if asset_ref != self._asset_ref(calibration_model_id):
             raise EngineError("model.asset_unavailable", "model", "Model asset is unavailable")
@@ -419,6 +541,7 @@ class EngineApplication:
             },
             timeout,
             client_request_id=client_request_id,
+            accepted_monotonic=accepted,
         )
 
     def import_model(
@@ -427,16 +550,34 @@ class EngineApplication:
         *,
         timeout_ms: int = 60_000,
         client_request_id: Optional[str] = None,
+        accepted_monotonic: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Import a portable package into a new editable modeling session."""
+        """Import a portable package into a new editable modeling session.
+
+        Args:
+            package: Complete portable model package bytes.
+            timeout_ms: Operation deadline measured from submission.
+            client_request_id: Optional caller correlation identifier.
+            accepted_monotonic: Request acceptance time used to calculate the deadline.
+
+        Returns:
+            The newly submitted operation record.
+        """
+        accepted = time.monotonic() if accepted_monotonic is None else accepted_monotonic
         timeout = self._timeout(timeout_ms, default=60_000, maximum=300_000)
         if not isinstance(package, bytes) or not package:
             raise EngineError("model.package_invalid", "model", "Model package is invalid")
 
         def create_session(result: Dict[str, Any]) -> Dict[str, Any]:
             try:
-                session_data = self.create_modeling_session(result["reference_image"])
-                session = self._sessions[session_data["session_id"]]
+                created_at = self._now()
+                session = _ModelingSession(
+                    session_id=uuid.uuid4().hex,
+                    reference_image=self._private_gray_snapshot(result["reference_image"]),
+                    created_at=created_at,
+                    expires_at=created_at + SESSION_IDLE_TTL,
+                    objects=[],
+                )
                 object_ids = set()
                 for definition in result["objects"]:
                     object_id = str(definition["object_id"])
@@ -461,10 +602,9 @@ class EngineApplication:
                         item.input_object_ids,
                     )
                     session.objects.append(item)
+                self._sessions[session.session_id] = session
                 return {"session_id": session.session_id}
             except (EngineError, KeyError, TypeError, ValueError) as exc:
-                if "session_data" in locals():
-                    self._sessions.pop(session_data["session_id"], None)
                 raise EngineError(
                     "model.package_invalid",
                     "model",
@@ -472,16 +612,28 @@ class EngineApplication:
                     details={"diagnostic": str(exc)},
                 ) from exc
 
+        def discard_session(result: Dict[str, Any]) -> None:
+            self._sessions.pop(str(result["session_id"]), None)
+
         return self._operations.submit(
             "import",
             {"package": package},
             timeout,
             client_request_id=client_request_id,
             on_success=create_session,
+            on_abort=discard_session,
+            accepted_monotonic=accepted,
         )
 
     def read_export(self, download_ref: str) -> bytes:
-        """Resolve an engine-controlled export reference to package bytes."""
+        """Resolve an engine-controlled export reference to package bytes.
+
+        Args:
+            download_ref: Opaque reference returned by a successful export operation.
+
+        Returns:
+            Complete portable model package bytes.
+        """
         prefix = "v2-export:"
         if not isinstance(download_ref, str) or not download_ref.startswith(prefix):
             raise EngineError("model.export_not_found", "model", "Model export not found")
@@ -503,21 +655,50 @@ class EngineApplication:
             ) from exc
 
     def get_operation(self, operation_id: str) -> Dict[str, Any]:
-        """Return one current-process engine operation."""
+        """Return one current-process engine operation.
+
+        Args:
+            operation_id: Server-generated operation identifier.
+
+        Returns:
+            The current operation record.
+        """
         return self._operations.get(operation_id)
 
     def list_operations(
         self, client_request_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """List engine operations, optionally filtered by client request ID."""
+        """List engine operations, optionally filtered by client request ID.
+
+        Args:
+            client_request_id: Optional caller correlation identifier filter.
+
+        Returns:
+            Current-process operation records matching the filter.
+        """
         return self._operations.list(client_request_id)
 
     def wait_operation(self, operation_id: str, wait_ms: int) -> Dict[str, Any]:
-        """Wait for an operation without coupling it to an HTTP connection."""
+        """Wait for an operation without coupling it to an HTTP connection.
+
+        Args:
+            operation_id: Server-generated operation identifier.
+            wait_ms: Maximum caller wait window in milliseconds.
+
+        Returns:
+            The operation record after completion or expiration of the wait window.
+        """
         return self._operations.wait(operation_id, wait_ms)
 
     def cancel_operation(self, operation_id: str) -> Dict[str, Any]:
-        """Request cancellation of an engine operation."""
+        """Request cancellation of an engine operation.
+
+        Args:
+            operation_id: Server-generated operation identifier.
+
+        Returns:
+            The operation record after recording the cancellation request.
+        """
         return self._operations.cancel(operation_id)
 
     def close(self) -> None:

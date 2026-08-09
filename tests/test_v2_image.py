@@ -7,7 +7,12 @@ import numpy as np
 import pytest
 
 from measure_api.v2.application import EngineError
-from measure_api.v2.image import POOL_SIZE, SLOT_SIZE, SharedMemoryImageReader
+from measure_api.v2.image import (
+    POOL_SIZE,
+    SLOT_SIZE,
+    ImageDescriptor,
+    SharedMemoryImageReader,
+)
 
 
 class _SparseBuffer:
@@ -77,3 +82,24 @@ def test_snapshot_rejects_existing_pool_with_wrong_size() -> None:
         reader.snapshot(_descriptor(jpeg.tobytes(), bin_index=1))
 
     assert error.value.error["code"] == "image.pool_size_mismatch"
+
+
+def test_descriptor_does_not_add_first_release_range_guards() -> None:
+    """The first release trusts the platform's slot and JPEG length guarantees."""
+    descriptor = _descriptor(b"jpeg", bin_index=30)
+    descriptor["jpeg_size"] = SLOT_SIZE + 1
+
+    parsed = ImageDescriptor.from_mapping(descriptor)
+
+    assert parsed.bin_index == 30
+    assert parsed.jpeg_size == SLOT_SIZE + 1
+
+
+def test_descriptor_rejects_fields_that_disagree_with_openapi_types() -> None:
+    descriptor = _descriptor(b"jpeg")
+    descriptor["camera_sn"] = 17
+
+    with pytest.raises(EngineError) as error:
+        ImageDescriptor.from_mapping(descriptor)
+
+    assert error.value.error["code"] == "image.descriptor_invalid"

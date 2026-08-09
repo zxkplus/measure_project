@@ -19,7 +19,19 @@ DEFAULT_POOL_NAME = "measure_v2_img_shm"
 
 @dataclass(frozen=True)
 class ImageDescriptor:
-    """The shared JPEG request fields common to both measurement engines."""
+    """The shared JPEG request fields common to both measurement engines.
+
+    Args:
+        uuid: Per-frame identity supplied by the platform.
+        camera_sn: Source camera serial number.
+        type: Encoded image type; v2 accepts only ``jpg``.
+        height: Declared decoded image height.
+        width: Declared decoded image width.
+        channel: Shared-memory channel; v2 accepts only channel 1.
+        jpeg_size: Encoded byte length inside the selected slot.
+        bin_index: Zero-based fixed-pool slot index.
+        timestamp: Platform-supplied capture timestamp.
+    """
 
     uuid: str
     camera_sn: str
@@ -33,7 +45,14 @@ class ImageDescriptor:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ImageDescriptor":
-        """Parse and validate the fixed v2 image request structure."""
+        """Parse and validate the fixed v2 image request structure.
+
+        Args:
+            value: Exact shared-memory image descriptor mapping.
+
+        Returns:
+            A validated immutable image descriptor.
+        """
         expected = {
             "uuid",
             "camera_sn",
@@ -67,11 +86,18 @@ class ImageDescriptor:
                 "request",
                 "Image descriptor contains invalid field types",
             )
+        string_fields = ("uuid", "camera_sn", "type")
+        if any(not isinstance(value[name], str) for name in string_fields):
+            raise EngineError(
+                "image.descriptor_invalid",
+                "request",
+                "Image descriptor contains invalid field types",
+            )
         try:
             descriptor = cls(
-                uuid=str(value["uuid"]),
-                camera_sn=str(value["camera_sn"]),
-                type=str(value["type"]),
+                uuid=value["uuid"],
+                camera_sn=value["camera_sn"],
+                type=value["type"],
                 height=int(value["height"]),
                 width=int(value["width"]),
                 channel=int(value["channel"]),
@@ -97,14 +123,14 @@ class ImageDescriptor:
                 "request",
                 "uuid and camera_sn are required",
             )
-        if not 0 <= descriptor.bin_index < SLOT_COUNT:
-            raise EngineError("image.descriptor_invalid", "request", "bin_index is out of range")
-        if not 0 < descriptor.jpeg_size <= SLOT_SIZE:
-            raise EngineError("image.descriptor_invalid", "request", "jpeg_size is out of range")
         return descriptor
 
     def as_dict(self) -> Dict[str, Any]:
-        """Return a JSON-serializable descriptor."""
+        """Return a JSON-serializable descriptor.
+
+        Returns:
+            A mapping containing all shared image request fields.
+        """
         return {
             "uuid": self.uuid,
             "camera_sn": self.camera_sn,
@@ -119,7 +145,12 @@ class ImageDescriptor:
 
 
 class SharedMemoryImageReader:
-    """Decode a private GRAY8 snapshot from the engine's fixed image pool."""
+    """Decode a private GRAY8 snapshot from the engine's fixed image pool.
+
+    Args:
+        name: POSIX shared-memory segment name.
+        opener: Optional shared-memory factory used by tests.
+    """
 
     def __init__(
         self,
@@ -131,7 +162,14 @@ class SharedMemoryImageReader:
         self._opener = opener or shared_memory.SharedMemory
 
     def snapshot(self, value: Mapping[str, Any]) -> np.ndarray:
-        """Read, decode, copy, and release one temporary image reference."""
+        """Read, decode, copy, and release one temporary image reference.
+
+        Args:
+            value: Exact shared-memory image descriptor mapping.
+
+        Returns:
+            A contiguous private ``uint8`` GRAY8 image copy.
+        """
         descriptor = ImageDescriptor.from_mapping(value)
         segment = self._open()
         try:

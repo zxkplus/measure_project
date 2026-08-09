@@ -15,7 +15,11 @@ from measure_api.v2.image import DEFAULT_POOL_NAME, SharedMemoryImageReader
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    """Run the single-instance production HTTP adapter."""
+    """Run the single-instance production HTTP adapter.
+
+    Args:
+        argv: Optional command-line arguments; process arguments are used when omitted.
+    """
     parser = argparse.ArgumentParser(description="Headless v2 measurement engine")
     parser.add_argument("--host", default=os.getenv("MEASURE_V2_HOST", "0.0.0.0"))
     parser.add_argument(

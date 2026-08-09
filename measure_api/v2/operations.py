@@ -10,7 +10,7 @@ import traceback
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Deque, Dict, List, Mapping, Optional
 
 OPERATION_CONTRACT_VERSION = "2.0"
@@ -71,6 +71,7 @@ class _OperationRecord:
     cancel_requested: bool = False
     completion: threading.Event = field(default_factory=threading.Event)
     on_success: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None
+    on_abort: Optional[Callable[[Dict[str, Any]], None]] = None
 
     @property
     def deadline(self) -> float:
@@ -121,7 +122,11 @@ def _process_entry(kind: str, payload: Mapping[str, Any], output: Any) -> None:
 
 
 class OperationManager:
-    """Queue operations and execute at most one in a CPU subprocess."""
+    """Queue operations and execute at most one in a CPU subprocess.
+
+    Args:
+        multiprocessing_context: Multiprocessing start method used for workers.
+    """
 
     def __init__(self, *, multiprocessing_context: str = "spawn") -> None:
         self._context: Any = multiprocessing.get_context(multiprocessing_context)
@@ -146,8 +151,23 @@ class OperationManager:
         *,
         client_request_id: Optional[str] = None,
         on_success: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+        on_abort: Optional[Callable[[Dict[str, Any]], None]] = None,
+        accepted_monotonic: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Create a non-idempotent operation and enqueue it for execution."""
+        """Create a non-idempotent operation and enqueue it for execution.
+
+        Args:
+            kind: Registered worker task kind.
+            payload: Pickle-safe task input.
+            timeout_ms: Operation deadline measured from submission.
+            client_request_id: Optional caller correlation identifier.
+            on_success: Optional parent-process result transformation callback.
+            on_abort: Optional rollback for a transformed result that misses its deadline.
+            accepted_monotonic: Request acceptance time used to calculate the deadline.
+
+        Returns:
+            The newly submitted operation record.
+        """
         if client_request_id is not None and not isinstance(client_request_id, str):
             from measure_api.v2.application import EngineError
 
@@ -157,15 +177,23 @@ class OperationManager:
                 "client_request_id must be a string",
             )
         operation_id = uuid.uuid4().hex
+        submitted_monotonic = time.monotonic()
+        if accepted_monotonic is None:
+            accepted_monotonic = submitted_monotonic
+        accepted_monotonic = min(accepted_monotonic, submitted_monotonic)
+        accepted_at = datetime.now(timezone.utc) - timedelta(
+            seconds=max(0.0, submitted_monotonic - accepted_monotonic)
+        )
         record = _OperationRecord(
             operation_id=operation_id,
             kind=kind,
             payload={**payload, "operation_id": operation_id},
             timeout_ms=timeout_ms,
             client_request_id=client_request_id,
-            accepted_monotonic=time.monotonic(),
-            accepted_at=_iso_now(),
+            accepted_monotonic=accepted_monotonic,
+            accepted_at=accepted_at.isoformat(),
             on_success=on_success,
+            on_abort=on_abort,
         )
         with self._condition:
             if self._closed:
@@ -183,12 +211,26 @@ class OperationManager:
         return record.as_dict()
 
     def get(self, operation_id: str) -> Dict[str, Any]:
-        """Return one operation from the current process ledger."""
+        """Return one operation from the current process ledger.
+
+        Args:
+            operation_id: Server-generated operation identifier.
+
+        Returns:
+            The current operation record.
+        """
         with self._condition:
             return self._record(operation_id).as_dict()
 
     def list(self, client_request_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """List current-process operations, optionally by client request ID."""
+        """List current-process operations, optionally by client request ID.
+
+        Args:
+            client_request_id: Optional caller correlation identifier filter.
+
+        Returns:
+            Current-process operation records matching the filter.
+        """
         with self._condition:
             records = list(self._records.values())
             if client_request_id is not None:
@@ -200,7 +242,15 @@ class OperationManager:
             return [record.as_dict() for record in records]
 
     def wait(self, operation_id: str, wait_ms: int) -> Dict[str, Any]:
-        """Wait up to the caller's window without changing operation lifetime."""
+        """Wait up to the caller's window without changing operation lifetime.
+
+        Args:
+            operation_id: Server-generated operation identifier.
+            wait_ms: Maximum caller wait window in milliseconds.
+
+        Returns:
+            The operation record after completion or expiration of the wait window.
+        """
         if wait_ms < 0:
             from measure_api.v2.application import EngineError
 
@@ -212,7 +262,14 @@ class OperationManager:
         return self.get(operation_id)
 
     def cancel(self, operation_id: str) -> Dict[str, Any]:
-        """Request hard cancellation of a queued or running operation."""
+        """Request hard cancellation of a queued or running operation.
+
+        Args:
+            operation_id: Server-generated operation identifier.
+
+        Returns:
+            The operation record after recording the cancellation request.
+        """
         with self._condition:
             record = self._record(operation_id)
             if record.status not in TERMINAL_STATES:
@@ -312,6 +369,14 @@ class OperationManager:
             self._complete(record, "failed", error=response[1])
         else:
             result = response[1]
+            if record.cancel_requested:
+                self._complete(record, "cancelled", error=_cancelled_error())
+                self._clear_current()
+                return
+            if time.monotonic() >= record.deadline:
+                self._complete(record, "timed_out", error=_timeout_error())
+                self._clear_current()
+                return
             if record.on_success is not None:
                 try:
                     result = record.on_success(result)
@@ -329,6 +394,24 @@ class OperationManager:
                     self._complete(record, "failed", error=exc.error)
                     self._clear_current()
                     return
+            if record.cancel_requested or time.monotonic() >= record.deadline:
+                if record.on_abort is not None:
+                    try:
+                        record.on_abort(result)
+                    except Exception:
+                        self._complete(
+                            record,
+                            "failed",
+                            error=_internal_error("Operation rollback failed"),
+                        )
+                        self._clear_current()
+                        return
+                if record.cancel_requested:
+                    self._complete(record, "cancelled", error=_cancelled_error())
+                else:
+                    self._complete(record, "timed_out", error=_timeout_error())
+                self._clear_current()
+                return
             self._complete(record, "succeeded", result=result)
         self._clear_current()
 
