@@ -72,7 +72,7 @@ dagger.#Plan & {
 			]
 
 			Workdir: "/usr/local/pkg/measure_project/amd64/bin/measure_project"
-			Cmd: ["/bin/bash", "-c", "bash measure_api/run.sh"]
+			Cmd: ["/bin/bash", "-c", "python3 -m measure_api.v2"]
 		}
 
 		ship: cbase.#CShipMerge & {
