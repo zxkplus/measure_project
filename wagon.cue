@@ -67,8 +67,8 @@ dagger.#Plan & {
 			FromImage:     base_image
 
 			CommandChains: [
-				#"pip3 install -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt -r measure_api/requirements.txt"#,
-				#"chmod +x measure_api/run.sh"#,
+				#"pip3 install -i https://mirrors.aliyun.com/pypi/simple/ -r /usr/local/pkg/measure_project/amd64/bin/measure_project/requirements.txt -r /usr/local/pkg/measure_project/amd64/bin/measure_project/measure_api/requirements.txt"#,
+				#"chmod +x /usr/local/pkg/measure_project/amd64/bin/measure_project/measure_api/run.sh"#,
 			]
 
 			Workdir: "/usr/local/pkg/measure_project/amd64/bin/measure_project"
