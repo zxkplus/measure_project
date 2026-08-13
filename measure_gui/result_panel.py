@@ -209,6 +209,9 @@ class ResultPanel(ttk.Frame):
 
                 if rtype == "point" and valid:
                     value_str = f"({result['row']:.2f}, {result['col']:.2f})"
+                    score = result.get("meta", {}).get("match_score")
+                    if score is not None:
+                        value_str += f", {score:.4f}"
                 elif rtype == "line" and valid:
                     value_str = (
                         f"({result['start_row']:.1f},{result['start_col']:.1f})"
@@ -294,6 +297,9 @@ class ResultPanel(ttk.Frame):
                                 rtype = result.get("type", "")
                                 if rtype == "point":
                                     val = f"({result.get('row',0):.2f},{result.get('col',0):.2f})"
+                                    score = result.get("meta", {}).get("match_score")
+                                    if score is not None:
+                                        val += f", {score:.4f}"
                                 elif rtype == "distance":
                                     val = f"{result.get('value', 0):.3f}"
                                 elif rtype == "angle":
