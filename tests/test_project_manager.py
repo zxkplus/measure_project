@@ -8,8 +8,10 @@ import tempfile
 from unittest import TestCase, main
 
 import numpy as np
+import cv2
 
 from measure_gui.project_manager import (
+    INSP_IMAGE_FILENAME,
     MANIFEST_FILENAME,
     MANIFEST_VERSION,
     WORKFLOW_FILENAME,
@@ -228,6 +230,64 @@ class TestProjectSaveLoad(TestCase):
         # Verify .npz reads back
         data = np.load(workflow_path, allow_pickle=True)
         self.assertIn("dummy", data)
+
+
+class TestResolveInspectionImage(TestCase):
+    """Test cross-machine-safe inspection image resolution."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        if os.path.exists(self._tmpdir):
+            shutil.rmtree(self._tmpdir)
+
+    def _sample(self):
+        """A tiny grayscale image to round-trip through cv2.imread."""
+        return (np.arange(16, dtype=np.uint8).reshape(4, 4) * 16)
+
+    def test_prefers_local_inspection_png(self):
+        """Project-local inspection.png wins even when the stored path is gone."""
+        img = self._sample()
+        local = os.path.join(self._tmpdir, INSP_IMAGE_FILENAME)
+        cv2.imwrite(local, img)
+        manifest = {"inspection_image_path": "/nonexistent/insp.png"}
+
+        resolved = ProjectManager._resolve_inspection_image(self._tmpdir, manifest)
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.shape, img.shape)
+
+    def test_falls_back_to_stored_path(self):
+        """When no local copy exists, fall back to the stored path."""
+        img = self._sample()
+        stored = os.path.join(self._tmpdir, "insp_from_elsewhere.png")
+        cv2.imwrite(stored, img)
+        manifest = {"inspection_image_path": stored}
+
+        resolved = ProjectManager._resolve_inspection_image(self._tmpdir, manifest)
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.shape, img.shape)
+
+    def test_returns_none_when_missing(self):
+        """No local copy and no valid stored path -> None, no exception."""
+        resolved = ProjectManager._resolve_inspection_image(
+            self._tmpdir, {"inspection_image_path": "/nonexistent/insp.png"}
+        )
+        self.assertIsNone(resolved)
+
+    def test_handles_relative_stored_path(self):
+        """A relative stored path is resolved against the project dir."""
+        img = self._sample()
+        rel = os.path.join("sub", "insp.png")
+        abs_path = os.path.join(self._tmpdir, rel)
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        cv2.imwrite(abs_path, img)
+        manifest = {"inspection_image_path": rel}
+
+        resolved = ProjectManager._resolve_inspection_image(self._tmpdir, manifest)
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.shape, img.shape)
 
 
 if __name__ == "__main__":

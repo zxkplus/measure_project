@@ -121,13 +121,26 @@ class ProjectManager:
         # Determine created_at: keep existing if already set, else now
         created_at = getattr(app, '_created_at', None) or now
 
+        # Normalize the recorded inspection image path so the manifest itself
+        # is portable. save_project always writes an "inspection.png" copy into
+        # the project dir, so if the original path points inside the project
+        # dir, record the relative name instead of the absolute path.
+        inspection_path = getattr(app, '_inspection_image_path', None)
+        if inspection_path and os.path.isfile(inspection_path):
+            try:
+                if os.path.abspath(inspection_path).startswith(
+                        os.path.abspath(project_dir) + os.sep):
+                    inspection_path = INSP_IMAGE_FILENAME
+            except (OSError, TypeError):
+                pass
+
         manifest: Dict[str, Any] = {
             "version": MANIFEST_VERSION,
             "project_name": os.path.basename(project_dir),
             "created_at": created_at,
             "updated_at": now,
             "reference_image_path": getattr(app, '_reference_image_path', None),
-            "inspection_image_path": getattr(app, '_inspection_image_path', None),
+            "inspection_image_path": inspection_path,
             "matching": _to_json(app.get_matching_state()),
             "roi": _to_json(app._get_roi_state()),
             "ref_canvas_state": _to_json(app._ref_canvas.get_view_state()),
@@ -242,17 +255,13 @@ class ProjectManager:
             )
 
         # Restore inspection image if available
-        insp_path = manifest.get("inspection_image_path")
-        if insp_path:
-            abs_insp = os.path.join(project_dir, insp_path)
-            if os.path.exists(abs_insp):
-                insp_img = cv2.imread(abs_insp, cv2.IMREAD_GRAYSCALE)
-                if insp_img is not None:
-                    app._inspection_image = insp_img
-                    app._insp_canvas.load_image(insp_img)
-                    insp_state = manifest.get("insp_canvas_state", {})
-                    if insp_state:
-                        app._insp_canvas.set_view_state(insp_state)
+        insp_img = ProjectManager._resolve_inspection_image(project_dir, manifest)
+        if insp_img is not None:
+            app._inspection_image = insp_img
+            app._insp_canvas.load_image(insp_img)
+            insp_state = manifest.get("insp_canvas_state", {})
+            if insp_state:
+                app._insp_canvas.set_view_state(insp_state)
 
         # Restore reference/inspection image path tracking
         app._reference_image_path = manifest.get("reference_image_path")
@@ -274,6 +283,33 @@ class ProjectManager:
 
         # Update recent projects
         ProjectManager.add_recent_project(project_dir, project_name)
+
+    @staticmethod
+    def _resolve_inspection_image(
+        project_dir: str,
+        manifest: Dict[str, Any],
+    ) -> Optional[np.ndarray]:
+        """Resolve the inspection image to restore for a project.
+
+        Prefers the project-local "inspection.png" copy saved by
+        ``save_project`` so projects stay portable across machines. Falls back
+        to ``manifest["inspection_image_path"]`` when the local copy is missing
+        (e.g. legacy/partial projects). Returns None (does not raise) when no
+        recoverable inspection image exists.
+        """
+        candidates = [os.path.join(project_dir, INSP_IMAGE_FILENAME)]
+        insp_path = manifest.get("inspection_image_path")
+        if isinstance(insp_path, str) and not os.path.isabs(insp_path):
+            candidates.append(os.path.join(project_dir, insp_path))
+        elif isinstance(insp_path, str):
+            candidates.append(insp_path)
+
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                img = cv2.imread(candidate, cv2.IMREAD_GRAYSCALE)
+                if img is not None:
+                    return img
+        return None
 
     @staticmethod
     def load_legacy_npz(filepath: str, app: MeasureApp) -> None:
