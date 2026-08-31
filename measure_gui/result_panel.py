@@ -321,10 +321,7 @@ class ResultPanel(ttk.Frame):
                                     val = _fmt_len(result.get('value', 0),
                                                    self._scale_mm)
                                 elif rtype == "circle":
-                                    val = (
-                                        f"r={_fmt_len(result.get('radius', 0),"
-                                        f" self._scale_mm, 2)}"
-                                    )
+                                    val = f"r={_fmt_len(result.get('radius', 0), self._scale_mm, 2)}"
                                 elif rtype == "angle":
                                     val = f"{result.get('value_deg', 0):.3f}°"
                                 else:

@@ -262,3 +262,44 @@ class TestGuiFormat:
         d = {"type": "distance", "label": "gap", "valid": True, "value": 200.0}
         assert "2.000 mm" in _format_result_dict("gap", d, scale_mm=0.01)
         assert "200.000 px" in _format_result_dict("gap", d, scale_mm=0.01)
+
+    def test_summary_text_wiring(self):
+        """summary_text() must forward the workflow scale to the formatters."""
+        from measure.measure_workflow import (
+            AngleResult, CircleResult, DistanceResult, LineResult, PointResult,
+        )
+        from measure_gui.multi_target import MultiTargetWorkflow, TargetResult
+
+        wf = MultiTargetWorkflow()
+        assert wf.physical_scale_mm is None
+        wf.physical_scale_mm = 0.05
+
+        tr = TargetResult(
+            id=1, score=0.95, rotation_deg=0.0, scale=1.0,
+            center_row=100.0, center_col=200.0, valid=True,
+            measurements={
+                "gap": DistanceResult(label="gap", value=100.0, valid=True),
+                "hole": CircleResult(label="hole", center_row=0.0,
+                                     center_col=0.0, radius=50.0, valid=True),
+                "edge": LineResult(label="edge", a=0.0, b=0.0, c=0.0,
+                                   start_row=0.0, start_col=0.0,
+                                   end_row=30.0, end_col=40.0, valid=True),
+                "pt": PointResult(label="pt", row=1.0, col=2.0, valid=True),
+                "ang": AngleResult(label="ang", value_rad=0.5, valid=True),
+            },
+        )
+        wf._results = [tr]
+
+        text = wf.summary_text()
+        # Length quantities show mm (and px); point coords / angles unchanged.
+        assert "5.000 mm" in text          # distance 100 px * 0.05
+        assert "2.500 mm" in text          # circle radius 50 px * 0.05
+        assert "2.500 mm" in text          # line length 50 px * 0.05
+        assert "row=1.00, col=2.00" in text
+        assert "28.65°" in text
+
+        # Uncalibrated -> px-only output.
+        wf.physical_scale_mm = None
+        text0 = wf.summary_text()
+        assert "100.000 px" in text0
+        assert "mm" not in text0

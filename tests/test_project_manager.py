@@ -129,7 +129,7 @@ class TestManifestSchema(TestCase):
     """Test manifest JSON schema compatibility."""
 
     def test_manifest_version(self):
-        self.assertEqual(MANIFEST_VERSION, 2)
+        self.assertEqual(MANIFEST_VERSION, 3)
 
     def test_manifest_serializable(self):
         """A minimal manifest should be JSON-serializable."""
@@ -140,6 +140,7 @@ class TestManifestSchema(TestCase):
             "updated_at": "2026-06-23T14:45:00",
             "reference_image_path": "reference.png",
             "inspection_image_path": None,
+            "calibration": None,
             "matching": {
                 "preprocessor_type": "raw",
                 "match_score_threshold": 0.5,
@@ -186,7 +187,7 @@ class TestManifestSchema(TestCase):
         json_str = json.dumps(manifest, indent=2, default=_json_default)
         # Should parse back
         parsed = json.loads(json_str)
-        self.assertEqual(parsed["version"], 1)
+        self.assertEqual(parsed["version"], MANIFEST_VERSION)
         self.assertEqual(parsed["roi"]["center_row"], 200.5)
 
 

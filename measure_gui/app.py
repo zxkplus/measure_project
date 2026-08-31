@@ -32,6 +32,7 @@ import cv2
 import numpy as np
 
 from .alignment import MultiPointAlignment, SingleBoxAlignment
+from .calibration_dialog import CalibrationDialog
 from .image_canvas import CanvasMode, ImageCanvas
 from .multi_target import MultiTargetWorkflow, TargetResult
 from .project_manager import ProjectManager
@@ -60,6 +61,13 @@ class MeasureApp:
         self._reference_image_path: Optional[str] = None
         self._inspection_image_path: Optional[str] = None
         self._created_at: Optional[str] = None
+
+        # Checkerboard pixel calibration (optional)
+        #   _calibration: JSON-safe dict {scale_mm_per_px, square_size_mm,
+        #                 num_corners, method} or None when uncalibrated.
+        #   _calibration_board_image: the board image used (for project copy).
+        self._calibration: Optional[Dict[str, Any]] = None
+        self._calibration_board_image: Optional[np.ndarray] = None
 
         # State
         self._teaching: bool = True  # True = teaching mode, False = inspection mode
@@ -128,6 +136,12 @@ class MeasureApp:
         view_menu.add_command(label="100%", command=self._zoom_100)
         view_menu.add_separator()
         view_menu.add_command(label="重置 ROI", command=self._reset_roi)
+
+        # Tools menu — checkerboard calibration (optional pixel scale)
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="工具", menu=tools_menu)
+        tools_menu.add_command(label="棋盘格标定...", command=self._open_calibration)
+        tools_menu.add_command(label="清除标定", command=self._clear_calibration)
 
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -222,6 +236,11 @@ class MeasureApp:
         ttk.Label(statusbar, textvariable=self._status_text, foreground="gray").pack(
             side=tk.LEFT, padx=5,
         )
+
+        # Persistent calibration indicator (independent of transient status).
+        self._calib_status_text = tk.StringVar(value="未标定")
+        ttk.Label(statusbar, textvariable=self._calib_status_text,
+                  foreground="#00a05e").pack(side=tk.RIGHT, padx=5)
 
         self._coord_text = tk.StringVar(value="")
         ttk.Label(statusbar, textvariable=self._coord_text, foreground="gray").pack(
@@ -579,6 +598,58 @@ class MeasureApp:
             messagebox.showerror("测量失败", str(e))
         finally:
             self.tool_panel.set_progress(False)
+
+    # ------------------------------------------------------------------
+    # Checkerboard calibration
+    # ------------------------------------------------------------------
+
+    def _open_calibration(self):
+        """Open the interactive checkerboard calibration dialog."""
+        CalibrationDialog(
+            self.root,
+            on_apply=self._apply_calibration,
+            on_clear=self._clear_calibration,
+        )
+
+    def _apply_calibration(self, data: dict):
+        """Store an applied calibration and push the scale into the workflow."""
+        scale = float(data["scale_mm_per_px"])
+        self._calibration = {
+            "scale_mm_per_px": scale,
+            "square_size_mm": float(data.get("square_size_mm", 0.0)),
+            "num_corners": int(data.get("num_corners", 0)),
+            "method": str(data.get("method", "lattice")),
+        }
+        self._calibration_board_image = data.get("board_image")
+        if self._workflow is not None:
+            self._workflow.physical_scale_mm = scale
+        self._update_calibration_status()
+        self._status_text.set("标定已应用")
+
+    def _clear_calibration(self):
+        """Remove calibration; measurements fall back to pixel units."""
+        self._calibration = None
+        self._calibration_board_image = None
+        if self._workflow is not None:
+            self._workflow.physical_scale_mm = None
+        self._update_calibration_status()
+        self._status_text.set("标定已清除，结果使用像素单位")
+
+    def _update_calibration_status(self):
+        """Refresh the persistent calibration indicator in the status bar."""
+        if self._calibration:
+            self._calib_status_text.set(
+                f"标定 {self._calibration['scale_mm_per_px']:.4f} mm/px "
+                f"(棋盘格 {self._calibration['square_size_mm']:.1f}mm)"
+            )
+        else:
+            self._calib_status_text.set("未标定")
+
+    def get_calibration_state(self) -> Optional[Dict[str, Any]]:
+        """JSON-safe calibration state for the project manifest."""
+        if not self._calibration:
+            return None
+        return dict(self._calibration)
 
     def _export_csv(self):
         """Export results (delegated to ResultPanel)."""

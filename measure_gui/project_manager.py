@@ -33,7 +33,8 @@ MANIFEST_FILENAME = "project.json"
 WORKFLOW_FILENAME = "workflow.npz"
 REF_IMAGE_FILENAME = "reference.png"
 INSP_IMAGE_FILENAME = "inspection.png"
-MANIFEST_VERSION = 2
+CALIB_BOARD_FILENAME = "calibration_board.png"
+MANIFEST_VERSION = 3
 MAX_RECENT = 10
 
 
@@ -98,7 +99,12 @@ class ProjectManager:
         workflow_path = os.path.join(project_dir, WORKFLOW_FILENAME)
         app._workflow.save(workflow_path)
 
-        # 3. Copy images into project dir
+        # 3. Copy calibration board image into project dir (portable copy)
+        if app._calibration_board_image is not None:
+            calib_path = os.path.join(project_dir, CALIB_BOARD_FILENAME)
+            cv2.imwrite(calib_path, app._calibration_board_image)
+
+        # 4. Copy images into project dir
         if app._reference_image is not None:
             ref_path = os.path.join(project_dir, REF_IMAGE_FILENAME)
             cv2.imwrite(ref_path, app._reference_image)
@@ -150,6 +156,7 @@ class ProjectManager:
             "tool_visibility": _to_json(dict(app.tool_panel._tool_visibility)),
             "gui": _to_json(app.get_gui_state()),
             "alignment": _to_json(app.get_alignment_state()),
+            "calibration": _to_json(app.get_calibration_state()),
         }
         return manifest
 
@@ -266,6 +273,19 @@ class ProjectManager:
         # Restore reference/inspection image path tracking
         app._reference_image_path = manifest.get("reference_image_path")
         app._inspection_image_path = manifest.get("inspection_image_path")
+
+        # Restore checkerboard calibration (optional; old projects skip this)
+        calibration = manifest.get("calibration")
+        if calibration and calibration.get("scale_mm_per_px"):
+            app._calibration = dict(calibration)
+            app._workflow.physical_scale_mm = float(
+                calibration["scale_mm_per_px"])
+            calib_path = os.path.join(project_dir, CALIB_BOARD_FILENAME)
+            if os.path.exists(calib_path):
+                board = cv2.imread(calib_path)
+                if board is not None:
+                    app._calibration_board_image = board
+            app._update_calibration_status()
 
         # Restore GUI layout state (geometry, tab, sash positions)
         gui_state = manifest.get("gui", {})
