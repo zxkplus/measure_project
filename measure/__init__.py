@@ -38,6 +38,12 @@ from measure.measure2D import LineMeasureObject, CircleMeasureObject, MetrologyM
 
 # Calibration
 from measure.measure_calibration import CameraCalibration, StereoRigCalibration
+from measure.pixel_calibration import (
+    CheckerboardScaleCalibration,
+    CalibrationResult,
+    to_physical,
+    format_length,
+)
 
 # Template matching
 from measure.measure_template import (
