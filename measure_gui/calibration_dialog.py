@@ -326,9 +326,31 @@ class CalibrationDialog(tk.Toplevel):
             messagebox.showwarning(
                 "提示", "请先完成有效的标定检测/角点编辑", parent=self)
             return
+
+        scale = self._current.scale_mm_per_px
+        square_mm = self._square_mm or self._current.square_size_mm
+        px_per_mm = (1.0 / scale) if scale > 0 else 0.0
+
+        # Confirmation dialog so the user can review the ratio before
+        # applying (cancelling keeps the dialog open for further tuning).
+        confirmed = messagebox.askyesno(
+            "确认标定",
+            f"检测到以下标定结果：\n\n"
+            f"  换算比例: {scale:.4f} mm/px\n"
+            f"  等效: 1 mm ≈ {px_per_mm:.1f} px\n"
+            f"  棋盘格边长: {square_mm:.3f} mm\n"
+            f"  检测角点数: {self._current.num_corners}\n"
+            f"  网格间距: {self._current.spacing_px:.2f} px\n\n"
+            f"确认后，测量结果（距离/半径/线长）将以物理单位 mm 显示，\n"
+            f"状态栏将显示该比例。是否应用此标定？",
+            parent=self,
+        )
+        if not confirmed:
+            return
+
         data: Dict[str, Any] = {
-            "scale_mm_per_px": self._current.scale_mm_per_px,
-            "square_size_mm": self._square_mm or self._current.square_size_mm,
+            "scale_mm_per_px": scale,
+            "square_size_mm": square_mm,
             "num_corners": self._current.num_corners,
             "method": self._current.method,
             "board_image": self._board_image,
