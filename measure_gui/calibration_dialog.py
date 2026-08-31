@@ -1,18 +1,17 @@
 """
 Interactive checkerboard pixel-scale calibration dialog.
 
-Loads a (possibly partially visible) checkerboard image and computes the
-uniform mm/pixel scale from the physical square side length.  Detected
-corners are shown on the canvas and can be edited interactively:
-  - left-click on empty space -> add a corner
-  - left-drag on a corner     -> move it
-  - right-click on a corner   -> delete it
-
-The scale is recomputed live after every edit (see
-``CheckerboardScaleCalibration.compute_scale``).
-
-"应用标定" writes the calibration onto the app (and workflow); "清除标定"
-removes it.  Calibration is optional — without it measurements stay in px.
+Workflow (anti false-positive: detection is confined to a user-drawn box):
+  1. Load a (possibly partially visible) checkerboard image.
+  2. Draw a ROI box around the board (click center → drag to size →
+     scroll to rotate → double-click to confirm).  Only corners INSIDE the
+     box are detected, excluding background texture.
+  3. Detected corners are shown on the canvas and can be edited
+     interactively: left-click empty = add, left-drag = move, right-click =
+     delete.  The mm/px scale is recomputed live after every edit.
+  4. "应用标定" writes the calibration onto the app (and workflow);
+     "清除标定" removes it.  Calibration is optional — without it
+     measurements stay in px.
 """
 
 from __future__ import annotations
@@ -26,6 +25,12 @@ import numpy as np
 
 from measure.pixel_calibration import CheckerboardScaleCalibration
 from .image_canvas import CanvasMode, ImageCanvas
+from .utils import compute_rotated_box_corners
+
+# Interaction hint strings.
+_HINT_DRAW_ROI = ("请在棋盘格区域拉框：点击定中心 → 拖拽调大小 → "
+                  "滚轮旋转 → 双击确认")
+_HINT_EDIT_CORNERS = "左键空白=添加角点 ｜ 左键拖拽=移动角点 ｜ 右键=删除角点"
 
 
 class _CornerCanvas(ImageCanvas):
@@ -82,6 +87,8 @@ class CalibrationDialog(tk.Toplevel):
         self._board_image: Optional[np.ndarray] = None
         self._square_mm: Optional[float] = None
         self._current: Optional[Any] = None  # last CalibrationResult
+        self._roi_bbox: Optional[Tuple[int, int, int, int]] = None
+        #   (row0, col0, row1, col1) detection region in full-image coords.
 
         self.transient(master)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -104,17 +111,21 @@ class CalibrationDialog(tk.Toplevel):
         self._size_entry = ttk.Entry(top, textvariable=self._size_var, width=8)
         self._size_entry.pack(side=tk.LEFT)
 
-        self._detect_btn = ttk.Button(top, text="自动检测",
+        self._detect_btn = ttk.Button(top, text="检测框内角点",
                                       command=self._detect, state=tk.DISABLED)
         self._detect_btn.pack(side=tk.LEFT, padx=(14, 0))
+
+        ttk.Button(top, text="重新拉框",
+                   command=self._redraw_roi).pack(side=tk.LEFT, padx=(8, 0))
 
         # Canvas for the board image + interactive corners
         self._canvas = _CornerCanvas(self, width=880, height=520)
         self._canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
         self._canvas.on_control_points_changed = self._on_corners_changed
+        self._canvas.on_roi_confirmed = self._on_roi_confirmed
 
-        ttk.Label(self,
-                  text="交互提示：左键空白=添加角点 ｜ 左键拖拽=移动角点 ｜ 右键=删除角点",
+        self._hint_var = tk.StringVar(value=_HINT_DRAW_ROI)
+        ttk.Label(self, textvariable=self._hint_var,
                   foreground="gray").pack(fill=tk.X, padx=8)
 
         self._result_var = tk.StringVar(value="未检测")
@@ -152,10 +163,14 @@ class CalibrationDialog(tk.Toplevel):
         self._board_image = img
         self._canvas.load_image(img)
         self._canvas.zoom_to_fit()
-        self._canvas.set_mode(CanvasMode.DRAW_CONTROL_POINTS)
+        self._canvas.set_mode(CanvasMode.DRAW_ROI)
+        self._canvas.reset_roi()
         self._canvas.clear_control_points()
+        self._roi_bbox = None
+        self._current = None
         self._detect_btn.config(state=tk.NORMAL)
-        self._result_var.set("已加载图片，请输入边长并点击「自动检测」")
+        self._hint_var.set(_HINT_DRAW_ROI)
+        self._result_var.set("已加载图片，请拉框框住棋盘格区域")
 
     def _read_square_size(self) -> Optional[float]:
         """Read + validate the square side length.  Returns None on error."""
@@ -169,22 +184,63 @@ class CalibrationDialog(tk.Toplevel):
             return None
         return value
 
+    def _on_roi_confirmed(self, center_row: float, center_col: float,
+                          height: float, width: float, angle_deg: float) -> None:
+        """ROI drawn/confirmed by double-click → store bbox + auto-detect.
+
+        Detection is deferred with ``after(0)`` because ``ImageCanvas.
+        confirm_roi()`` switches the canvas back to BROWSE *after* invoking
+        this callback; running detection on the next idle tick lets it finish
+        with DRAW_CONTROL_POINTS as the final mode.
+        """
+        if self._board_image is None:
+            return
+        corners = compute_rotated_box_corners(
+            (center_row, center_col), (height, width), angle_deg)
+        rows = [r for r, _ in corners]
+        cols = [c for _, c in corners]
+        # Axis-aligned bounding box of the (possibly rotated) ROI.
+        self._roi_bbox = (
+            int(round(min(rows))), int(round(min(cols))),
+            int(round(max(rows))), int(round(max(cols))),
+        )
+        self.after(0, self._detect)
+
+    def _redraw_roi(self) -> None:
+        """Clear the box/corners and go back to ROI-drawing mode."""
+        self._canvas.set_mode(CanvasMode.DRAW_ROI)
+        self._canvas.reset_roi()
+        self._canvas.clear_control_points()
+        self._roi_bbox = None
+        self._current = None
+        self._hint_var.set(_HINT_DRAW_ROI)
+        self._result_var.set("请重新拉框框住棋盘格区域")
+
     def _detect(self) -> None:
         if self._board_image is None:
+            return
+        if self._roi_bbox is None:
+            messagebox.showwarning(
+                "提示", "请先在棋盘格区域拉框（点击定中心 → 拖拽调大小 → "
+                        "滚轮旋转 → 双击确认）。", parent=self)
             return
         square_mm = self._read_square_size()
         if square_mm is None:
             return
         try:
-            result = self._calib.calibrate(self._board_image, square_mm)
+            result = self._calib.calibrate(
+                self._board_image, square_mm, roi=self._roi_bbox)
         except ValueError as e:
             messagebox.showerror("输入错误", str(e), parent=self)
             return
 
         self._current = result
         self._square_mm = square_mm
+        # Switch to corner-editing mode (even on failure, so the user can add
+        # corners manually).
+        self._canvas.set_mode(CanvasMode.DRAW_CONTROL_POINTS)
         self._canvas.set_control_points(result.corners)
-        self._canvas.zoom_to_fit()
+        self._hint_var.set(_HINT_EDIT_CORNERS)
         if result.valid:
             self._show_result(result)
         else:
@@ -233,9 +289,13 @@ class CalibrationDialog(tk.Toplevel):
     def _clear(self) -> None:
         if self.on_clear:
             self.on_clear()
+        self._canvas.set_mode(CanvasMode.DRAW_ROI)
+        self._canvas.reset_roi()
         self._canvas.clear_control_points()
         self._current = None
         self._square_mm = None
+        self._roi_bbox = None
+        self._hint_var.set(_HINT_DRAW_ROI)
         self._result_var.set("已清除标定")
         messagebox.showinfo(
             "已清除", "标定已清除，测量结果将使用像素单位。", parent=self)

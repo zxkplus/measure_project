@@ -50,6 +50,39 @@ _NEIGHBOUR_K = 4
 # Outlier filter: keep nearest-neighbour distances within
 # [OUTLIER_FACTOR * median, 1 / OUTLIER_FACTOR * median].
 _OUTLIER_FACTOR = 0.5
+# Minimum ROI side length (px) considered valid for detection.
+_MIN_ROI_SIDE = 5
+
+
+def _normalize_roi(
+    roi: Tuple[int, int, int, int],
+    image_shape: Tuple[int, ...],
+) -> Tuple[int, int, int, int]:
+    """Clamp + validate an ROI box to the image bounds.
+
+    Args:
+        roi: (row0, col0, row1, col1) in full-image coords (inclusive).
+        image_shape: (h, w) of the image.
+
+    Returns:
+        Normalized (row0, col0, row1, col1) with row0 <= row1, col0 <= col1
+        and both inside the image.
+
+    Raises:
+        ValueError: If the ROI is degenerate (too small to detect on).
+    """
+    h, w = image_shape[:2]
+    r0, c0, r1, c1 = (int(v) for v in roi)
+    r0, r1 = min(r0, r1), max(r0, r1)
+    c0, c1 = min(c0, c1), max(c0, c1)
+    r0, c0 = max(0, r0), max(0, c0)
+    r1, c1 = min(h - 1, r1), min(w - 1, c1)
+    if r1 - r0 + 1 < _MIN_ROI_SIDE or c1 - c0 + 1 < _MIN_ROI_SIDE:
+        raise ValueError(
+            f"拉框区域太小（{r1 - r0 + 1}×{c1 - c0 + 1} px），"
+            f"请框选更大的棋盘格区域。"
+        )
+    return r0, c0, r1, c1
 
 
 @dataclass
@@ -91,6 +124,7 @@ class CheckerboardScaleCalibration:
         image: np.ndarray,
         square_size_mm: float,
         board_grid: Optional[Tuple[int, int]] = None,
+        roi: Optional[Tuple[int, int, int, int]] = None,
     ) -> CalibrationResult:
         """Detect checkerboard corners and compute the mm/px scale.
 
@@ -103,6 +137,11 @@ class CheckerboardScaleCalibration:
                 back to the lattice method otherwise.  The lattice method is
                 always used as the primary path because it tolerates partial
                 boards.
+            roi: Optional detection region ``(row0, col0, row1, col1)`` in
+                full-image coordinates (inclusive bounds).  When given, corner
+                detection runs only inside this box — use it to exclude
+                background texture outside the checkerboard.  Detected corners
+                are reported back in full-image coordinates.
 
         Returns:
             CalibrationResult with detected corners and overlay image.
@@ -110,7 +149,14 @@ class CheckerboardScaleCalibration:
         self._validate_square_size(square_size_mm)
         self.square_size_mm = float(square_size_mm)
 
-        corners, method = self._detect_corners(image, board_grid=board_grid)
+        if roi is not None:
+            r0, c0, r1, c1 = _normalize_roi(roi, image.shape)
+            sub = image[r0:r1 + 1, c0:c1 + 1]
+            corners, method = self._detect_corners(sub, board_grid=board_grid)
+            # Offset crop-local corners back to full-image coordinates.
+            corners = [(r + r0, c + c0) for r, c in corners]
+        else:
+            corners, method = self._detect_corners(image, board_grid=board_grid)
 
         result = self.compute_scale(corners, square_size_mm)
         result.method = method

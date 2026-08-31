@@ -129,6 +129,97 @@ class TestCheckerboardScaleCalibration:
             CheckerboardScaleCalibration().calibrate(img, "abc")  # type: ignore
 
 
+class TestRoiRestrictedDetection:
+    """calibrate(..., roi=...) must confine detection to the box and report
+    corners in full-image coordinates (anti false-positive from background)."""
+
+    @staticmethod
+    def _board_with_background(square_px: int = 40, squares: int = 8):
+        """A checkerboard plus random background blobs far from it.
+
+        Returns (image, bbox) where bbox tightly bounds the checkerboard.
+        """
+        h, w = 500, 420
+        img = np.zeros((h, w), dtype=np.uint8)
+        r0, c0 = 20, 40
+        for i in range(squares):
+            for j in range(squares):
+                if (i + j) % 2 == 0:
+                    img[r0 + i * square_px:r0 + (i + 1) * square_px,
+                        c0 + j * square_px:c0 + (j + 1) * square_px] = 200
+        # Random bright blobs BELOW the board (clearly outside it).
+        rng = np.random.default_rng(42)
+        for _ in range(120):
+            rr = int(rng.integers(380, 480))
+            cc = int(rng.integers(20, 400))
+            img[rr:rr + 3, cc:cc + 3] = 255
+        img = cv2.GaussianBlur(img, (3, 3), 0)
+        bbox = (r0, c0, r0 + squares * square_px - 1, c0 + squares * square_px - 1)
+        return img, bbox
+
+    def test_roi_restricts_detection(self):
+        img, bbox = self._board_with_background()
+        square_mm = 10.0
+        full = CheckerboardScaleCalibration().calibrate(img, square_mm)
+        roi = CheckerboardScaleCalibration().calibrate(img, square_mm, roi=bbox)
+        assert roi.valid, roi.error
+        # Background blobs must be excluded by the box.
+        assert roi.num_corners < full.num_corners
+        # All ROI corners lie inside the box.
+        r0, c0, r1, c1 = bbox
+        for r, c in roi.corners:
+            assert r0 <= r <= r1 and c0 <= c <= c1
+        # Correct scale: 10 mm over a 40 px square.
+        assert_scale_ok(roi, 40, square_mm)
+
+    def test_roi_corner_coords_full_image(self):
+        """Corners must be reported in full-image coordinates (offset back)."""
+        square_px, square_mm = 30, 5.0
+        r0, c0, squares = 50, 60, 6
+        img = np.zeros((300, 300), dtype=np.uint8)
+        for i in range(squares):
+            for j in range(squares):
+                if (i + j) % 2 == 0:
+                    img[r0 + i * square_px:r0 + (i + 1) * square_px,
+                        c0 + j * square_px:c0 + (j + 1) * square_px] = 180
+        img = cv2.GaussianBlur(img, (3, 3), 0)
+        bbox = (r0 - 5, c0 - 5, r0 + squares * square_px + 4,
+                c0 + squares * square_px + 4)
+        result = CheckerboardScaleCalibration().calibrate(img, square_mm, roi=bbox)
+        assert result.valid, result.error
+        assert_scale_ok(result, square_px, square_mm)
+        # A known interior corner (2 squares in) at absolute (row, col).
+        expect = (r0 + 2 * square_px, c0 + 2 * square_px)
+        assert any(
+            abs(r - expect[0]) < 2.0 and abs(c - expect[1]) < 2.0
+            for r, c in result.corners
+        ), "no corner at expected full-image position"
+        for r, c in result.corners:
+            assert bbox[0] <= r <= bbox[2] and bbox[1] <= c <= bbox[3]
+
+    def test_roi_clamped_out_of_bounds(self):
+        img = make_checkerboard(8, 8, 40)
+        h, w = img.shape
+        roi = (5, 5, h + 200, w + 200)  # extends beyond the image
+        result = CheckerboardScaleCalibration().calibrate(img, 5.0, roi=roi)
+        assert result.valid, result.error
+        for r, c in result.corners:
+            assert 5 <= r < h and 5 <= c < w
+
+    def test_roi_degenerate_raises(self):
+        img = make_checkerboard(8, 8, 40)
+        with pytest.raises(ValueError):
+            CheckerboardScaleCalibration().calibrate(
+                img, 5.0, roi=(10, 10, 12, 12))
+
+    def test_roi_none_backward_compat(self):
+        img = make_checkerboard(8, 8, 40)
+        a = CheckerboardScaleCalibration().calibrate(img, 5.0)
+        b = CheckerboardScaleCalibration().calibrate(img, 5.0, roi=None)
+        assert a.valid and b.valid
+        assert a.scale_mm_per_px == pytest.approx(b.scale_mm_per_px)
+
+
 class TestManualEditRecompute:
     """After auto-detection, the GUI lets the user edit corners; the scale
     must be recomputed correctly from the edited set."""
