@@ -1,15 +1,18 @@
 """
 Interactive checkerboard pixel-scale calibration dialog.
 
-Workflow (anti false-positive: detection is confined to a user-drawn box):
+Workflow (anti false-positive):
   1. Load a (possibly partially visible) checkerboard image.
   2. Draw a ROI box around the board (click center → drag to size →
      scroll to rotate → double-click to confirm).  Only corners INSIDE the
      box are detected, excluding background texture.
-  3. Detected corners are shown on the canvas and can be edited
+  3. Detection thresholds (角点质量 / 最小间距 / 最大角点数) are tunable and
+     re-run detection live.  Corners that do not fit the checkerboard
+     lattice are filtered out automatically.
+  4. Detected corners are shown on the canvas and can be edited
      interactively: left-click empty = add, left-drag = move, right-click =
      delete.  The mm/px scale is recomputed live after every edit.
-  4. "应用标定" writes the calibration onto the app (and workflow);
+  5. "应用标定" writes the calibration onto the app (and workflow);
      "清除标定" removes it.  Calibration is optional — without it
      measurements stay in px.
 """
@@ -118,6 +121,28 @@ class CalibrationDialog(tk.Toplevel):
         ttk.Button(top, text="重新拉框",
                    command=self._redraw_roi).pack(side=tk.LEFT, padx=(8, 0))
 
+        # --- Tunable detection thresholds (live re-detect) ---
+        tune = ttk.Frame(self)
+        tune.pack(fill=tk.X, padx=8, pady=(0, 2))
+        ttk.Label(tune, text="检测阈值:").pack(side=tk.LEFT)
+        ttk.Label(tune, text="角点质量").pack(side=tk.LEFT, padx=(10, 2))
+        self._quality_var = tk.StringVar(value="0.05")
+        ttk.Spinbox(tune, from_=0.001, to=0.5, increment=0.005, width=7,
+                    textvariable=self._quality_var).pack(side=tk.LEFT)
+        ttk.Label(tune, text="最小间距(px)").pack(side=tk.LEFT, padx=(10, 2))
+        self._min_dist_var = tk.StringVar(value="4")
+        ttk.Spinbox(tune, from_=1, to=50, increment=1, width=5,
+                    textvariable=self._min_dist_var).pack(side=tk.LEFT)
+        ttk.Label(tune, text="最大角点数").pack(side=tk.LEFT, padx=(10, 2))
+        self._max_corners_var = tk.StringVar(value="2000")
+        ttk.Spinbox(tune, from_=10, to=10000, increment=100, width=7,
+                    textvariable=self._max_corners_var).pack(side=tk.LEFT)
+        ttk.Label(tune, text="  （误检多 → 调高角点质量/最小间距）",
+                  foreground="gray").pack(side=tk.LEFT, padx=(14, 0))
+        for _var in (self._quality_var, self._min_dist_var,
+                     self._max_corners_var):
+            _var.trace_add("write", self._on_params_changed)
+
         # Canvas for the board image + interactive corners
         self._canvas = _CornerCanvas(self, width=880, height=520)
         self._canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
@@ -216,7 +241,31 @@ class CalibrationDialog(tk.Toplevel):
         self._hint_var.set(_HINT_DRAW_ROI)
         self._result_var.set("请重新拉框框住棋盘格区域")
 
-    def _detect(self) -> None:
+    def _on_params_changed(self, *_args) -> None:
+        """Debounced handler for the threshold spinboxes."""
+        after_id = getattr(self, "_param_after", None)
+        if after_id:
+            self.after_cancel(after_id)
+        self._param_after = self.after(250, self._apply_params)
+
+    def _apply_params(self) -> None:
+        """Push tuned thresholds into the detector and re-run detection."""
+        self._param_after = None
+        try:
+            q = float(self._quality_var.get())
+            md = float(self._min_dist_var.get())
+            mc = int(float(self._max_corners_var.get()))
+        except ValueError:
+            return
+        if not (0 < q <= 1 and md >= 1 and mc >= 1):
+            return
+        self._calib.quality_level = q
+        self._calib.min_distance = md
+        self._calib.max_corners = mc
+        if self._board_image is not None and self._roi_bbox is not None:
+            self._detect(quiet=True)
+
+    def _detect(self, quiet: bool = False) -> None:
         if self._board_image is None:
             return
         if self._roi_bbox is None:
@@ -231,7 +280,8 @@ class CalibrationDialog(tk.Toplevel):
             result = self._calib.calibrate(
                 self._board_image, square_mm, roi=self._roi_bbox)
         except ValueError as e:
-            messagebox.showerror("输入错误", str(e), parent=self)
+            if not quiet:
+                messagebox.showerror("输入错误", str(e), parent=self)
             return
 
         self._current = result
@@ -245,7 +295,8 @@ class CalibrationDialog(tk.Toplevel):
             self._show_result(result)
         else:
             self._result_var.set("检测失败")
-            messagebox.showerror("标定失败", result.error, parent=self)
+            if not quiet:
+                messagebox.showerror("标定失败", result.error, parent=self)
 
     def _on_corners_changed(self, points: List[Tuple[float, float]]) -> None:
         """Recompute the scale live from the edited corner set."""

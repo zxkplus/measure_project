@@ -85,6 +85,35 @@ def _normalize_roi(
     return r0, c0, r1, c1
 
 
+def _has_orthogonal_neighbour_set(
+    vectors: List[Tuple[float, float]],
+    need: int = 2,
+    cos_tol: float = 0.35,
+) -> bool:
+    """True if at least ``need`` vectors are pairwise near-orthogonal.
+
+    Used by the lattice filter: a real checkerboard corner has two (or more)
+    neighbours pointing along roughly perpendicular grid directions, so
+    |cos(angle)| between them is near 0.  Random/isolated corners fail this.
+    """
+    if len(vectors) < need:
+        return False
+    norms = [np.hypot(vx, vy) for vx, vy in vectors]
+    for i, ((ax, ay), na) in enumerate(zip(vectors, norms)):
+        if na < 1e-9:
+            continue
+        count = 1
+        for j, ((bx, by), nb) in enumerate(zip(vectors, norms)):
+            if i == j or nb < 1e-9:
+                continue
+            cos_abs = abs(ax * bx + ay * by) / (na * nb)
+            if cos_abs < cos_tol:
+                count += 1
+        if count >= need:
+            return True
+    return False
+
+
 @dataclass
 class CalibrationResult:
     """Outcome of a checkerboard pixel-scale calibration."""
@@ -102,11 +131,34 @@ class CalibrationResult:
 class CheckerboardScaleCalibration:
     """Estimate the mm/px scale from a (partially visible) checkerboard.
 
+    Detection is tunable to fight false positives:
+
+    - ``quality_level`` (Shi-Tomasi): raise it to keep only strong corners.
+    - ``min_distance`` (px): raise it to suppress dense spurious corners.
+    - ``max_corners``: cap on detected corners.
+    - ``lattice_tol`` / ``min_lattice_neighbors``: after detection, corners
+      that do not fit the checkerboard lattice (an isolated bright blob /
+      specular spot has no near-orthogonal neighbour pairs at the square
+      spacing) are dropped automatically.
+
     Lifecycle:  __init__ → calibrate(image, square_size_mm) / compute_scale(...)
                 → save() / load()
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        quality_level: float = 0.05,
+        min_distance: float = 4.0,
+        max_corners: int = 2000,
+        lattice_tol: float = 0.2,
+        min_lattice_neighbors: int = 2,
+    ) -> None:
+        self.quality_level: float = quality_level
+        self.min_distance: float = min_distance
+        self.max_corners: int = max_corners
+        self.lattice_tol: float = lattice_tol
+        self.min_lattice_neighbors: int = min_lattice_neighbors
+
         self.valid: bool = False
         self.scale_mm_per_px: float = 0.0
         self.spacing_px: float = 0.0
@@ -158,10 +210,14 @@ class CheckerboardScaleCalibration:
         else:
             corners, method = self._detect_corners(image, board_grid=board_grid)
 
-        result = self.compute_scale(corners, square_size_mm)
+        # Lattice-consistency refinement: drop corners that do not fit the
+        # checkerboard grid (isolated blobs / specular spots).
+        refined, spacing = self._refine_corners(corners)
+
+        result = self._build_result(refined, spacing)
         result.method = method
-        result.corners = list(corners)
-        result.overlay_image = self._draw_corners(image, corners)
+        result.corners = list(refined)
+        result.overlay_image = self._draw_corners(image, refined)
         self._store(result)
         return result
 
@@ -174,7 +230,8 @@ class CheckerboardScaleCalibration:
 
         This is the entry point used by the GUI after the user manually
         edits (adds / deletes / drags) detected corners, so the ratio can be
-        recomputed live without re-running detection.
+        recomputed live without re-running detection.  The corner list is
+        taken as-is (the user curates it manually here, so no lattice filter).
 
         Args:
             corners: List of (row, col) corner points in pixel coords.
@@ -188,26 +245,32 @@ class CheckerboardScaleCalibration:
         self.square_size_mm = float(square_size_mm)
 
         spacing = self._estimate_spacing(corners)
-        n = len(corners)
+        result = self._build_result(corners, spacing)
+        self._store(result)
+        return result
 
+    def _build_result(
+        self,
+        corners: List[Tuple[float, float]],
+        spacing: Optional[float],
+    ) -> CalibrationResult:
+        """Build a CalibrationResult from corners + a (possibly None) spacing."""
+        n = len(corners)
         if spacing is None or spacing <= 0:
             error = (
                 f"角点过少或间距无法估计（当前 {n} 个角点，至少需要 "
                 f"{MIN_CORNERS} 个）。请增大棋盘格在画面中的占比，"
                 f"或手动添加角点。"
             )
-            result = CalibrationResult(
+            return CalibrationResult(
                 valid=False,
                 num_corners=n,
                 method=self.method,
                 corners=list(corners),
                 error=error,
             )
-            self._store(result)
-            return result
-
         scale = self.square_size_mm / spacing
-        result = CalibrationResult(
+        return CalibrationResult(
             valid=True,
             scale_mm_per_px=scale,
             spacing_px=spacing,
@@ -215,8 +278,6 @@ class CheckerboardScaleCalibration:
             method=self.method,
             corners=list(corners),
         )
-        self._store(result)
-        return result
 
     # ------------------------------------------------------------------
     # Persistence
@@ -304,23 +365,23 @@ class CheckerboardScaleCalibration:
         pts = pts.reshape(-1, 2)
         return [(float(row), float(col)) for col, row in pts]
 
-    @staticmethod
     def _shitiomasi_corners(
+        self,
         gray: np.ndarray,
-        max_corners: int = 2000,
-        quality_level: float = 0.05,
-        min_distance: float = 4.0,
     ) -> List[Tuple[float, float]]:
         """Detect checkerboard corners via Shi-Tomasi + subpixel refinement.
+
+        Uses the tunable instance parameters ``quality_level``,
+        ``min_distance`` and ``max_corners``.
 
         Returns (row, col) corner list (possibly empty).
         """
         blurred = cv2.GaussianBlur(gray, (3, 3), 0)
         pts = cv2.goodFeaturesToTrack(
             blurred,
-            maxCorners=max_corners,
-            qualityLevel=quality_level,
-            minDistance=min_distance,
+            maxCorners=self.max_corners,
+            qualityLevel=self.quality_level,
+            minDistance=self.min_distance,
         )
         if pts is None or len(pts) == 0:
             return []
@@ -328,6 +389,72 @@ class CheckerboardScaleCalibration:
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
         pts = cv2.cornerSubPix(blurred, np.float32(pts), (5, 5), (-1, -1), criteria)
         return [(float(row), float(col)) for col, row in pts]
+
+    def _refine_corners(
+        self,
+        corners: List[Tuple[float, float]],
+    ) -> Tuple[List[Tuple[float, float]], Optional[float]]:
+        """Estimate spacing and drop corners that do not fit the lattice.
+
+        Returns ``(refined_corners, spacing)``.  A lattice is only accepted
+        when most raw corners (>= 50%) are lattice-consistent; otherwise the
+        region is treated as "no checkerboard" (spacing None → invalid),
+        which rejects random blob clouds that would otherwise yield a bogus
+        median spacing.
+        """
+        spacing = self._estimate_spacing(corners)
+        if spacing is None:
+            return list(corners), None
+
+        filtered = self._filter_lattice_corners(corners, spacing)
+        lattice_ok = (
+            len(filtered) >= MIN_CORNERS
+            and len(filtered) >= 0.5 * max(1, len(corners))
+        )
+        if lattice_ok:
+            spacing2 = self._estimate_spacing(filtered)
+            if spacing2 is not None:
+                return filtered, spacing2
+        # Lattice too weak (mostly false corners): report the weak set as
+        # invalid so the user re-draws a tighter box / tunes thresholds.
+        return filtered, None
+
+    def _filter_lattice_corners(
+        self,
+        corners: List[Tuple[float, float]],
+        spacing: float,
+    ) -> List[Tuple[float, float]]:
+        """Keep only corners that belong to the checkerboard lattice.
+
+        A real board corner has ``min_lattice_neighbors`` neighbours at
+        roughly the square spacing whose directions are pairwise near-
+        orthogonal.  Isolated background blobs / specular spots have no such
+        neighbours and are dropped — the main anti-false-positive stage.
+        """
+        if len(corners) < MIN_CORNERS:
+            return list(corners)
+
+        pts = np.asarray(corners, dtype=np.float64).reshape(-1, 2)
+        from scipy.spatial import cKDTree
+
+        tree = cKDTree(pts)
+        radius = spacing * (1 + self.lattice_tol)
+        lo = spacing * (1 - self.lattice_tol)
+        kept: List[Tuple[float, float]] = []
+        for i, (r, c) in enumerate(corners):
+            vecs = []
+            for j in tree.query_ball_point((r, c), radius):
+                if j == i:
+                    continue
+                dr = pts[j, 0] - r
+                dc = pts[j, 1] - c
+                if np.hypot(dr, dc) >= lo:
+                    vecs.append((dr, dc))
+            if _has_orthogonal_neighbour_set(
+                vecs, need=self.min_lattice_neighbors, cos_tol=0.35,
+            ):
+                kept.append((r, c))
+        return kept
 
     @staticmethod
     def _estimate_spacing(

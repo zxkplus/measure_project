@@ -261,6 +261,86 @@ class TestManualEditRecompute:
         assert r2.error
 
 
+class TestTunableThresholds:
+    """Detection thresholds are tunable and the lattice filter removes
+    false corners (the two levers against false positives)."""
+
+    @staticmethod
+    def _blob_only_image(n: int = 80, size: Tuple[int, int] = (200, 200)):
+        """Random bright blobs with NO checkerboard — every detection here is
+        a false positive, so ``num_corners`` reflects raw Shi-Tomasi output."""
+        img = np.zeros(size, dtype=np.uint8)
+        rng = np.random.default_rng(7)
+        for _ in range(n):
+            rr = int(rng.integers(5, size[0] - 5))
+            cc = int(rng.integers(5, size[1] - 5))
+            img[rr:rr + 3, cc:cc + 3] = 255
+        return cv2.GaussianBlur(img, (3, 3), 0)
+
+    def test_lattice_filter_drops_mid_square_blobs(self):
+        """Blobs inside black squares (off the lattice) must be dropped."""
+        square_px, squares = 40, 8
+        img = np.zeros((squares * square_px, squares * square_px),
+                       dtype=np.uint8)
+        for i in range(squares):
+            for j in range(squares):
+                if (i + j) % 2 == 0:
+                    img[i * square_px:(i + 1) * square_px,
+                        j * square_px:(j + 1) * square_px] = 200
+        blobs = [
+            (3 * square_px + square_px // 2, 3 * square_px + square_px // 2),
+            (5 * square_px + square_px // 2, 2 * square_px + square_px // 2),
+            (2 * square_px + square_px // 2, 6 * square_px + square_px // 2),
+        ]
+        for r, c in blobs:
+            img[r - 3:r + 3, c - 3:c + 3] = 255
+        img = cv2.GaussianBlur(img, (3, 3), 0)
+
+        result = CheckerboardScaleCalibration().calibrate(img, 10.0)
+        assert result.valid, result.error
+        assert_scale_ok(result, square_px, 10.0)
+        for r, c in result.corners:
+            for br, bc in blobs:
+                assert not (abs(r - br) < 5 and abs(c - bc) < 5), \
+                    "blob corner survived the lattice filter"
+
+    def test_blob_only_image_invalid(self):
+        """Random blob clouds must NOT produce a (bogus) valid scale."""
+        img = self._blob_only_image()
+        result = CheckerboardScaleCalibration().calibrate(img, 5.0)
+        assert not result.valid
+
+    def test_quality_level_reduces_raw_corners(self):
+        """Raising quality_level drops weak (false) corners."""
+        img = self._blob_only_image()
+        raw_default = CheckerboardScaleCalibration(
+            quality_level=0.05)._detect_corners(img)[0]
+        raw_strict = CheckerboardScaleCalibration(
+            quality_level=0.2)._detect_corners(img)[0]
+        assert len(raw_default) > 0
+        assert len(raw_strict) < len(raw_default)
+
+    def test_min_distance_suppresses_raw_corners(self):
+        """Raising min_distance suppresses dense spurious corners."""
+        img = self._blob_only_image()
+        raw_default = CheckerboardScaleCalibration(
+            min_distance=4.0)._detect_corners(img)[0]
+        raw_sparse = CheckerboardScaleCalibration(
+            min_distance=12.0)._detect_corners(img)[0]
+        assert len(raw_default) > 0
+        assert len(raw_sparse) < len(raw_default)
+
+    def test_tunable_params_kept_in_instance(self):
+        calib = CheckerboardScaleCalibration(
+            quality_level=0.1, min_distance=8.0, max_corners=500,
+            lattice_tol=0.25, min_lattice_neighbors=3)
+        assert calib.quality_level == 0.1
+        assert calib.min_distance == 8.0
+        assert calib.max_corners == 500
+        assert calib.lattice_tol == 0.25
+        assert calib.min_lattice_neighbors == 3
+
+
 class TestPersistence:
     def test_save_load_roundtrip(self, test_output_dir):
         img = make_checkerboard(10, 10, 50)
