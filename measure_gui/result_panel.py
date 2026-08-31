@@ -17,6 +17,13 @@ from typing import Any, Callable, Dict, List, Optional
 from .multi_target import TargetResult
 
 
+def _fmt_len(px: float, scale_mm: Optional[float], decimals: int = 3) -> str:
+    """Format a pixel length; append the physical value when calibrated."""
+    if scale_mm:
+        return f"{px * scale_mm:.{decimals}f} mm ({px:.{decimals}f} px)"
+    return f"{px:.{decimals}f} px"
+
+
 class ResultPanel(ttk.Frame):
     """
     Bottom panel for measurement result display.
@@ -33,6 +40,7 @@ class ResultPanel(ttk.Frame):
 
         # Data
         self._targets: List[TargetResult] = []
+        self._scale_mm: Optional[float] = None  # mm/pixel (None = uncalibrated)
 
         self._build_ui()
 
@@ -126,9 +134,11 @@ class ResultPanel(ttk.Frame):
     # Public API
     # ------------------------------------------------------------------
 
-    def set_results(self, targets: List[TargetResult], summary: str = ""):
+    def set_results(self, targets: List[TargetResult], summary: str = "",
+                    scale_mm: Optional[float] = None):
         """Set all measurement results."""
         self._targets = targets
+        self._scale_mm = scale_mm
         self._clear_target_list()
         self._clear_meas_table()
         self._summary_text.delete("1.0", tk.END)
@@ -220,9 +230,11 @@ class ResultPanel(ttk.Frame):
                 elif rtype == "circle" and valid:
                     value_str = (
                         f"({result['center_row']:.1f},{result['center_col']:.1f}) "
-                        f"r={result['radius']:.2f}"
+                        f"r={_fmt_len(result['radius'], self._scale_mm, 2)}"
                     )
-                elif rtype in ("distance", "angle") and valid:
+                elif rtype == "distance" and valid:
+                    value_str = _fmt_len(result.get('value', 0), self._scale_mm)
+                elif rtype == "angle" and valid:
                     value_str = f"{result.get('value', result.get('value_deg', 0)):.3f}"
                 else:
                     value_str = "-"
@@ -278,6 +290,11 @@ class ResultPanel(ttk.Frame):
 
             with open(filepath, "w", newline="") as f:
                 writer = csv.writer(f)
+                scale_note = (
+                    f"# scale_mm_per_px={self._scale_mm:.6f}"
+                    if self._scale_mm else "# scale_mm_per_px=未标定"
+                )
+                writer.writerow([scale_note])
                 writer.writerow([
                     "Target ID", "Score", "Rotation (deg)", "Scale",
                     "Center Row", "Center Col", "Valid",
@@ -301,7 +318,13 @@ class ResultPanel(ttk.Frame):
                                     if score is not None:
                                         val += f", {score:.4f}"
                                 elif rtype == "distance":
-                                    val = f"{result.get('value', 0):.3f}"
+                                    val = _fmt_len(result.get('value', 0),
+                                                   self._scale_mm)
+                                elif rtype == "circle":
+                                    val = (
+                                        f"r={_fmt_len(result.get('radius', 0),"
+                                        f" self._scale_mm, 2)}"
+                                    )
                                 elif rtype == "angle":
                                     val = f"{result.get('value_deg', 0):.3f}°"
                                 else:

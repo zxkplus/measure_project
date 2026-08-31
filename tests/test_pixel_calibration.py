@@ -201,3 +201,64 @@ class TestHelpers:
         s = format_length(12.345, 246.9, decimals=3)
         assert "12.345 mm" in s
         assert "246.900 px" in s
+
+
+class TestGuiFormat:
+    """GUI summary/table formatting must show mm+px when calibrated and keep
+    the old px-only output when uncalibrated."""
+
+    def _make_distance(self, value=100.0):
+        from measure.measure_workflow import DistanceResult
+        return DistanceResult(label="gap", value=value, valid=True)
+
+    def _make_circle(self, radius=50.0):
+        from measure.measure_workflow import CircleResult
+        return CircleResult(label="hole", center_row=0.0, center_col=0.0,
+                            radius=radius, valid=True)
+
+    def _make_line(self, p0=(0.0, 0.0), p1=(30.0, 40.0)):
+        from measure.measure_workflow import LineResult
+        return LineResult(label="edge", a=0.0, b=0.0, c=0.0,
+                          start_row=p0[0], start_col=p0[1],
+                          end_row=p1[0], end_col=p1[1], valid=True)
+
+    def test_distance_no_scale_keeps_px(self):
+        from measure_gui.multi_target import _format_geometric_result
+        s = _format_geometric_result("gap", self._make_distance())
+        assert "100.000 px" in s
+        assert "mm" not in s
+
+    def test_distance_with_scale_shows_both(self):
+        from measure_gui.multi_target import _format_geometric_result
+        s = _format_geometric_result("gap", self._make_distance(), scale_mm=0.05)
+        assert "5.000 mm" in s
+        assert "100.000 px" in s
+
+    def test_circle_radius(self):
+        from measure_gui.multi_target import _format_geometric_result
+        r = self._make_circle(50.0)
+        assert "50.00px" in _format_geometric_result("hole", r)
+        assert "5.00 mm" in _format_geometric_result("hole", r, scale_mm=0.1)
+
+    def test_line_length(self):
+        from measure_gui.multi_target import _format_geometric_result
+        line = self._make_line()  # length = 50 px
+        s = _format_geometric_result("edge", line, scale_mm=0.02)
+        assert "1.000 mm" in s
+        assert "50.000 px" in s
+        s0 = _format_geometric_result("edge", line)
+        assert "50.000 px" in s0
+
+    def test_point_and_angle_unchanged(self):
+        from measure.measure_workflow import AngleResult, PointResult
+        from measure_gui.multi_target import _format_geometric_result
+        pt = PointResult(label="p", row=10.0, col=20.0, valid=True)
+        ang = AngleResult(label="a", value_rad=0.5, valid=True)
+        assert "row=10.00, col=20.00" in _format_geometric_result("p", pt, scale_mm=0.05)
+        assert "28.65°" in _format_geometric_result("a", ang, scale_mm=0.05)
+
+    def test_result_dict_with_scale(self):
+        from measure_gui.multi_target import _format_result_dict
+        d = {"type": "distance", "label": "gap", "valid": True, "value": 200.0}
+        assert "2.000 mm" in _format_result_dict("gap", d, scale_mm=0.01)
+        assert "200.000 px" in _format_result_dict("gap", d, scale_mm=0.01)

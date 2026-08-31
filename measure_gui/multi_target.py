@@ -545,9 +545,22 @@ class MultiTargetWorkflow:
         # Debug image saving
         self._debug_dir: Optional[str] = None
 
+        # Optional pixel->physical scale (mm/pixel) from checkerboard
+        # calibration.  None (or 0) means "uncalibrated" — results stay in px.
+        self._physical_scale_mm: Optional[float] = None
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
+
+    @property
+    def physical_scale_mm(self) -> Optional[float]:
+        """mm/pixel scale from checkerboard calibration (None = uncalibrated)."""
+        return self._physical_scale_mm
+
+    @physical_scale_mm.setter
+    def physical_scale_mm(self, value: Optional[float]) -> None:
+        self._physical_scale_mm = float(value) if value else None
 
     @property
     def alignment(self) -> AlignmentStrategy:
@@ -1533,9 +1546,22 @@ class MultiTargetWorkflow:
         # Debug image saving
         self._debug_dir: Optional[str] = None
 
+        # Optional pixel->physical scale (mm/pixel) from checkerboard
+        # calibration.  None (or 0) means "uncalibrated" — results stay in px.
+        self._physical_scale_mm: Optional[float] = None
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
+
+    @property
+    def physical_scale_mm(self) -> Optional[float]:
+        """mm/pixel scale from checkerboard calibration (None = uncalibrated)."""
+        return self._physical_scale_mm
+
+    @physical_scale_mm.setter
+    def physical_scale_mm(self, value: Optional[float]) -> None:
+        self._physical_scale_mm = float(value) if value else None
 
     @property
     def alignment(self) -> AlignmentStrategy:
@@ -2847,9 +2873,11 @@ class MultiTargetWorkflow:
                     if label == "_error":
                         lines.append(f"  [ERROR] {result}")
                     else:
-                        lines.append(_format_result_dict(label, result))
+                        lines.append(_format_result_dict(
+                            label, result, scale_mm=self.physical_scale_mm))
                 elif hasattr(result, "valid"):
-                    lines.append(_format_geometric_result(label, result))
+                    lines.append(_format_geometric_result(
+                        label, result, scale_mm=self.physical_scale_mm))
                 else:
                     lines.append(f"  {label}: {result}")
 
@@ -3086,7 +3114,23 @@ def _draw_geometric_result(
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
 
 
-def _format_result_dict(label: str, result: dict) -> str:
+def _fmt_length(px: float, scale_mm: Optional[float]) -> str:
+    """Format a pixel length; append the physical value when calibrated."""
+    if scale_mm:
+        mm = px * scale_mm
+        return f"{mm:.3f} mm ({px:.3f} px)"
+    return f"{px:.3f} px"
+
+
+def _result_dict_line_length(result: dict) -> float:
+    """Pixel length of a line result dict (from its endpoints)."""
+    dr = result.get('end_row', 0) - result.get('start_row', 0)
+    dc = result.get('end_col', 0) - result.get('start_col', 0)
+    return float(np.hypot(dr, dc))
+
+
+def _format_result_dict(label: str, result: dict,
+                        scale_mm: Optional[float] = None) -> str:
     """Format a single measurement result dict for text display."""
     rtype = result.get("type", "unknown")
     valid = result.get("valid", False)
@@ -3100,19 +3144,26 @@ def _format_result_dict(label: str, result: dict) -> str:
             f"row={result['row']:.2f}, col={result['col']:.2f}"
         )
     elif rtype == "line":
+        length = _result_dict_line_length(result)
         return (
             f"  {label}: [{rtype}] "
             f"start=({result['start_row']:.1f},{result['start_col']:.1f}), "
-            f"end=({result['end_row']:.1f},{result['end_col']:.1f})"
+            f"end=({result['end_row']:.1f},{result['end_col']:.1f}), "
+            f"len={_fmt_length(length, scale_mm)}"
         )
     elif rtype == "circle":
+        radius = result['radius']
+        if scale_mm:
+            r_str = f"r={radius * scale_mm:.2f} mm ({radius:.2f} px)"
+        else:
+            r_str = f"r={radius:.2f}px"
         return (
             f"  {label}: [{rtype}] "
             f"center=({result['center_row']:.1f},{result['center_col']:.1f}), "
-            f"radius={result['radius']:.2f}px"
+            f"{r_str}"
         )
     elif rtype == "distance":
-        return f"  {label}: [{rtype}] {result['value']:.3f} px"
+        return f"  {label}: [{rtype}] {_fmt_length(result['value'], scale_mm)}"
     elif rtype == "angle":
         val = result.get("value_deg", result.get("value", 0))
         return f"  {label}: [{rtype}] {val:.2f}°"
@@ -3120,7 +3171,8 @@ def _format_result_dict(label: str, result: dict) -> str:
         return f"  {label}: [{rtype}] VALID"
 
 
-def _format_geometric_result(label: str, result) -> str:
+def _format_geometric_result(label: str, result,
+                             scale_mm: Optional[float] = None) -> str:
     """Format a GeometricResult for text display."""
     rtype = result.type
     if not result.valid:
@@ -3132,18 +3184,25 @@ def _format_geometric_result(label: str, result) -> str:
         return (
             f"  {label}: [{rtype}] "
             f"start=({result.start_row:.1f},{result.start_col:.1f}), "
-            f"end=({result.end_row:.1f},{result.end_col:.1f})"
+            f"end=({result.end_row:.1f},{result.end_col:.1f}), "
+            f"len={_fmt_length(result.length, scale_mm)}"
         )
     elif rtype == "circle":
+        if scale_mm:
+            r_str = f"r={result.radius * scale_mm:.2f} mm ({result.radius:.2f} px)"
+        else:
+            r_str = f"r={result.radius:.2f}px"
         return (
             f"  {label}: [{rtype}] "
             f"center=({result.center_row:.1f},{result.center_col:.1f}), "
-            f"radius={result.radius:.2f}px"
+            f"{r_str}"
         )
     elif rtype == "distance":
-        return f"  {label}: [{rtype}] {result.value:.3f} px"
+        return f"  {label}: [{rtype}] {_fmt_length(result.value, scale_mm)}"
     elif rtype == "angle":
-        val = getattr(result, "value_deg", result.value)
+        val = getattr(result, "value_deg", None)
+        if val is None:
+            val = getattr(result, "value", 0)
         return f"  {label}: [{rtype}] {val:.2f}°"
     return f"  {label}: [{rtype}] VALID"
 

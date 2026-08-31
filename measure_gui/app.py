@@ -548,6 +548,7 @@ class MeasureApp:
             self.result_panel.set_results(
                 results,
                 summary,
+                scale_mm=self._workflow.physical_scale_mm,
             )
 
             # Visualize on inspection canvas
