@@ -1,0 +1,26 @@
+services:
+  measure-v2:
+    image: ${MEASURE_V2_IMAGE}
+    restart: unless-stopped
+    environment:
+      MEASURE_V2_HOST: 0.0.0.0
+      MEASURE_V2_PORT: "9004"
+      MEASURE_V2_ASSET_ROOT: /var/lib/measure-v2
+      MEASURE_V2_SHM_NAME: measure_v2_img_shm
+    ports:
+      - "${MEASURE_V2_HOST_PORT:-29004}:9004"
+    volumes:
+      - /dev/shm:/dev/shm
+      - ${MEASURE_V2_ASSET_DIR}:/var/lib/measure-v2
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:9004/api/v2/health', timeout=2)
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s

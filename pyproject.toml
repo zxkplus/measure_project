@@ -5,11 +5,20 @@ description = "纯 Python 实现的几何测量工具（1D 边缘检测、直线
 readme = "readme.md"
 requires-python = ">=3.9"
 dependencies = [
+    "flask>=2.0.0",
     "numpy>=1.21.0",
     "opencv-python>=4.5.0",
+    "pyyaml>=5.1",
     "scipy>=1.7.0",
+    "waitress>=2.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.0",
+    "pytest>=7.0",
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "measure_api/tests"]
 addopts = ["--headless"]

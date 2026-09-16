@@ -1,0 +1,16 @@
+stages:
+  - ship
+
+ship_amd64:
+  stage: ship
+  image: ${DAGGER_BUILDER}
+  script:
+    - BUILDKIT_HOST=${BUILDKIT_HOST_AMD64} wagon do ship_amd64
+
+merge:
+  stage: ship
+  needs:
+    - ship_amd64
+  image: ${DAGGER_BUILDER}
+  script:
+    - wagon do ship push x
