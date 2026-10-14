@@ -23,7 +23,7 @@ dagger.#Plan & {
 	}
 
 	actions: {
-		base_image: "harbor.innoai.tech/c3rd/python-runtime-build:feat-3.11-1.0.0-18183ed0-amd64"
+		base_image: "harbor.innoai.tech/c3rd/python-runtime-build:feat-3.11-1.0.0-1e12b172-amd64"
 
 		Config: cbase.#CompileConfig & {
 			CI_PROJECT_NAME:      client.env.CI_PROJECT_NAME
