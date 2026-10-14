@@ -1,4 +1,4 @@
-"""Production command-line entry point for the v2 measurement engine."""
+"""Production command-line entry point for the FastAPI V2 computation service."""
 
 from __future__ import annotations
 
@@ -7,48 +7,31 @@ import os
 from pathlib import Path
 from typing import Optional, Sequence
 
-from waitress import serve
+import uvicorn
 
-from measure_api.v2.application import EngineApplication
-from measure_api.v2.http import create_production_app
-from measure_api.v2.image import DEFAULT_POOL_NAME, SharedMemoryImageReader
+from measure_api.v2.app import create_app
+from measure_api.v2.configuration import load_settings
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    """Run the single-instance production HTTP adapter.
+    """Run one ASGI owner with independently bounded CPU processes.
 
     Args:
         argv: Optional command-line arguments; process arguments are used when omitted.
     """
-    parser = argparse.ArgumentParser(description="Headless v2 measurement engine")
+    parser = argparse.ArgumentParser(description="Headless FastAPI V2 measurement service")
     parser.add_argument("--host", default=os.getenv("MEASURE_V2_HOST", "0.0.0.0"))
+    parser.add_argument("--port", type=int, default=int(os.getenv("MEASURE_V2_PORT", "9004")))
     parser.add_argument(
-        "--port",
-        type=int,
-        default=int(os.getenv("MEASURE_V2_PORT", "9004")),
-    )
-    parser.add_argument(
-        "--asset-root",
-        type=Path,
-        default=Path(os.getenv("MEASURE_V2_ASSET_ROOT", "/var/lib/measure-v2")),
-    )
-    parser.add_argument(
-        "--shm-name",
-        default=os.getenv("MEASURE_V2_SHM_NAME", DEFAULT_POOL_NAME),
+        "--config", type=Path, default=os.getenv("MEASURE_V2_CONFIG"),
+        help="JSON ServiceSettings file (shared_roots, writable_roots, state and limits)",
     )
     args = parser.parse_args(argv)
-
-    image_reader = SharedMemoryImageReader(args.shm_name)
-    image_reader.ensure_pool()
-    application = EngineApplication(args.asset_root)
-    http = create_production_app(
-        application,
-        image_reader,
-    )
     try:
-        serve(http, host=args.host, port=args.port, threads=4)
-    finally:
-        application.close()
+        settings = load_settings(args.config)
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+    uvicorn.run(create_app(settings), host=args.host, port=args.port, workers=1)
 
 
 if __name__ == "__main__":

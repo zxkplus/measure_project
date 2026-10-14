@@ -1,0 +1,7 @@
+# Python 3.9-compatible headless V2 runtime.
+fastapi==0.115.12
+pydantic==2.11.7
+uvicorn==0.34.3
+numpy==1.26.4
+opencv-python-headless==4.11.0.86
+scipy==1.13.1

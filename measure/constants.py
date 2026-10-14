@@ -5,6 +5,8 @@ Centralises magic numbers and common colour / font defaults that were
 previously inlined across ~25+ call sites.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 
 import cv2

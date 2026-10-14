@@ -1,0 +1,250 @@
+[
+  {
+    "name": "bottleneck_1.jpg-inspect",
+    "route": "/image-inspections",
+    "request": {
+      "image": {
+        "root": "samples",
+        "path": "bottleneck_1.jpg"
+      }
+    },
+    "observations": [
+      "/metadata/width",
+      "/metadata/height"
+    ],
+    "observation_units": {
+      "/metadata/width": "px",
+      "/metadata/height": "px"
+    },
+    "input_provenance": {
+      "dataset": "repository samples",
+      "ground_truth": "unavailable"
+    }
+  },
+  {
+    "name": "bottleneck_1.jpg-measurement",
+    "route": "/measurements/lines",
+    "request": {
+      "image": {
+        "root": "samples",
+        "path": "bottleneck_1.jpg"
+      },
+      "start": {
+        "x": 966,
+        "y": 750
+      },
+      "end": {
+        "x": 1626,
+        "y": 760
+      },
+      "search_half_length": 50,
+      "average_half_width": 20,
+      "probe_count": 12,
+      "sigma": 2,
+      "threshold": 10
+    },
+    "observations": [
+      "/line/a",
+      "/line/b",
+      "/line/c",
+      "/diagnostics/rms_error"
+    ],
+    "observation_units": {
+      "/line/a": "dimensionless",
+      "/line/b": "dimensionless",
+      "/line/c": "px",
+      "/diagnostics/rms_error": "px"
+    },
+    "input_provenance": {
+      "dataset": "repository samples",
+      "ground_truth": "unavailable",
+      "configuration": "illustrative operator seed, not known physical truth"
+    }
+  },
+  {
+    "name": "bottleneck_2.jpg-inspect",
+    "route": "/image-inspections",
+    "request": {
+      "image": {
+        "root": "samples",
+        "path": "bottleneck_2.jpg"
+      }
+    },
+    "observations": [
+      "/metadata/width",
+      "/metadata/height"
+    ],
+    "observation_units": {
+      "/metadata/width": "px",
+      "/metadata/height": "px"
+    },
+    "input_provenance": {
+      "dataset": "repository samples",
+      "ground_truth": "unavailable"
+    }
+  },
+  {
+    "name": "bottleneck_2.jpg-measurement",
+    "route": "/measurements/lines",
+    "request": {
+      "image": {
+        "root": "samples",
+        "path": "bottleneck_2.jpg"
+      },
+      "start": {
+        "x": 966,
+        "y": 750
+      },
+      "end": {
+        "x": 1626,
+        "y": 760
+      },
+      "search_half_length": 50,
+      "average_half_width": 20,
+      "probe_count": 12,
+      "sigma": 2,
+      "threshold": 10
+    },
+    "observations": [
+      "/line/a",
+      "/line/b",
+      "/line/c",
+      "/diagnostics/rms_error"
+    ],
+    "observation_units": {
+      "/line/a": "dimensionless",
+      "/line/b": "dimensionless",
+      "/line/c": "px",
+      "/diagnostics/rms_error": "px"
+    },
+    "input_provenance": {
+      "dataset": "repository samples",
+      "ground_truth": "unavailable",
+      "configuration": "illustrative operator seed, not known physical truth"
+    }
+  },
+  {
+    "name": "bottleopen_1.jpg-inspect",
+    "route": "/image-inspections",
+    "request": {
+      "image": {
+        "root": "samples",
+        "path": "bottleopen_1.jpg"
+      }
+    },
+    "observations": [
+      "/metadata/width",
+      "/metadata/height"
+    ],
+    "observation_units": {
+      "/metadata/width": "px",
+      "/metadata/height": "px"
+    },
+    "input_provenance": {
+      "dataset": "repository samples",
+      "ground_truth": "unavailable"
+    }
+  },
+  {
+    "name": "bottleopen_1.jpg-measurement",
+    "route": "/measurements/circles",
+    "request": {
+      "image": {
+        "root": "samples",
+        "path": "bottleopen_1.jpg"
+      },
+      "center": {
+        "x": 1376,
+        "y": 1000
+      },
+      "radius": 320,
+      "radius_min": 280,
+      "radius_max": 350,
+      "search_half_length": 60,
+      "average_half_width": 10,
+      "probe_count": 24,
+      "sigma": 2,
+      "threshold": 10,
+      "polarity": "positive"
+    },
+    "observations": [
+      "/circle/radius",
+      "/circle/center/x",
+      "/circle/center/y",
+      "/diagnostics/rms_error"
+    ],
+    "observation_units": {
+      "/circle/radius": "px",
+      "/circle/center/x": "px",
+      "/circle/center/y": "px",
+      "/diagnostics/rms_error": "px"
+    },
+    "input_provenance": {
+      "dataset": "repository samples",
+      "ground_truth": "unavailable",
+      "configuration": "visually selected inner mouth seed, not known physical truth"
+    }
+  },
+  {
+    "name": "bottleopen_2.jpg-inspect",
+    "route": "/image-inspections",
+    "request": {
+      "image": {
+        "root": "samples",
+        "path": "bottleopen_2.jpg"
+      }
+    },
+    "observations": [
+      "/metadata/width",
+      "/metadata/height"
+    ],
+    "observation_units": {
+      "/metadata/width": "px",
+      "/metadata/height": "px"
+    },
+    "input_provenance": {
+      "dataset": "repository samples",
+      "ground_truth": "unavailable"
+    }
+  },
+  {
+    "name": "bottleopen_2.jpg-measurement",
+    "route": "/measurements/circles",
+    "request": {
+      "image": {
+        "root": "samples",
+        "path": "bottleopen_2.jpg"
+      },
+      "center": {
+        "x": 1376,
+        "y": 1000
+      },
+      "radius": 320,
+      "radius_min": 280,
+      "radius_max": 350,
+      "search_half_length": 60,
+      "average_half_width": 10,
+      "probe_count": 24,
+      "sigma": 2,
+      "threshold": 10,
+      "polarity": "positive"
+    },
+    "observations": [
+      "/circle/radius",
+      "/circle/center/x",
+      "/circle/center/y",
+      "/diagnostics/rms_error"
+    ],
+    "observation_units": {
+      "/circle/radius": "px",
+      "/circle/center/x": "px",
+      "/circle/center/y": "px",
+      "/diagnostics/rms_error": "px"
+    },
+    "input_provenance": {
+      "dataset": "repository samples",
+      "ground_truth": "unavailable",
+      "configuration": "visually selected inner mouth seed, not known physical truth"
+    }
+  }
+]
