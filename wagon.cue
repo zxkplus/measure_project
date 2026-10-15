@@ -69,7 +69,7 @@ dagger.#Plan & {
 			CommandChains: [
 				#"for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do if [ -f "$source" ]; then sed -i -E 's@https?://(deb.debian.org|security.debian.org|archive.ubuntu.com|security.ubuntu.com)@https://mirrors.ustc.edu.cn@g' "$source"; fi; done"#,
 				#"apt-get update && apt-get install -y --no-install-recommends libgl1 && rm -rf /var/lib/apt/lists/*"#,
-				#"pip3 install -i https://mirrors.aliyun.com/pypi/simple/ -r /usr/local/pkg/measure_project/amd64/bin/measure_project/requirements.txt -r /usr/local/pkg/measure_project/amd64/bin/measure_project/measure_api/requirements.txt"#,
+				#"pip3 install -i https://mirrors.aliyun.com/pypi/simple/ -r /usr/local/pkg/measure_project/amd64/bin/measure_project/measure_api/requirements.txt -r /usr/local/pkg/measure_project/amd64/bin/measure_project/measure_api/v2/requirements.lock"#,
 				#"chmod +x /usr/local/pkg/measure_project/amd64/bin/measure_project/measure_api/run.sh"#,
 			]
 
