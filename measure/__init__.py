@@ -81,8 +81,28 @@ from measure.measure_workflow import (
     SimilarityTransform,
 )
 
-# Multi-target workflow
-from measure.multi_target_workflow import MultiTargetWorkflow, TargetInstance, TargetResult
+# Multi-target workflow (unified engine shared by GUI, API v1 and API v2)
+from measure.multi_target_workflow import MultiTargetWorkflow, TargetResult
+
+# ROI alignment strategies used by the multi-target workflow
+from measure.alignment import (
+    AlignmentStrategy,
+    AlignResult,
+    SingleBoxAlignment,
+    MultiPointAlignment,
+    ControlPoint,
+    strategy_from_roi_state,
+)
+
+# Rotated-box crop/straighten + coordinate mapping helpers
+from measure.rectify import (
+    compute_rotated_box_corners,
+    crop_and_straighten,
+    build_forward_transform,
+    build_inverse_transform,
+    map_point_via_affine,
+    map_point_to_original,
+)
 
 # Core utilities (available but not exported by default to keep namespace clean)
 # Users can still do: from measure.constants import EPS

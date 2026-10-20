@@ -17,3 +17,5 @@ models/*
 .idea
 docs/*
 .venv-docs/*
+# local verification deps (worktree-only)
+.deps/
