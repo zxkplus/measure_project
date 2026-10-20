@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
+from measure.object_specs import composed_deps, composed_types, primitive_types
+
 # ---------------------------------------------------------------------------
 # Measurement result types
 # ---------------------------------------------------------------------------
@@ -115,31 +117,16 @@ class CallRecord(TypedDict, total=False):
 
 # ---------------------------------------------------------------------------
 # Supported measurement object types
+#
+# Derived from the single registry in ``measure.object_specs`` so that this
+# module can never drift from the GUI / v2 engine's view of object types.
 # ---------------------------------------------------------------------------
 
-PRIMITIVE_TYPES = {
-    "EdgePoint",
-    "EdgePair",
-    "FitLine",
-    "FitCircle",
-    "TemplateMatchPoint",
-}
+PRIMITIVE_TYPES = set(primitive_types())
 
-COMPOSED_TYPES = {
-    "TwoPointsLine",
-    "TwoPointsDistance",
-    "PointLineDistance",
-    "TwoLinesAngle",
-    "PointCircleDistance",
-}
+COMPOSED_TYPES = set(composed_types())
 
 ALL_TYPES = PRIMITIVE_TYPES | COMPOSED_TYPES
 
 # Mapping from composed type to its dependency parameter names
-COMPOSED_DEPS: Dict[str, List[str]] = {
-    "TwoPointsLine": ["point_a_label", "point_b_label"],
-    "TwoPointsDistance": ["point_a_label", "point_b_label"],
-    "PointLineDistance": ["point_label", "line_label"],
-    "TwoLinesAngle": ["line_a_label", "line_b_label"],
-    "PointCircleDistance": ["point_label", "circle_label"],
-}
+COMPOSED_DEPS: Dict[str, List[str]] = composed_deps()

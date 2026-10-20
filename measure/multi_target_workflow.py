@@ -60,6 +60,12 @@ from measure.measure_template import (
     _deserialize_preprocessor,
 )
 
+from measure.object_specs import (
+    OBJECT_SPECS,
+    defaults_for,
+    factory_table,
+    get_spec,
+)
 from measure.alignment import (
     AlignmentStrategy,
     AlignResult,
@@ -76,6 +82,13 @@ from measure.result_format import (
     _format_geometric_result,
     _format_result_dict,
 )
+
+# The object-type registry lives in measure.object_specs; these aliases
+# keep the historical private names working inside this module and for
+# callers that imported them from here.
+_OBJECT_FACTORIES = factory_table()
+_get_defaults = defaults_for
+
 
 @dataclass
 class TargetResult:
@@ -177,57 +190,13 @@ class _VirtualPoint:
         self.result = result
         self._cached_measure = None
 
-_OBJECT_FACTORIES: Dict[str, Tuple] = {}
 
 
-def _register_factory(type_name: str, factory, param_keys: List[str]):
-    _OBJECT_FACTORIES[type_name] = (factory, param_keys)
 
 
-def _make_edge_point(label: str, **p) -> EdgePointObject:
-    return EdgePointObject(
-        label=label,
-        row=p["row"],
-        col=p["col"],
-        angle=p["angle"],
-        length1=p["length1"],
-        length2=p["length2"],
-        sigma=p.get("sigma", 1.0),
-        threshold=p.get("threshold", 30.0),
-        transition="all",
-        select="first",
-        interpolation=p.get("interpolation", "linear"),
-    )
 
 
-def _make_edge_pair(label: str, **p) -> EdgePairObject:
-    return EdgePairObject(
-        label=label,
-        row=p["row"],
-        col=p["col"],
-        angle=p["angle"],
-        length1=p["length1"],
-        length2=p["length2"],
-        sigma=p.get("sigma", 1.0),
-        threshold=p.get("threshold", 30.0),
-        transition="all",
-        select="endpoints",
-        interpolation=p.get("interpolation", "linear"),
-    )
 
-
-def _make_fit_line(label: str, **p) -> FitLineObject:
-    return FitLineObject(
-        label=label,
-        start=p["start"],
-        end=p["end"],
-        measure_length1=p["measure_length1"],
-        measure_length2=p["measure_length2"],
-        num_measures=p.get("num_measures", 10),
-        sigma=p.get("sigma", 1.0),
-        threshold=p.get("threshold", 30.0),
-        transition=p.get("transition", "all"),
-    )
 
 
 
@@ -387,118 +356,20 @@ def _build_profile_image(
     return canvas
 
 
-def _make_fit_circle(label: str, **p) -> FitCircleObject:
-    return FitCircleObject(
-        label=label,
-        center=p["center"],
-        radius=p["radius"],
-        measure_length1=p["measure_length1"],
-        measure_length2=p["measure_length2"],
-        radius_min=p.get("radius_min"),
-        radius_max=p.get("radius_max"),
-        num_measures=p.get("num_measures", 12),
-        sigma=p.get("sigma", 1.0),
-        threshold=p.get("threshold", 30.0),
-        transition=p.get("transition", "all"),
-        start_phi=p.get("start_phi", 0.0),
-        end_phi=p.get("end_phi", 2 * np.pi),
-    )
 
 
-def _make_template_match_point(label: str, **p) -> TemplateMatchPointObject:
-    return TemplateMatchPointObject(
-        label=label,
-        row=p["row"],
-        col=p["col"],
-        template_size=p.get("template_size", 40),
-        preprocessor_type=p.get("preprocessor_type", "raw"),
-        match_score_threshold=p.get("match_score_threshold", 0.5),
-        angle_range_half=p.get("angle_range_half", 15.0),
-        angle_step=p.get("angle_step", 1.0),
-        use_subpixel=p.get("use_subpixel", True),
-        _template_point=p.get("_template_point", None),
-    )
 
 
-def _make_two_points_line(label: str, **p) -> TwoPointsLineObject:
-    return TwoPointsLineObject(
-        label=label,
-        point_a_label=p["point_a_label"],
-        point_b_label=p["point_b_label"],
-    )
 
 
-def _make_two_points_distance(label: str, **p) -> TwoPointsDistanceObject:
-    return TwoPointsDistanceObject(
-        label=label,
-        point_a_label=p["point_a_label"],
-        point_b_label=p["point_b_label"],
-    )
 
 
-def _make_point_line_distance(label: str, **p) -> PointLineDistanceObject:
-    return PointLineDistanceObject(
-        label=label,
-        point_label=p["point_label"],
-        line_label=p["line_label"],
-    )
 
 
-def _make_two_lines_angle(label: str, **p) -> TwoLinesAngleObject:
-    return TwoLinesAngleObject(
-        label=label,
-        line_a_label=p["line_a_label"],
-        line_b_label=p["line_b_label"],
-    )
 
 
-def _make_point_circle_distance(label: str, **p) -> PointCircleDistanceObject:
-    return PointCircleDistanceObject(
-        label=label,
-        point_label=p["point_label"],
-        circle_label=p["circle_label"],
-    )
 
 
-_OBJECT_FACTORIES = {
-    "EdgePoint": (_make_edge_point, [
-        "row", "col", "angle", "length1", "length2",
-        "sigma", "threshold", "interpolation",
-    ]),
-    "EdgePair": (_make_edge_pair, [
-        "row", "col", "angle", "length1", "length2",
-        "sigma", "threshold", "interpolation",
-    ]),
-    "FitLine": (_make_fit_line, [
-        "start", "end", "measure_length1", "measure_length2",
-        "num_measures", "sigma", "threshold", "transition",
-    ]),
-    "FitCircle": (_make_fit_circle, [
-        "center", "radius",
-        "measure_length1", "measure_length2", "num_measures",
-        "sigma", "threshold", "transition", "start_phi", "end_phi",
-    ]),
-    "TemplateMatchPoint": (_make_template_match_point, [
-        "row", "col", "template_size", "preprocessor_type",
-        "match_score_threshold", "angle_range_half", "angle_step",
-        "use_subpixel",
-    ]),
-    "TwoPointsLine": (_make_two_points_line, [
-        "point_a_label", "point_b_label",
-    ]),
-    "TwoPointsDistance": (_make_two_points_distance, [
-        "point_a_label", "point_b_label",
-    ]),
-    "PointLineDistance": (_make_point_line_distance, [
-        "point_label", "line_label",
-    ]),
-    "TwoLinesAngle": (_make_two_lines_angle, [
-        "line_a_label", "line_b_label",
-    ]),
-    "PointCircleDistance": (_make_point_circle_distance, [
-        "point_label", "circle_label",
-    ]),
-}
 
 
 # ===========================================================================
@@ -1898,25 +1769,6 @@ class MultiTargetWorkflow:
 
 # Helpers
 # ===========================================================================
-
-
-def _get_defaults(object_type: str) -> Dict[str, Any]:
-    """Get default parameters for each measurement type."""
-    defaults = {
-        "EdgePoint": {"sigma": 1.0, "threshold": 30.0, "interpolation": "linear"},
-        "EdgePair": {"sigma": 1.0, "threshold": 30.0, "interpolation": "linear"},
-        "FitLine": {"num_measures": 10, "sigma": 1.0, "threshold": 30.0,
-                     "transition": "all"},
-        "FitCircle": {"num_measures": 12, "sigma": 1.0, "threshold": 30.0,
-                       "transition": "all", "start_phi": 0.0, "end_phi": 2 * np.pi},
-        "TemplateMatchPoint": {"template_size": 40, "preprocessor_type": "raw",
-                                "match_score_threshold": 0.5,
-                                "angle_range_half": 15.0, "angle_step": 1.0,
-                                "use_subpixel": True,
-                                "pyramid_decimate": 0,
-                                "pyramid_max_template_size": 400},
-    }
-    return defaults.get(object_type, {})
 
 
 def _references_label(defn: Dict[str, Any], target_label: str) -> bool:

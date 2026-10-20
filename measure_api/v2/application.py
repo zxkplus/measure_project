@@ -13,6 +13,8 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 
+from measure.object_specs import OBJECT_SPECS
+
 SESSION_IDLE_TTL = timedelta(hours=8)
 
 
@@ -85,62 +87,13 @@ class _ObjectContract:
 
 
 _OBJECT_CONTRACTS: Dict[str, _ObjectContract] = {
-    "EdgePoint": _ObjectContract(
-        ("row", "col", "angle", "length1", "length2"),
-        {"sigma": 1.0, "threshold": 30.0, "interpolation": "linear"},
-        (),
-        "point",
-    ),
-    "EdgePair": _ObjectContract(
-        ("row", "col", "angle", "length1", "length2"),
-        {"sigma": 1.0, "threshold": 30.0, "interpolation": "linear"},
-        (),
-        "point",
-    ),
-    "FitLine": _ObjectContract(
-        ("start", "end", "measure_length1", "measure_length2"),
-        {
-            "num_measures": 10,
-            "sigma": 1.0,
-            "threshold": 30.0,
-            "transition": "all",
-        },
-        (),
-        "line",
-    ),
-    "FitCircle": _ObjectContract(
-        ("center", "radius", "measure_length1", "measure_length2"),
-        {
-            "radius_min": None,
-            "radius_max": None,
-            "num_measures": 12,
-            "sigma": 1.0,
-            "threshold": 30.0,
-            "transition": "all",
-            "start_phi": 0.0,
-            "end_phi": 2 * math.pi,
-        },
-        (),
-        "circle",
-    ),
-    "TemplateMatchPoint": _ObjectContract(
-        ("row", "col"),
-        {
-            "template_size": 40,
-            "preprocessor_type": "raw",
-            "match_score_threshold": 0.5,
-            "angle_range_half": 15.0,
-            "angle_step": 1.0,
-            "use_subpixel": True,
-        },
-        (),
-        "point",
-    ),
-    "TwoPointsLine": _ObjectContract((), {}, ("point", "point"), "line"),
-    "TwoPointsDistance": _ObjectContract((), {}, ("point", "point"), "distance"),
-    "PointLineDistance": _ObjectContract((), {}, ("point", "line"), "distance"),
-    "TwoLinesAngle": _ObjectContract((), {}, ("line", "line"), "angle"),
-    "PointCircleDistance": _ObjectContract((), {}, ("point", "circle"), "distance"),
+    spec.object_type: _ObjectContract(
+        tuple(spec.required),
+        dict(spec.defaults),
+        tuple(spec.input_types),
+        spec.result_type,
+    )
+    for spec in OBJECT_SPECS.values()
 }
 
 

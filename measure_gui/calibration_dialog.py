@@ -28,7 +28,7 @@ import numpy as np
 
 from measure.pixel_calibration import CheckerboardScaleCalibration
 from .image_canvas import CanvasMode, ImageCanvas
-from .utils import compute_rotated_box_corners
+from measure.rectify import compute_rotated_box_corners
 
 # Interaction hint strings.
 _HINT_DRAW_ROI = ("请在棋盘格区域拉框：点击定中心 → 拖拽调大小 → "

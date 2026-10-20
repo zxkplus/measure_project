@@ -39,12 +39,15 @@ from measure_api.visualizer import generate_overview_visual, generate_visual
 logger = get_logger("project")
 
 # ----------------------------------------------------------------------------
-# Re-use the existing object factories from the GUI module
+# Shared multi-target engine + object-type registry
+# (no longer imported from the GUI package — see measure.multi_target_workflow)
 # ----------------------------------------------------------------------------
 
-from measure_gui.multi_target import _OBJECT_FACTORIES  # noqa: E402
-from measure_gui.multi_target import MultiTargetWorkflow as _MTW  # noqa: E402
+from measure.multi_target_workflow import MultiTargetWorkflow as _MTW  # noqa: E402
+from measure.object_specs import factory_table as _factory_table  # noqa: E402
 from measure.measure_workflow import MeasurementWorkflow  # noqa: E402
+
+_OBJECT_FACTORIES = _factory_table()
 
 
 # ----------------------------------------------------------------------------

@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import cv2
 import numpy as np
 
-from .multi_target import MultiTargetWorkflow
+from measure.multi_target_workflow import MultiTargetWorkflow
 
 if TYPE_CHECKING:
     from .app import MeasureApp

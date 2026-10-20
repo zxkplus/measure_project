@@ -18,7 +18,8 @@ from typing import Callable, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from .utils import compute_rotated_box_corners, cv2_to_tk
+from measure.rectify import compute_rotated_box_corners
+from .utils import cv2_to_tk
 
 
 _CP_COLORS = [

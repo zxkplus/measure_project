@@ -14,7 +14,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable, Dict, List, Optional
 
-from .multi_target import TargetResult
+from measure.multi_target_workflow import TargetResult
 
 
 def _fmt_len(px: float, scale_mm: Optional[float], decimals: int = 3) -> str:

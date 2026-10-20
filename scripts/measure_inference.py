@@ -22,7 +22,7 @@ import numpy as np
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from measure_gui.multi_target import MultiTargetWorkflow
+from measure.multi_target_workflow import MultiTargetWorkflow
 
 
 def load_model(model_path: str) -> MultiTargetWorkflow:

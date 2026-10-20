@@ -31,15 +31,15 @@ from typing import Any, Dict, List, Optional
 import cv2
 import numpy as np
 
-from .alignment import MultiPointAlignment, SingleBoxAlignment
+from measure.alignment import MultiPointAlignment, SingleBoxAlignment
 from .calibration_dialog import CalibrationDialog
 from .image_canvas import CanvasMode, ImageCanvas
-from .multi_target import MultiTargetWorkflow, TargetResult
+from measure.multi_target_workflow import MultiTargetWorkflow, TargetResult
 from .project_manager import ProjectManager
 from .result_panel import ResultPanel
 from .template_view import TemplateTool, TemplateView
 from .tool_panel import ToolPanel
-from .utils import crop_and_straighten
+from measure.rectify import crop_and_straighten
 
 
 class MeasureApp:
