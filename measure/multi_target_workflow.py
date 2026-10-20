@@ -24,8 +24,11 @@ multi-control-point affine refinement).
 from __future__ import annotations
 import time
 
+import hashlib
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
@@ -370,6 +373,36 @@ def _build_profile_image(
 
 
 
+
+
+# ===========================================================================
+# Model asset format (manifest v3.0)
+# ===========================================================================
+
+MANIFEST_FILENAME = "manifest.json"
+REFERENCE_FILENAME = "reference.npy"
+DERIVED_FILENAME = "workflow.npz"
+MANIFEST_CONTRACT_VERSION = "3.0"
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    """Hex sha256 of a byte string."""
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    """Hex sha256 of a file's contents."""
+    return _sha256_bytes(Path(path).read_bytes())
+
+
+def _stable_object_id(label: str) -> str:
+    """Deterministic object id for a measurement label.
+
+    Model assets use stable ids (derived from the label) rather than the
+    session-scoped random ids the modelling API hands out, so that re-saving a
+    model produces a byte-identical manifest.
+    """
+    return hashlib.sha1(label.encode("utf-8")).hexdigest()[:16]
 
 
 # ===========================================================================
@@ -1557,63 +1590,284 @@ class MultiTargetWorkflow:
     # Serialization
     # ------------------------------------------------------------------
 
-    def save(self, filepath: str) -> None:
-        """
-        Save the entire workflow to a .npz file.
+    def _manifest(self, model_id: str = "") -> Dict[str, Any]:
+        """Build the manifest payload for this workflow.
 
         Args:
-            filepath: Path for the .npz file.
+            model_id: Optional platform identity for the model.
+
+        Returns:
+            JSON-serializable manifest body (without the ``files`` digests).
         """
         tp = self._alignment.template_point
         if tp is None:
             raise RuntimeError("No template defined. Call teach_template() first.")
+        if self._alignment._reference_image is None:
+            raise RuntimeError(
+                "No reference image available on the alignment strategy; "
+                "teach_template() must have been called with one."
+            )
 
-        meta = {
-            "version": 1,
+        spec_deps = {}
+        objects = []
+        for definition in self._measurement_defs:
+            object_type = definition["object_type"]
+            label = definition["label"]
+            params = dict(definition["params"])
+            spec = get_spec(object_type)
+            dep_names = spec.dep_param_names
+            input_labels: List[str] = []
+            input_ids: List[str] = []
+            for name in dep_names:
+                target_label = params.pop(name, None)
+                if target_label is None:
+                    continue
+                target_label = str(target_label)
+                # Dependencies are labels, not necessarily objects: an EdgePair
+                # exposes virtual endpoints named "<label>_A"/"<label>_B" which
+                # composed tools may reference.  The label form is authoritative
+                # (it round-trips those virtual endpoints); the id form is
+                # derived for consumers that build an object graph.
+                input_labels.append(target_label)
+                input_ids.append(_stable_object_id(target_label))
+            objects.append({
+                "object_id": _stable_object_id(label),
+                "object_type": object_type,
+                "label": label,
+                "parameters": params,
+                "input_object_ids": input_ids,
+                "input_labels": input_labels,
+            })
+
+        reference = np.ascontiguousarray(self._alignment._reference_image)
+        return {
+            "contract_version": MANIFEST_CONTRACT_VERSION,
+            "model_id": model_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "reference_image": {
+                "file": REFERENCE_FILENAME,
+                "shape": [int(reference.shape[0]), int(reference.shape[1])],
+            },
+            "alignment": {
+                "mode": self._alignment.mode_name,
+                "roi_state": self._alignment.get_roi_state(),
+                "box_center": list(self._alignment.box_center),
+                "box_size": list(self._alignment.box_size),
+                "box_angle_deg": self._alignment.box_angle_deg,
+                "template_size": self._alignment._template_size,
+                "preprocessor": tp.preprocessor.serialize(),
+            },
+            "matching": {
+                "match_score_threshold": self._match_score_threshold,
+                "angle_range": list(self._angle_range),
+                "angle_step": self._angle_step,
+                "max_matches": self._max_matches,
+                "overlap": self._overlap,
+                "coarse_fine": self._coarse_fine,
+                "coarse_angle_step": self._coarse_angle_step,
+                "pyramid_decimate": tp.pyramid_decimate,
+                "pyramid_max_template_size": tp.pyramid_max_template_size,
+            },
+            "physical_scale_mm": self._physical_scale_mm,
+            "objects": objects,
+            "derived_fingerprint": self._derived_fingerprint(),
+        }
+
+    def _derived_fingerprint(self) -> str:
+        """Hash of everything the derived template state depends on.
+
+        The template image and edge template are fully determined by the
+        reference image, the ROI geometry and the preprocessor, so this
+        fingerprint pins the cache in ``workflow.npz`` to its inputs.
+        """
+        tp = self._alignment.template_point
+        payload = {
+            "reference": _sha256_bytes(
+                np.ascontiguousarray(self._alignment._reference_image).tobytes()
+            ),
             "box_center": list(self._alignment.box_center),
             "box_size": list(self._alignment.box_size),
             "box_angle_deg": self._alignment.box_angle_deg,
             "template_size": self._alignment._template_size,
-            "match_score_threshold": self._match_score_threshold,
-            "angle_range": list(self._angle_range),
-            "angle_step": self._angle_step,
-            "max_matches": self._max_matches,
-            "overlap": self._overlap,
-            "coarse_fine": self._coarse_fine,
-            "coarse_angle_step": self._coarse_angle_step,
-            "pyramid_decimate": tp.pyramid_decimate,
-            "pyramid_max_template_size": tp.pyramid_max_template_size,
-            "preprocessor_data": tp.preprocessor.serialize(),
-            "click_row": tp.click_row,
-            "click_col": tp.click_col,
-            "crop_center_row": tp._crop_center_row,
-            "crop_center_col": tp._crop_center_col,
-            "crop_h": tp._crop_h,
-            "crop_w": tp._crop_w,
-            "measurement_defs": self._measurement_defs,
-            "alignment_mode": self._alignment.mode_name,
-            "alignment_roi_state": self._alignment.get_roi_state(),
+            "mode": self._alignment.mode_name,
+            "roi_state": self._alignment.get_roi_state(),
+            "preprocessor": tp.preprocessor.serialize() if tp else None,
         }
+        return _sha256_bytes(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        )
 
-        save_dict = {
-            "workflow_meta": np.array([json.dumps(meta)], dtype=np.object_),
-            "edge_template": tp.edge_template,
-            "template_image": self._alignment.template_image,
-            "reference_image": self._alignment._reference_image,
-        }
-
-        np.savez_compressed(filepath, **save_dict)
-
-    @classmethod
-    def load(cls, filepath: str) -> "MultiTargetWorkflow":
-        """
-        Load a workflow from a .npz file.
+    def save(self, path: str, model_id: str = "") -> None:
+        """Write this workflow as a manifest model asset.
 
         Args:
-            filepath: Path to a .npz file saved by MultiTargetWorkflow.save().
+            path: Model directory, or a ``.npz`` file path inside one.  A
+                ``.npz`` path is accepted so existing callers that saved to
+                ``<model_dir>/workflow.npz`` keep working: its parent directory
+                becomes the model directory.
+            model_id: Optional platform identity recorded in the manifest.
+
+        The asset directory receives:
+
+        * ``manifest.json`` — authoritative model definition
+        * ``reference.npy`` — the raw reference image
+        * ``workflow.npz`` — **derived cache only** (template image and edge
+          template).  Loading always re-derives this state from the manifest,
+          so the cache is never required and can be deleted safely.
+        """
+        if self._alignment.template_point is None:
+            raise RuntimeError("No template defined. Call teach_template() first.")
+
+        target = Path(path)
+        if target.suffix == ".npz":
+            model_dir = target.parent
+            derived_path = target
+        else:
+            model_dir = target
+            derived_path = model_dir / DERIVED_FILENAME
+
+        model_dir.mkdir(parents=True, exist_ok=True)
+
+        reference = np.ascontiguousarray(self._alignment._reference_image)
+        reference_path = model_dir / REFERENCE_FILENAME
+        np.save(str(reference_path), reference, allow_pickle=False)
+
+        tp = self._alignment.template_point
+        np.savez_compressed(
+            str(derived_path),
+            edge_template=tp.edge_template,
+            template_image=self._alignment.template_image,
+        )
+
+        manifest = self._manifest(model_id=model_id)
+        manifest["files"] = {
+            REFERENCE_FILENAME: _sha256_file(reference_path),
+            derived_path.name: _sha256_file(derived_path),
+        }
+        # Same digest as files[reference.npy] — kept here too so a reader can
+        # verify the reference image without knowing the asset's file layout.
+        manifest["reference_image"]["sha256"] = manifest["files"][REFERENCE_FILENAME]
+        (model_dir / MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+    @classmethod
+    def load(cls, path: str) -> "MultiTargetWorkflow":
+        """Load a workflow from a manifest model asset.
+
+        Args:
+            path: Model directory, its ``manifest.json``, or a ``.npz`` file
+                inside the model directory.
 
         Returns:
-            A fully reconstructed MultiTargetWorkflow ready for measure().
+            A fully reconstructed MultiTargetWorkflow ready for ``measure()``.
+
+        Raises:
+            ValueError: When the path holds a legacy single-file ``.npz``
+                (written before the manifest format) or a v2 engine asset.
+                Run ``scripts/migrate_models_to_manifest.py`` to convert it.
+
+        The template image and edge template are re-derived from the reference
+        image plus the manifest (they are deterministic), so ``workflow.npz``
+        is never required.
+        """
+        target = Path(path)
+        model_dir = target if target.is_dir() else target.parent
+        manifest_path = (target if target.name == MANIFEST_FILENAME
+                         else model_dir / MANIFEST_FILENAME)
+
+        if not manifest_path.is_file():
+            legacy_hint = ""
+            candidate = target if target.suffix == ".npz" else model_dir / DERIVED_FILENAME
+            if candidate.is_file():
+                legacy_hint = (
+                    f" Found legacy workflow file '{candidate}'. Legacy single-file "
+                    f".npz models are no longer supported; convert it with "
+                    f"scripts/migrate_models_to_manifest.py."
+                )
+            raise ValueError(
+                f"No manifest model asset at '{manifest_path}'.{legacy_hint}"
+            )
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        contract = manifest.get("contract_version")
+        if contract != MANIFEST_CONTRACT_VERSION:
+            raise ValueError(
+                f"Unsupported manifest contract_version: {contract!r}. "
+                f"Expected {MANIFEST_CONTRACT_VERSION!r}."
+            )
+
+        reference_path = model_dir / manifest["reference_image"]["file"]
+        if not reference_path.is_file():
+            raise ValueError(
+                f"Model asset is incomplete: '{reference_path}' is missing."
+            )
+        expected_sha = manifest["reference_image"].get("sha256")
+        actual_sha = _sha256_file(reference_path)
+        if expected_sha and actual_sha != expected_sha:
+            raise ValueError(
+                f"Model asset is corrupt: '{reference_path}' sha256 mismatch "
+                f"(expected {expected_sha}, got {actual_sha})."
+            )
+
+        reference = np.load(str(reference_path), allow_pickle=False)
+
+        alignment = manifest["alignment"]
+        matching = manifest["matching"]
+
+        wf = cls()
+        wf._physical_scale_mm = manifest.get("physical_scale_mm")
+        wf._alignment = strategy_from_roi_state(
+            alignment.get("roi_state", {}), reference
+        )
+        wf.teach_template(
+            reference,
+            center=tuple(alignment["box_center"]),
+            size=tuple(alignment["box_size"]),
+            angle_deg=float(alignment["box_angle_deg"]),
+            preprocessor=_deserialize_preprocessor(alignment["preprocessor"]),
+            match_score_threshold=float(matching["match_score_threshold"]),
+            angle_range=tuple(matching["angle_range"]),
+            angle_step=float(matching["angle_step"]),
+            max_matches=int(matching["max_matches"]),
+            overlap=float(matching["overlap"]),
+            coarse_fine=bool(matching["coarse_fine"]),
+            coarse_angle_step=float(matching["coarse_angle_step"]),
+            pyramid_decimate=int(matching["pyramid_decimate"]),
+            pyramid_max_template_size=int(matching["pyramid_max_template_size"]),
+        )
+
+        # Translate the manifest's dependency references back to label form.
+        label_by_id = {obj["object_id"]: obj["label"] for obj in manifest["objects"]}
+        defs: List[Dict[str, Any]] = []
+        for obj in manifest["objects"]:
+            object_type = obj["object_type"]
+            params = dict(obj.get("parameters", {}))
+            dep_names = get_spec(object_type).dep_param_names
+            if "input_labels" in obj:
+                # authoritative: preserves virtual EdgePair endpoints
+                labels = list(obj["input_labels"])
+            else:
+                labels = [label_by_id.get(i, i)
+                          for i in obj.get("input_object_ids", [])]
+            for name, target_label in zip(dep_names, labels):
+                params[name] = target_label
+            defs.append({
+                "object_type": object_type,
+                "label": obj["label"],
+                "params": params,
+            })
+        wf._measurement_defs = defs
+        wf._build_template_match_points()
+        return wf
+
+    @classmethod
+    def load_legacy(cls, filepath: str) -> "MultiTargetWorkflow":
+        """Load a legacy single-file ``.npz`` workflow (pre-manifest format).
+
+        Kept solely so ``scripts/migrate_models_to_manifest.py`` can read old
+        assets.  New code should use :meth:`load`.
         """
         data = np.load(filepath, allow_pickle=True)
 

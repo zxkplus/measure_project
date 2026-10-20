@@ -1073,7 +1073,13 @@ class MeasureProject:
 
         # Re-sync measurement defs to workflow
         if self._workflow is not None:
+            # The model asset already carries the measurement definitions, so
+            # only add the ones it is missing.  Re-adding unconditionally used
+            # to duplicate every primitive measurement on load.
+            already = {d["label"] for d in self._workflow.measurement_defs}
             for d in self._measurement_defs:
+                if d["label"] in already:
+                    continue
                 try:
                     self._workflow.add_measurement(
                         d["object_type"], d["label"], **copy.deepcopy(d["params"]),

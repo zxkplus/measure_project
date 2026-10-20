@@ -334,6 +334,34 @@ def test_save_load(ready_project):
     assert load_info["num_composed"] == 1
 
 
+def test_save_load_does_not_duplicate_measurements(ready_project):
+    """The model asset already carries the defs; load must not re-add them.
+
+    Regression: load() used to append every primitive measurement from
+    config.json on top of the definitions restored from the workflow, so a
+    save/load cycle doubled them.
+    """
+    ready_project.add_measurement("FitCircle", "c1", {
+        "center": (100, 100), "radius": 60, "measure_length1": 30, "measure_length2": 10,
+    })
+    ready_project.add_measurement("FitCircle", "c2", {
+        "center": (100, 100), "radius": 40, "measure_length1": 20, "measure_length2": 10,
+    })
+    ready_project.save()
+
+    proj2 = MeasureProject(ready_project.project_dir)
+    proj2.load()
+
+    labels = [d["label"] for d in proj2._workflow.measurement_defs]
+    assert labels == ["c1", "c2"], f"measurements duplicated on load: {labels}"
+
+    # a second cycle must stay stable too
+    proj2.save()
+    proj3 = MeasureProject(ready_project.project_dir)
+    proj3.load()
+    assert [d["label"] for d in proj3._workflow.measurement_defs] == ["c1", "c2"]
+
+
 def test_save_load_empty_project(proj):
     """Save and load an empty project (no template)."""
     save_info = proj.save()

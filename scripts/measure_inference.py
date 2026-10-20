@@ -28,27 +28,35 @@ from measure.multi_target_workflow import MultiTargetWorkflow
 def load_model(model_path: str) -> MultiTargetWorkflow:
     """
     加载测量模型
-    
+
     Args:
         model_path: 模型路径，可以是：
-                   - workflow.npz 文件路径
-                   - 包含 workflow.npz 的目录路径
-    
+                   - 模型目录（含 manifest.json）
+                   - manifest.json 文件路径
+                   - workflow.npz 路径（旧的单文件模型请先运行
+                     scripts/migrate_models_to_manifest.py 迁移）
+
     Returns:
         MultiTargetWorkflow 实例
     """
     model_path = Path(model_path)
-    
-    # 如果是目录，查找 workflow.npz
-    if model_path.is_dir():
-        workflow_path = model_path / "workflow.npz"
-        if not workflow_path.exists():
-            raise FileNotFoundError(f"在目录 {model_path} 中未找到 workflow.npz")
-        model_path = workflow_path
-    
+
     if not model_path.exists():
-        raise FileNotFoundError(f"模型文件不存在: {model_path}")
-    
+        raise FileNotFoundError(f"模型路径不存在: {model_path}")
+
+    # 目录：优先 manifest.json；workflow.npz 现在只是可选的派生缓存
+    if model_path.is_dir():
+        manifest_path = model_path / "manifest.json"
+        if manifest_path.exists():
+            return MultiTargetWorkflow.load(str(model_path))
+        legacy_path = model_path / "workflow.npz"
+        if legacy_path.exists():
+            raise ValueError(
+                f"{model_path} 是旧格式模型（缺少 manifest.json）。"
+                f"请先运行: python scripts/migrate_models_to_manifest.py {model_path}"
+            )
+        raise FileNotFoundError(f"在目录 {model_path} 中未找到 manifest.json")
+
     return MultiTargetWorkflow.load(str(model_path))
 
 
