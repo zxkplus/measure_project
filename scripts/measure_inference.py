@@ -23,6 +23,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from measure.multi_target_workflow import MultiTargetWorkflow
+from measure.result_format import result_dict_line_length
 
 
 def load_model(model_path: str) -> MultiTargetWorkflow:
@@ -181,7 +182,14 @@ def measure_image(
                         "start_col": round(measurement.get("start_col", 0), 2),
                         "end_row": round(measurement.get("end_row", 0), 2),
                         "end_col": round(measurement.get("end_col", 0), 2),
-                        "length": round(measurement.get("length", 0), 2),
+                        # the engine reports line endpoints, not a length
+                        "length": round(
+                            measurement.get(
+                                "length",
+                                result_dict_line_length(measurement),
+                            ),
+                            2,
+                        ),
                     })
                 elif meas_type == "distance":
                     meas_dict["value"] = round(measurement.get("value", 0), 2)
