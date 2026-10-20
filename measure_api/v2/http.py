@@ -110,6 +110,14 @@ def create_production_app(
     def list_objects(session_id: str) -> Response:
         return jsonify({"objects": application.list_objects(session_id)})
 
+    @app.put("/api/v2/modeling-sessions/<session_id>/roi")
+    def set_roi(session_id: str) -> Response:
+        return jsonify(application.set_modeling_roi(session_id, _json_body()))
+
+    @app.get("/api/v2/modeling-sessions/<session_id>/roi")
+    def get_roi(session_id: str) -> Response:
+        return jsonify(application.get_modeling_roi(session_id))
+
     @app.post("/api/v2/modeling-sessions/<session_id>/objects")
     def create_object(session_id: str) -> Tuple[Response, int]:
         return jsonify(application.create_object(session_id, _json_body())), 201
@@ -484,6 +492,57 @@ def openapi_document() -> Dict[str, Any]:
             }
         )
 
+    roi_schema: Dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["center", "size"],
+        "properties": {
+            "center": {
+                "type": "array", "items": {"type": "number"},
+                "minItems": 2, "maxItems": 2,
+                "description": "ROI centre [row, col] in reference-image coordinates.",
+            },
+            "size": {
+                "type": "array", "items": {"type": "number"},
+                "minItems": 2, "maxItems": 2,
+                "description": "ROI size [height, width] before rotation.",
+            },
+            "angle_deg": {"type": "number", "default": 0.0},
+            "alignment_mode": {"type": "string",
+                               "enum": ["single_box", "multi_point"],
+                               "default": "single_box"},
+            "preprocessor_type": {"type": "string", "default": "raw"},
+            "match_score_threshold": {"type": "number", "default": 0.5},
+            "angle_range": {
+                "type": "array", "items": {"type": "number"},
+                "minItems": 2, "maxItems": 2,
+                "default": [-30.0, 30.0],
+            },
+            "angle_step": {"type": "number", "exclusiveMinimum": 0, "default": 1.0},
+            "max_matches": {"type": "integer", "minimum": 0, "default": 0,
+                            "description": "0 means unlimited (all instances)."},
+            "overlap": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.3},
+            "coarse_fine": {"type": "boolean", "default": True},
+            "coarse_angle_step": {"type": "number", "exclusiveMinimum": 0, "default": 5.0},
+            "pyramid_decimate": {"type": "integer", "minimum": 0, "default": 0},
+            "pyramid_max_template_size": {"type": "integer", "minimum": 1, "default": 400},
+        },
+        "description": (
+            "Stage-1 ROI. It is located on the whole inspection image and the "
+            "straightened patch it produces is the coordinate system that "
+            "measurement objects are defined in."
+        ),
+    }
+    roi_response_schema: Dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            **roi_schema["properties"],
+            "roi_state": {"type": "object", "additionalProperties": True},
+            "preprocessor": {"type": "object", "additionalProperties": True},
+        },
+    }
+
     def schema_ref(name: str) -> Dict[str, str]:
         return {"$ref": f"#/components/schemas/{name}"}
 
@@ -512,6 +571,18 @@ def openapi_document() -> Dict[str, Any]:
             "delete": {
                 "operationId": "deleteModelingSession",
                 "responses": _responses(empty=True),
+            },
+        },
+        "/api/v2/modeling-sessions/{session_id}/roi": {
+            "parameters": session_parameter,
+            "get": {
+                "operationId": "getModelingRoi",
+                "responses": _responses(schema_ref("ModelingRoi")),
+            },
+            "put": {
+                "operationId": "setModelingRoi",
+                "requestBody": json_body("ModelingRoiCreate"),
+                "responses": _responses(schema_ref("ModelingRoi")),
             },
         },
         "/api/v2/modeling-sessions/{session_id}/objects": {
@@ -673,6 +744,32 @@ def openapi_document() -> Dict[str, Any]:
                 "objects": {"type": "array", "items": schema_ref("MeasurementObject")}
             },
         },
+        "TargetInstance": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "index", "score", "rotation_deg", "scale",
+                "center_row", "center_col", "valid", "measurements",
+            ],
+            "properties": {
+                "index": {
+                    "type": "integer", "minimum": 1,
+                    "description": "1-based instance index matching display order.",
+                },
+                "score": {"type": "number"},
+                "rotation_deg": {"type": "number"},
+                "scale": {"type": "number"},
+                "center_row": {"type": "number"},
+                "center_col": {"type": "number"},
+                "valid": {"type": "boolean"},
+                "measurements": {
+                    "type": "array",
+                    "items": schema_ref("MeasurementObjectResult"),
+                },
+            },
+        },
+        "ModelingRoiCreate": roi_schema,
+        "ModelingRoi": roi_response_schema,
         "MeasurementObjectResult": {
             "oneOf": object_result_variants,
             "discriminator": {"propertyName": "object_type"},
@@ -913,11 +1010,20 @@ def openapi_document() -> Dict[str, Any]:
         "PreviewResult": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["objects"],
+            "required": ["objects", "instances"],
             "properties": {
                 "objects": {
                     "type": "array",
                     "items": schema_ref("MeasurementObjectResult"),
+                    "description": (
+                        "Per-object results for the primary (highest scoring) "
+                        "instance. Use 'instances' for all detected targets."
+                    ),
+                },
+                "instances": {
+                    "type": "array",
+                    "items": schema_ref("TargetInstance"),
+                    "description": "One entry per detected target (top-k).",
                 }
             },
         },
@@ -933,13 +1039,25 @@ def openapi_document() -> Dict[str, Any]:
         "MeasurementResult": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["calibration_model_id", "asset_ref", "objects"],
+            "required": ["calibration_model_id", "asset_ref", "objects", "instances"],
             "properties": {
                 "calibration_model_id": {"type": "string"},
                 "asset_ref": {"type": "string"},
                 "objects": {
                     "type": "array",
                     "items": schema_ref("MeasurementObjectResult"),
+                    "description": (
+                        "Per-object results for the primary (highest scoring) "
+                        "instance. Use 'instances' for all detected targets."
+                    ),
+                },
+                "instances": {
+                    "type": "array",
+                    "items": schema_ref("TargetInstance"),
+                    "description": (
+                        "One entry per detected target (top-k), each carrying its "
+                        "own per-object measurements."
+                    ),
                 },
             },
         },

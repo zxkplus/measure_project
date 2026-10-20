@@ -29,7 +29,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import cv2
 import logging
@@ -1590,11 +1590,16 @@ class MultiTargetWorkflow:
     # Serialization
     # ------------------------------------------------------------------
 
-    def _manifest(self, model_id: str = "") -> Dict[str, Any]:
+    def _manifest(self, model_id: str = "",
+                  object_ids: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
         """Build the manifest payload for this workflow.
 
         Args:
             model_id: Optional platform identity for the model.
+            object_ids: Optional ``{label: object_id}`` mapping so a caller that
+                already minted object ids (the v2 modelling API does) keeps them
+                across publish/measure.  When omitted, ids are derived from the
+                labels so that saving is deterministic.
 
         Returns:
             JSON-serializable manifest body (without the ``files`` digests).
@@ -1631,7 +1636,10 @@ class MultiTargetWorkflow:
                 input_labels.append(target_label)
                 input_ids.append(_stable_object_id(target_label))
             objects.append({
-                "object_id": _stable_object_id(label),
+                "object_id": (
+                    str(object_ids[label]) if object_ids and label in object_ids
+                    else _stable_object_id(label)
+                ),
                 "object_type": object_type,
                 "label": label,
                 "parameters": params,
@@ -1697,7 +1705,8 @@ class MultiTargetWorkflow:
             json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
         )
 
-    def save(self, path: str, model_id: str = "") -> None:
+    def save(self, path: str, model_id: str = "",
+             object_ids: Optional[Mapping[str, str]] = None) -> None:
         """Write this workflow as a manifest model asset.
 
         Args:
@@ -1706,6 +1715,8 @@ class MultiTargetWorkflow:
                 ``<model_dir>/workflow.npz`` keep working: its parent directory
                 becomes the model directory.
             model_id: Optional platform identity recorded in the manifest.
+            object_ids: Optional ``{label: object_id}`` mapping preserved in the
+                manifest (see :meth:`_manifest`).
 
         The asset directory receives:
 
@@ -1739,7 +1750,7 @@ class MultiTargetWorkflow:
             template_image=self._alignment.template_image,
         )
 
-        manifest = self._manifest(model_id=model_id)
+        manifest = self._manifest(model_id=model_id, object_ids=object_ids)
         manifest["files"] = {
             REFERENCE_FILENAME: _sha256_file(reference_path),
             derived_path.name: _sha256_file(derived_path),

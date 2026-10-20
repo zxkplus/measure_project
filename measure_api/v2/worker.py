@@ -12,31 +12,33 @@ from typing import Any, Dict, List, Mapping, Sequence
 
 import numpy as np
 
+from measure.alignment import strategy_from_roi_state
 from measure.measure_template import (
     CannyPreprocessor,
     CLAHEPreprocessor,
     RawPreprocessor,
     SobelPreprocessor,
-    TemplatePoint,
     ThresholdPreprocessor,
+    _deserialize_preprocessor,
 )
-from measure.measure_workflow import (
-    EdgePairObject,
-    EdgePointObject,
-    FitCircleObject,
-    FitLineObject,
-    MeasurementWorkflow,
-    PointCircleDistanceObject,
-    PointLineDistanceObject,
-    TemplateMatchPointObject,
-    TwoLinesAngleObject,
-    TwoPointsDistanceObject,
-    TwoPointsLineObject,
+from measure.multi_target_workflow import (
+    MANIFEST_CONTRACT_VERSION,
+    MultiTargetWorkflow,
 )
+from measure.object_specs import get_spec
 from measure_api.v2.application import EngineError
 
-MODEL_CONTRACT_VERSION = "2.0"
+# The v2 engine now stores models in the shared manifest format.
+MODEL_CONTRACT_VERSION = MANIFEST_CONTRACT_VERSION
 PACKAGE_CONTRACT_VERSION = "2.0"
+
+_PREPROCESSOR_FACTORIES = {
+    "raw": RawPreprocessor,
+    "canny": CannyPreprocessor,
+    "sobel": SobelPreprocessor,
+    "clahe": CLAHEPreprocessor,
+    "threshold": ThresholdPreprocessor,
+}
 
 
 def run_worker_task(kind: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
@@ -66,179 +68,167 @@ def run_worker_task(kind: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
     return task(payload)
 
 
-def _build_workflow(
-    reference_image: np.ndarray,
-    definitions: Sequence[Mapping[str, Any]],
-) -> MeasurementWorkflow:
-    workflow = MeasurementWorkflow()
-    for definition in definitions:
-        obj: Any
-        object_id = str(definition["object_id"])
-        object_type = str(definition["object_type"])
-        parameters = dict(definition["parameters"])
-        inputs = list(definition.get("input_object_ids", []))
-        if object_type == "EdgePoint":
-            obj = EdgePointObject(
-                label=object_id,
-                row=parameters["row"],
-                col=parameters["col"],
-                angle=parameters["angle"],
-                length1=parameters["length1"],
-                length2=parameters["length2"],
-                sigma=parameters["sigma"],
-                threshold=parameters["threshold"],
-                transition="all",
-                select="first",
-                interpolation=parameters["interpolation"],
-            )
-        elif object_type == "EdgePair":
-            obj = EdgePairObject(
-                label=object_id,
-                row=parameters["row"],
-                col=parameters["col"],
-                angle=parameters["angle"],
-                length1=parameters["length1"],
-                length2=parameters["length2"],
-                sigma=parameters["sigma"],
-                threshold=parameters["threshold"],
-                transition="all",
-                select="endpoints",
-                interpolation=parameters["interpolation"],
-            )
-        elif object_type == "FitLine":
-            obj = FitLineObject(
-                label=object_id,
-                start=tuple(parameters["start"]),
-                end=tuple(parameters["end"]),
-                measure_length1=parameters["measure_length1"],
-                measure_length2=parameters["measure_length2"],
-                num_measures=parameters["num_measures"],
-                sigma=parameters["sigma"],
-                threshold=parameters["threshold"],
-                transition=parameters["transition"],
-            )
-        elif object_type == "FitCircle":
-            obj = FitCircleObject(
-                label=object_id,
-                center=tuple(parameters["center"]),
-                radius=parameters["radius"],
-                radius_min=parameters.get("radius_min"),
-                radius_max=parameters.get("radius_max"),
-                measure_length1=parameters["measure_length1"],
-                measure_length2=parameters["measure_length2"],
-                num_measures=parameters["num_measures"],
-                sigma=parameters["sigma"],
-                threshold=parameters["threshold"],
-                transition=parameters["transition"],
-                start_phi=parameters["start_phi"],
-                end_phi=parameters["end_phi"],
-            )
-        elif object_type == "TemplateMatchPoint":
-            preprocessors: Dict[str, Any] = {
-                "raw": RawPreprocessor(),
-                "canny": CannyPreprocessor(),
-                "sobel": SobelPreprocessor(),
-                "clahe": CLAHEPreprocessor(),
-                "threshold": ThresholdPreprocessor(),
-            }
-            preprocessor_type = parameters["preprocessor_type"]
-            preprocessor = preprocessors.get(preprocessor_type)
-            if preprocessor is None:
-                raise EngineError(
-                    "object.parameters_invalid",
-                    "request",
-                    "Unsupported template preprocessor",
-                    details={"preprocessor_type": preprocessor_type},
-                )
-            angle_range_half = float(parameters["angle_range_half"])
-            template_point = TemplatePoint(
-                reference_image,
-                click_row=float(parameters["row"]),
-                click_col=float(parameters["col"]),
-                template_size=int(parameters["template_size"]),
-                preprocessor=preprocessor,
-                match_score_threshold=float(parameters["match_score_threshold"]),
-                use_subpixel=bool(parameters["use_subpixel"]),
-                rotation_invariant=angle_range_half > 0,
-                angle_range=(-angle_range_half, angle_range_half),
-                angle_step=float(parameters["angle_step"]),
-            )
-            obj = TemplateMatchPointObject(
-                label=object_id,
-                row=parameters["row"],
-                col=parameters["col"],
-                template_size=parameters["template_size"],
-                preprocessor_type=parameters["preprocessor_type"],
-                match_score_threshold=parameters["match_score_threshold"],
-                angle_range_half=parameters["angle_range_half"],
-                angle_step=parameters["angle_step"],
-                use_subpixel=parameters["use_subpixel"],
-                _template_point=template_point,
-            )
-        elif object_type == "TwoPointsLine":
-            obj = TwoPointsLineObject(object_id, inputs[0], inputs[1])
-        elif object_type == "TwoPointsDistance":
-            obj = TwoPointsDistanceObject(object_id, inputs[0], inputs[1])
-        elif object_type == "PointLineDistance":
-            obj = PointLineDistanceObject(object_id, inputs[0], inputs[1])
-        elif object_type == "TwoLinesAngle":
-            obj = TwoLinesAngleObject(object_id, inputs[0], inputs[1])
-        elif object_type == "PointCircleDistance":
-            obj = PointCircleDistanceObject(object_id, inputs[0], inputs[1])
-        else:  # pragma: no cover - validated by the application
-            raise EngineError("object.type_unsupported", "request", "Unsupported object type")
-        workflow.add(obj)
-    try:
-        workflow.resolve()
-    except ValueError as exc:
+def _resolve_preprocessor(roi: Mapping[str, Any]):
+    """Build the ROI preprocessor named in the ROI definition."""
+    data = dict(roi.get("preprocessor") or {"type": "raw"})
+    if "preprocessor_type" in roi and "type" not in data:
+        data["type"] = roi["preprocessor_type"]
+    ptype = str(data.get("type", "raw"))
+    if ptype not in _PREPROCESSOR_FACTORIES:
         raise EngineError(
-            "object.dependencies_invalid",
-            "measurement",
-            "Measurement object dependency graph is invalid",
+            "object.parameters_invalid",
+            "request",
+            "Unsupported template preprocessor",
+            details={"preprocessor_type": ptype},
+        )
+    if "type" not in data:
+        return _PREPROCESSOR_FACTORIES[ptype]()
+    try:
+        return _deserialize_preprocessor(data)
+    except Exception as exc:  # noqa: BLE001 - report as a request error
+        raise EngineError(
+            "object.parameters_invalid",
+            "request",
+            "Invalid ROI preprocessor definition",
             details={"diagnostic": str(exc)},
         ) from exc
-    return workflow
+
+
+def _dependency_params(
+    definition: Mapping[str, Any],
+    label_by_id: Mapping[str, str],
+) -> Dict[str, Any]:
+    """Turn an object's id-based dependencies into the label form the engine uses."""
+    object_type = str(definition["object_type"])
+    params = dict(definition["parameters"])
+    dep_names = get_spec(object_type).dep_param_names
+    if "input_labels" in definition:
+        labels = list(definition["input_labels"])
+    else:
+        labels = [
+            label_by_id.get(str(i), str(i))
+            for i in definition.get("input_object_ids", [])
+        ]
+    for name, target_label in zip(dep_names, labels):
+        params[name] = target_label
+    return params
+
+
+def _build_engine(
+    reference_image: np.ndarray,
+    roi: Mapping[str, Any],
+    definitions: Sequence[Mapping[str, Any]],
+) -> MultiTargetWorkflow:
+    """Build the shared multi-target engine for a modelling session or asset.
+
+    Args:
+        reference_image: Reference image the ROI was taught on.
+        roi: ROI definition (box geometry, matching params, preprocessor).
+        definitions: Object definitions in **patch** coordinates.
+
+    Returns:
+        A taught MultiTargetWorkflow with every object registered.
+    """
+    engine = MultiTargetWorkflow()
+    engine._alignment = strategy_from_roi_state(
+        dict(roi.get("roi_state") or {}), reference_image
+    )
+    try:
+        engine.teach_template(
+            reference_image,
+            center=tuple(roi["center"]),
+            size=tuple(roi["size"]),
+            angle_deg=float(roi.get("angle_deg", 0.0)),
+            preprocessor=_resolve_preprocessor(roi),
+            match_score_threshold=float(roi.get("match_score_threshold", 0.5)),
+            angle_range=tuple(roi.get("angle_range", (-30.0, 30.0))),
+            angle_step=float(roi.get("angle_step", 1.0)),
+            max_matches=int(roi.get("max_matches", 0)),
+            overlap=float(roi.get("overlap", 0.3)),
+            coarse_fine=bool(roi.get("coarse_fine", True)),
+            coarse_angle_step=float(roi.get("coarse_angle_step", 5.0)),
+            pyramid_decimate=int(roi.get("pyramid_decimate", 0)),
+            pyramid_max_template_size=int(roi.get("pyramid_max_template_size", 400)),
+        )
+    except EngineError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise EngineError(
+            "session.roi_invalid",
+            "request",
+            "ROI definition could not be taught on the reference image",
+            details={"diagnostic": str(exc)},
+        ) from exc
+
+    label_by_id = {
+        str(d["object_id"]): str(d["label"]) for d in definitions
+    }
+    for definition in definitions:
+        object_type = str(definition["object_type"])
+        label = str(definition["label"])
+        params = _dependency_params(definition, label_by_id)
+        try:
+            engine.add_measurement(object_type, label, **params)
+        except KeyError as exc:
+            raise EngineError(
+                "object.type_unsupported",
+                "request",
+                "Unsupported measurement object type",
+                details={"object_type": object_type},
+            ) from exc
+        except ValueError as exc:
+            raise EngineError(
+                "object.parameters_invalid",
+                "request",
+                "Measurement object parameters are invalid",
+                details={"label": label, "diagnostic": str(exc)},
+            ) from exc
+    return engine
 
 
 def _preview(payload: Mapping[str, Any]) -> Dict[str, Any]:
     definitions = payload["objects"]
-    workflow = _build_workflow(payload["reference_image"], definitions)
     image = np.ascontiguousarray(payload["image"], dtype=np.uint8)
-    results = workflow.measure(image)
-    return {
-        "objects": _object_results(
-            definitions,
-            results,
-            trace_id=str(payload["operation_id"]),
-        )
-    }
+    if not definitions:
+        # Nothing to measure, so no ROI is required to answer.
+        return {"instances": [], "objects": []}
+    engine = _build_engine(
+        np.ascontiguousarray(payload["reference_image"], dtype=np.uint8),
+        payload["roi"],
+        definitions,
+    )
+    return _instance_payload(
+        engine.measure(image),
+        definitions,
+        trace_id=str(payload["operation_id"]),
+    )
 
 
 def _publish(payload: Mapping[str, Any]) -> Dict[str, Any]:
     try:
-        definitions = payload["objects"]
         reference_image = np.ascontiguousarray(payload["reference_image"], dtype=np.uint8)
-        workflow = _build_workflow(reference_image, definitions)
+        engine = _build_engine(reference_image, payload["roi"], payload["objects"])
         asset_dir = Path(str(payload["asset_dir"]))
         asset_dir.mkdir(parents=True, exist_ok=True)
 
-        workflow_path = asset_dir / "workflow.npz"
-        reference_path = asset_dir / "reference.npy"
-        manifest_path = asset_dir / "manifest.json"
-        workflow.save(str(workflow_path))
-        np.save(str(reference_path), reference_image, allow_pickle=False)
-        manifest = {
-            "contract_version": MODEL_CONTRACT_VERSION,
-            "calibration_model_id": payload["calibration_model_id"],
-            "asset_ref": payload["asset_ref"],
-            "objects": definitions,
-            "files": {
-                "workflow.npz": _file_sha256(workflow_path),
-                "reference.npy": _file_sha256(reference_path),
+        # The shared engine owns the asset layout (manifest.json +
+        # reference.npy + derived workflow.npz).
+        engine.save(
+            str(asset_dir),
+            model_id=str(payload["calibration_model_id"]),
+            object_ids={
+                str(d["label"]): str(d["object_id"]) for d in payload["objects"]
             },
-        }
-        with manifest_path.open("w", encoding="utf-8") as stream:
-            json.dump(manifest, stream, ensure_ascii=True, sort_keys=True)
+        )
+
+        manifest_path = asset_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["calibration_model_id"] = payload["calibration_model_id"]
+        manifest["asset_ref"] = payload["asset_ref"]
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=True, sort_keys=True),
+            encoding="utf-8",
+        )
     except EngineError:
         raise
     except Exception as exc:
@@ -262,8 +252,7 @@ def _measure(payload: Mapping[str, Any]) -> Dict[str, Any]:
         str(payload["asset_ref"]),
     )
     try:
-        reference_image = np.load(str(asset_dir / "reference.npy"), allow_pickle=False)
-        workflow = _build_workflow(reference_image, manifest["objects"])
+        engine = MultiTargetWorkflow.load(str(asset_dir))
     except Exception as exc:
         raise EngineError(
             "model.asset_unavailable",
@@ -272,15 +261,37 @@ def _measure(payload: Mapping[str, Any]) -> Dict[str, Any]:
             details={"diagnostic": str(exc)},
         ) from exc
     image = np.ascontiguousarray(payload["image"], dtype=np.uint8)
-    results = workflow.measure(image)
+    definitions = manifest.get("objects", [])
+    result = _instance_payload(
+        engine.measure(image),
+        definitions,
+        trace_id=str(payload["operation_id"]),
+    )
+    result["calibration_model_id"] = payload["calibration_model_id"]
+    result["asset_ref"] = payload["asset_ref"]
+    return result
+
+
+def _roi_from_manifest(manifest: Mapping[str, Any]) -> Dict[str, Any]:
+    """Rebuild a modelling-session ROI definition from a model manifest."""
+    alignment = dict(manifest.get("alignment") or {})
+    matching = dict(manifest.get("matching") or {})
     return {
-        "calibration_model_id": payload["calibration_model_id"],
-        "asset_ref": payload["asset_ref"],
-        "objects": _object_results(
-            manifest["objects"],
-            results,
-            trace_id=str(payload["operation_id"]),
-        ),
+        "center": list(alignment.get("box_center", [0.0, 0.0])),
+        "size": list(alignment.get("box_size", [1.0, 1.0])),
+        "angle_deg": float(alignment.get("box_angle_deg", 0.0)),
+        "alignment_mode": alignment.get("mode", "single_box"),
+        "preprocessor": dict(alignment.get("preprocessor") or {"type": "raw"}),
+        "roi_state": dict(alignment.get("roi_state") or {}),
+        "match_score_threshold": matching.get("match_score_threshold", 0.5),
+        "angle_range": list(matching.get("angle_range", (-30.0, 30.0))),
+        "angle_step": matching.get("angle_step", 1.0),
+        "max_matches": matching.get("max_matches", 0),
+        "overlap": matching.get("overlap", 0.3),
+        "coarse_fine": matching.get("coarse_fine", True),
+        "coarse_angle_step": matching.get("coarse_angle_step", 5.0),
+        "pyramid_decimate": matching.get("pyramid_decimate", 0),
+        "pyramid_max_template_size": matching.get("pyramid_max_template_size", 400),
     }
 
 
@@ -300,6 +311,12 @@ def _export(payload: Mapping[str, Any]) -> Dict[str, Any]:
         "calibration_model_id": model_manifest["calibration_model_id"],
         "objects": model_manifest["objects"],
         "files": model_manifest["files"],
+        # The ROI and matching parameters are what make the package
+        # republishable: without them the imported session could not rebuild
+        # the patch coordinate system its objects are defined in.
+        "alignment": model_manifest.get("alignment", {}),
+        "matching": model_manifest.get("matching", {}),
+        "physical_scale_mm": model_manifest.get("physical_scale_mm"),
     }
     with zipfile.ZipFile(package_path, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(
@@ -345,6 +362,7 @@ def _import(payload: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "reference_image": np.ascontiguousarray(reference_image, dtype=np.uint8),
         "objects": manifest["objects"],
+        "roi": _roi_from_manifest(manifest),
     }
 
 
@@ -376,26 +394,78 @@ def _load_asset(
         ) from exc
 
 
+def _instance_payload(
+    target_results: Sequence[Any],
+    definitions: Sequence[Mapping[str, Any]],
+    *,
+    trace_id: str,
+) -> Dict[str, Any]:
+    """Shape engine results for the v2 response.
+
+    The engine returns **one result per detected target** (top-k).  The response
+    exposes them as ``instances``; ``objects`` keeps its historical
+    one-entry-per-object shape by reporting the primary (highest scoring)
+    instance, so existing consumers are unaffected.
+
+    Args:
+        target_results: ``TargetResult`` list from ``MultiTargetWorkflow.measure``.
+        definitions: Object definitions in modelling order.
+        trace_id: Operation id used for error correlation.
+
+    Returns:
+        Mapping with ``instances`` and ``objects``.
+    """
+    instances = [
+        {
+            "index": int(target.id),
+            "score": float(target.score),
+            "rotation_deg": float(target.rotation_deg),
+            "scale": float(target.scale),
+            "center_row": float(target.center_row),
+            "center_col": float(target.center_col),
+            "valid": bool(target.valid),
+            "measurements": _object_results(
+                definitions, target.measurements, trace_id=trace_id
+            ),
+        }
+        for target in target_results
+    ]
+
+    primary = target_results[0].measurements if target_results else {}
+    return {
+        "instances": instances,
+        "objects": _object_results(definitions, primary, trace_id=trace_id),
+    }
+
+
 def _object_results(
     definitions: Sequence[Mapping[str, Any]],
-    results: Mapping[str, Any],
+    measurements: Mapping[str, Any],
     *,
     trace_id: str,
 ) -> List[Dict[str, Any]]:
+    """Map engine measurement results onto the stable per-object response shape.
+
+    ``measurements`` maps label -> result dict (the engine maps coordinates back
+    to the inspection image and returns JSON-friendly dicts).
+    """
     output = []
     for definition in definitions:
         object_id = str(definition["object_id"])
-        result = results.get(object_id)
-        valid = bool(result is not None and getattr(result, "valid", False))
+        label = str(definition["label"])
+        raw = measurements.get(label)
+        valid = bool(isinstance(raw, Mapping) and raw.get("valid", False))
         item = {
             "object_id": object_id,
             "object_type": definition["object_type"],
-            "label": definition["label"],
+            "label": label,
             "valid": valid,
-            "observation": _observation(result) if valid else None,
-            "quality": _json_value(getattr(result, "meta", {})) if result is not None else {},
+            "observation": None,
+            "quality": _json_value(raw.get("meta", {})) if isinstance(raw, Mapping) else {},
             "error": None,
         }
+        if valid:
+            item["observation"] = _observation(raw)
         if valid and not _finite_value(item["observation"]):
             valid = False
             item["valid"] = False
@@ -410,8 +480,8 @@ def _object_results(
             }
         if not valid:
             diagnostic = None
-            if result is not None:
-                diagnostic = getattr(result, "meta", {}).get("error")
+            if isinstance(raw, Mapping):
+                diagnostic = raw.get("meta", {}).get("error") or raw.get("reason")
             if item["error"] is None:
                 item["error"] = {
                     "code": "measurement.object_invalid",
@@ -425,31 +495,35 @@ def _object_results(
     return output
 
 
-def _observation(result: Any) -> Dict[str, Any]:
-    result_type = str(result.type)
+def _observation(raw: Mapping[str, Any]) -> Dict[str, Any]:
+    """Convert an engine result dict into the v2 observation union."""
+    result_type = str(raw.get("type", ""))
     if result_type == "point":
-        return {"type": "point", "row": float(result.row), "col": float(result.col)}
+        return {"type": "point", "row": float(raw["row"]), "col": float(raw["col"])}
     if result_type == "line":
         return {
             "type": "line",
-            "a": float(result.a),
-            "b": float(result.b),
-            "c": float(result.c),
-            "start_row": float(result.start_row),
-            "start_col": float(result.start_col),
-            "end_row": float(result.end_row),
-            "end_col": float(result.end_col),
+            "a": float(raw["a"]),
+            "b": float(raw["b"]),
+            "c": float(raw["c"]),
+            "start_row": float(raw["start_row"]),
+            "start_col": float(raw["start_col"]),
+            "end_row": float(raw["end_row"]),
+            "end_col": float(raw["end_col"]),
         }
     if result_type == "circle":
         return {
             "type": "circle",
-            "center_row": float(result.center_row),
-            "center_col": float(result.center_col),
-            "radius": float(result.radius),
+            "center_row": float(raw["center_row"]),
+            "center_col": float(raw["center_col"]),
+            "radius": float(raw["radius"]),
         }
     if result_type == "angle":
-        return {"type": "scalar", "value": float(result.value_deg), "unit": "degree"}
-    return {"type": "scalar", "value": float(result.value), "unit": "pixel"}
+        value = raw.get("value_deg")
+        if value is None:
+            value = math.degrees(float(raw.get("value") or 0.0))
+        return {"type": "scalar", "value": float(value), "unit": "degree"}
+    return {"type": "scalar", "value": float(raw.get("value") or 0.0), "unit": "pixel"}
 
 
 def _json_value(value: Any) -> Any:

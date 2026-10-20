@@ -15,6 +15,28 @@ import numpy as np
 import pytest
 
 
+def _session(application, image, **roi_overrides):
+    """Create a modelling session that already has an ROI.
+
+    Measurement objects are defined in the straightened patch coordinate
+    system, so a session needs an ROI before any object can be created.  These
+    tests cover the flat (single-frame) engine behaviour, so the ROI spans the
+    whole reference image: with angle 0 that makes patch coordinates identical
+    to image coordinates.
+    """
+    session = application.create_modeling_session(image)
+    height, width = image.shape[:2]
+    roi = {
+        "center": [height / 2.0, width / 2.0],
+        "size": [float(height), float(width)],
+        "angle_deg": 0.0,
+        "match_score_threshold": 0.0,
+    }
+    roi.update(roi_overrides)
+    application.set_modeling_roi(session["session_id"], roi)
+    return session
+
+
 def _edge_point(row: float, col: float) -> dict:
     return {
         "object_type": "EdgePoint",
@@ -35,7 +57,7 @@ def test_modeling_session_uses_stable_object_ids_for_dependencies(tmp_path) -> N
 
     current = [datetime(2026, 8, 9, tzinfo=timezone.utc)]
     application = EngineApplication(tmp_path, now=lambda: current[0])
-    session = application.create_modeling_session(
+    session = _session(application, 
         np.zeros((40, 40), dtype=np.uint8)
     )
 
@@ -74,7 +96,7 @@ def test_all_first_release_object_contracts_accept_representative_requests(
 
     application = EngineApplication(tmp_path)
     try:
-        session = application.create_modeling_session(np.zeros((80, 80), dtype=np.uint8))
+        session = _session(application, np.zeros((80, 80), dtype=np.uint8))
         session_id = session["session_id"]
         point_a = application.create_object(session_id, _edge_point(20, 20))
         point_b = application.create_object(session_id, _edge_point(30, 30))
@@ -209,7 +231,7 @@ def test_publish_then_measure_uses_persistent_opaque_asset(tmp_path) -> None:
     image[:, 40:] = 255
     application = EngineApplication(tmp_path)
     try:
-        session = application.create_modeling_session(image)
+        session = _session(application, image)
         created = application.create_object(
             session["session_id"],
             {
@@ -254,7 +276,7 @@ def test_operation_deadline_includes_process_startup_and_repeated_posts_are_dist
 
     application = EngineApplication(tmp_path)
     try:
-        session = application.create_modeling_session(np.zeros((20, 20), dtype=np.uint8))
+        session = _session(application, np.zeros((20, 20), dtype=np.uint8))
         first = application.preview(
             session["session_id"], timeout_ms=1, client_request_id="request-7"
         )
@@ -284,7 +306,7 @@ def test_operation_deadline_can_start_before_application_submission(tmp_path) ->
 
     application = EngineApplication(tmp_path)
     try:
-        session = application.create_modeling_session(np.zeros((20, 20), dtype=np.uint8))
+        session = _session(application, np.zeros((20, 20), dtype=np.uint8))
         operation = application.preview(
             session["session_id"],
             timeout_ms=1_000,
@@ -338,7 +360,7 @@ def test_object_failure_is_structured_without_failing_preview_operation(tmp_path
 
     application = EngineApplication(tmp_path)
     try:
-        session = application.create_modeling_session(np.zeros((40, 40), dtype=np.uint8))
+        session = _session(application, np.zeros((40, 40), dtype=np.uint8))
         application.create_object(session["session_id"], _edge_point(20, 20))
 
         operation = application.preview(session["session_id"])
@@ -367,7 +389,7 @@ def test_export_survives_restart_and_import_creates_editable_session(tmp_path) -
 
     image = np.zeros((40, 40), dtype=np.uint8)
     first_application = EngineApplication(tmp_path)
-    session = first_application.create_modeling_session(image)
+    session = _session(first_application, image)
     original = first_application.create_object(
         session["session_id"], _edge_point(20, 20)
     )
@@ -422,7 +444,7 @@ def test_publish_write_failure_is_a_stable_model_error(tmp_path) -> None:
 
     application = EngineApplication(tmp_path)
     try:
-        session = application.create_modeling_session(
+        session = _session(application, 
             np.zeros((20, 20), dtype=np.uint8)
         )
         application.create_object(session["session_id"], _edge_point(10, 10))
@@ -445,7 +467,7 @@ def test_corrupt_asset_fails_without_engine_or_model_fallback(tmp_path) -> None:
     image = np.zeros((40, 40), dtype=np.uint8)
     application = EngineApplication(tmp_path)
     try:
-        session = application.create_modeling_session(image)
+        session = _session(application, image)
         application.create_object(session["session_id"], _edge_point(20, 20))
         publication = application.publish(session["session_id"], "corrupt-model")
         published = application.wait_operation(publication["operation_id"], 15_000)
@@ -470,7 +492,7 @@ def test_multi_object_measurement_preserves_partial_results(tmp_path) -> None:
     image[:, 40:] = 255
     application = EngineApplication(tmp_path)
     try:
-        session = application.create_modeling_session(image)
+        session = _session(application, image)
         application.create_object(
             session["session_id"],
             {
@@ -508,7 +530,7 @@ def test_export_digest_and_import_require_explicit_publication(tmp_path) -> None
     image = np.zeros((40, 40), dtype=np.uint8)
     application = EngineApplication(tmp_path)
     try:
-        session = application.create_modeling_session(image)
+        session = _session(application, image)
         application.create_object(session["session_id"], _edge_point(20, 20))
         publication = application.publish(session["session_id"], "source-model")
         published = application.wait_operation(publication["operation_id"], 15_000)

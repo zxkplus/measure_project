@@ -23,6 +23,26 @@ class _SlowPreviewImageReader(_ImageReader):
         return super().snapshot(descriptor)
 
 
+def _set_roi(client, session_id: str, shape=(32, 32)) -> None:
+    """Give a session a full-image ROI.
+
+    Objects are defined in the straightened patch coordinate system, so an ROI
+    is required first.  A full-image ROI at angle 0 makes patch coordinates
+    identical to image coordinates, which is what these contract tests assume.
+    """
+    height, width = shape
+    response = client.put(
+        f"/api/v2/modeling-sessions/{session_id}/roi",
+        json={
+            "center": [height / 2.0, width / 2.0],
+            "size": [float(height), float(width)],
+            "angle_deg": 0.0,
+            "match_score_threshold": 0.0,
+        },
+    )
+    assert response.status_code == 200, response.get_json()
+
+
 def _image_descriptor() -> dict:
     return {
         "uuid": "frame-http",
@@ -48,6 +68,7 @@ def test_http_adapter_exposes_only_versioned_headless_contract(tmp_path) -> None
         )
         assert created.status_code == 201
         session_id = created.get_json()["session_id"]
+        _set_roi(client, session_id)
 
         obj = client.post(
             f"/api/v2/modeling-sessions/{session_id}/objects",
@@ -160,6 +181,7 @@ def test_http_deadline_includes_shared_memory_snapshot_time(tmp_path) -> None:
             "/api/v2/modeling-sessions", json={"image": _image_descriptor()}
         )
         session_id = created.get_json()["session_id"]
+        _set_roi(client, session_id)
         descriptor = _image_descriptor()
         descriptor["uuid"] = "slow-frame"
 
@@ -184,6 +206,7 @@ def test_http_publish_measure_export_import_and_republish(tmp_path) -> None:
             "/api/v2/modeling-sessions", json={"image": _image_descriptor()}
         )
         session_id = created.get_json()["session_id"]
+        _set_roi(client, session_id)
         client.post(
             f"/api/v2/modeling-sessions/{session_id}/objects",
             json={

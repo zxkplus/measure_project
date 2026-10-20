@@ -17,6 +17,14 @@ from measure.object_specs import OBJECT_SPECS
 
 SESSION_IDLE_TTL = timedelta(hours=8)
 
+#: Accepted fields of a modeling-session ROI definition.
+_ROI_FIELDS = {
+    "center", "size", "angle_deg", "alignment_mode", "preprocessor",
+    "preprocessor_type", "match_score_threshold", "angle_range", "angle_step",
+    "max_matches", "overlap", "coarse_fine", "coarse_angle_step",
+    "pyramid_decimate", "pyramid_max_template_size",
+}
+
 
 class EngineError(Exception):
     """Stable error returned by the application and HTTP interfaces.
@@ -76,6 +84,7 @@ class _ModelingSession:
     created_at: datetime
     expires_at: datetime
     objects: List[_ObjectDefinition]
+    roi: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -145,6 +154,7 @@ class EngineApplication:
             created_at=created_at,
             expires_at=created_at + SESSION_IDLE_TTL,
             objects=[],
+            roi=None,
         )
         self._sessions[session_id] = session
         return self._session_dict(session)
@@ -171,6 +181,44 @@ class EngineApplication:
         self._session(session_id)
         del self._sessions[session_id]
 
+    def set_modeling_roi(
+        self,
+        session_id: str,
+        request: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Define the oriented ROI that all measurement objects live inside.
+
+        Stage 1 of the two-stage workflow: the ROI is located on the whole
+        image (multi-target matching happens here at inspection time), and the
+        straightened patch it produces becomes the coordinate system that
+        measurement objects are defined in.
+
+        Args:
+            session_id: Modeling session to update.
+            request: ROI box geometry plus optional matching parameters.
+
+        Returns:
+            The normalized ROI definition.
+        """
+        session = self._session(session_id)
+        roi = self._roi(request)
+        session.roi = roi
+        self._touch(session)
+        return dict(roi)
+
+    def get_modeling_roi(self, session_id: str) -> Dict[str, Any]:
+        """Return the session's ROI definition.
+
+        Args:
+            session_id: Modeling session to inspect.
+
+        Returns:
+            The ROI definition, or ``None`` when it has not been set.
+        """
+        session = self._session(session_id)
+        self._touch(session)
+        return dict(session.roi) if session.roi else None
+
     def create_object(self, session_id: str, request: Mapping[str, Any]) -> Dict[str, Any]:
         """Create a measurement object with a server-owned stable ID.
 
@@ -182,6 +230,14 @@ class EngineApplication:
             The normalized object definition including its immutable identifier.
         """
         session = self._session(session_id)
+        if session.roi is None:
+            raise EngineError(
+                "session.roi_required",
+                "request",
+                "Define the ROI before creating measurement objects: object "
+                "parameters are interpreted in the straightened patch "
+                "coordinate system.",
+            )
         allowed_fields = {
             "object_type",
             "label",
@@ -353,6 +409,7 @@ class EngineApplication:
             {
                 "reference_image": session.reference_image.copy(),
                 "image": snapshot.copy(),
+                "roi": dict(session.roi or {}),
                 "objects": [item.as_dict() for item in session.objects],
             },
             timeout,
@@ -406,6 +463,7 @@ class EngineApplication:
                 "asset_ref": asset_ref,
                 "asset_dir": str(self._asset_dir(calibration_model_id)),
                 "reference_image": session.reference_image.copy(),
+                "roi": dict(session.roi or {}),
                 "objects": [item.as_dict() for item in session.objects],
             },
             timeout,
@@ -530,6 +588,7 @@ class EngineApplication:
                     created_at=created_at,
                     expires_at=created_at + SESSION_IDLE_TTL,
                     objects=[],
+                    roi=dict(result.get("roi") or {}) or None,
                 )
                 object_ids = set()
                 for definition in result["objects"]:
@@ -705,6 +764,7 @@ class EngineApplication:
             "created_at": session.created_at.isoformat(),
             "expires_at": session.expires_at.isoformat(),
             "object_count": len(session.objects),
+            "roi": dict(session.roi) if session.roi else None,
         }
 
     @staticmethod
@@ -768,6 +828,110 @@ class EngineApplication:
             )
         _validate_parameter_semantics(object_type, parameters)
         return parameters
+
+    @staticmethod
+    def _roi(request: Mapping[str, Any]) -> Dict[str, Any]:
+        """Validate and normalize a modeling-session ROI definition.
+
+        Args:
+            request: ROI box geometry plus optional matching parameters.
+
+        Returns:
+            Normalized ROI definition stored on the session.
+        """
+        if not isinstance(request, Mapping):
+            raise EngineError("session.roi_invalid", "request", "ROI must be an object")
+        unknown = set(request) - _ROI_FIELDS
+        if unknown:
+            raise EngineError(
+                "request.field_unknown",
+                "request",
+                "ROI contains unknown fields",
+                details={"fields": sorted(unknown)},
+            )
+
+        def pair(name: str) -> tuple:
+            value = request.get(name)
+            if not isinstance(value, (list, tuple)) or len(value) != 2:
+                raise EngineError(
+                    "session.roi_invalid",
+                    "request",
+                    f"ROI '{name}' must be a two-element [row, col] pair",
+                )
+            if any(
+                isinstance(item, bool)
+                or not isinstance(item, (int, float, np.integer, np.floating))
+                for item in value
+            ):
+                raise EngineError(
+                    "session.roi_invalid",
+                    "request",
+                    f"ROI '{name}' must contain numeric values",
+                )
+            if not all(math.isfinite(float(item)) for item in value):
+                raise EngineError(
+                    "session.roi_invalid", "request", f"ROI '{name}' must be finite"
+                )
+            return (float(value[0]), float(value[1]))
+
+        center = pair("center")
+        size = pair("size")
+        if size[0] <= 0 or size[1] <= 0:
+            raise EngineError(
+                "session.roi_invalid", "request", "ROI size must be greater than zero"
+            )
+
+        angle_deg = float(request.get("angle_deg", 0.0))
+        mode = str(request.get("alignment_mode", "single_box"))
+        if mode not in ("single_box", "multi_point"):
+            raise EngineError(
+                "session.roi_invalid",
+                "request",
+                "Unsupported alignment_mode",
+                details={"alignment_mode": mode},
+            )
+
+        roi = {
+            "center": list(center),
+            "size": list(size),
+            "angle_deg": angle_deg,
+            "alignment_mode": mode,
+            "preprocessor": dict(request.get("preprocessor")
+                                 or {"type": str(request.get("preprocessor_type", "raw"))}),
+            "match_score_threshold": float(request.get("match_score_threshold", 0.5)),
+            "angle_range": [float(v) for v in request.get("angle_range", (-30.0, 30.0))],
+            "angle_step": float(request.get("angle_step", 1.0)),
+            "max_matches": int(request.get("max_matches", 0)),
+            "overlap": float(request.get("overlap", 0.3)),
+            "coarse_fine": bool(request.get("coarse_fine", True)),
+            "coarse_angle_step": float(request.get("coarse_angle_step", 5.0)),
+            "pyramid_decimate": int(request.get("pyramid_decimate", 0)),
+            "pyramid_max_template_size": int(request.get("pyramid_max_template_size", 400)),
+        }
+        if len(roi["angle_range"]) != 2:
+            raise EngineError(
+                "session.roi_invalid", "request", "angle_range must have two elements"
+            )
+        if roi["angle_step"] <= 0:
+            raise EngineError(
+                "session.roi_invalid", "request", "angle_step must be greater than zero"
+            )
+        if not _all_finite(
+            [*roi["center"], *roi["size"], roi["angle_deg"],
+             roi["match_score_threshold"], *roi["angle_range"], roi["angle_step"],
+             roi["overlap"], roi["coarse_angle_step"]]
+        ):
+            raise EngineError(
+                "session.roi_invalid", "request", "ROI values must be finite"
+            )
+        # roi_state is what restores the alignment strategy on load
+        roi["roi_state"] = {
+            "alignment_mode": mode,
+            "box_center": list(center),
+            "box_size": list(size),
+            "box_angle_deg": angle_deg,
+        }
+        return roi
 
     @staticmethod
     def _validate_dependencies(
