@@ -15,3 +15,5 @@ call_records/
 config.local.yaml
 models/*
 .idea
+docs/*
+.venv-docs/*
