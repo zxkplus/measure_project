@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Pure Python reimplementation of Halcon's 1D/2D measurement tools (edge detection, line/circle fitting) without the commercial Halcon library. The project uses a unified `measure/` package structure for all measurement-related code.
 
+**Two API generations coexist and are not interchangeable:** v1 (`measure_api/server.py`, Flask, stateful `/api/session/*`) and v2 (`measure_api/v2/`, FastAPI, *stateless* atomic operations under `/api/v2/*`, contract in `docs/v2-openapi.json`). Both build on the shared `measure/` engine and neither imports `measure_gui`. Before cross-generation work — porting a model, changing shared edge/fit code, or touching object types — read [`measure_api/measure-api/references/v1-v2-divergence.md`](measure_api/measure-api/references/v1-v2-divergence.md): it records where the two disagree (dependency type rules, template-search defaults, frame/unit tracking), a confirmed defect in `measure_pairs()` affecting both, and open ownership questions. See `AGENTS.md` for the current module layout.
+
 ## Build / test / run
 
 No build step. Install dependencies:

@@ -26,9 +26,15 @@ v2 is **not** covered here. Its authoritative contract is `docs/v2-openapi.json`
 [generated/v2_surface.md](references/generated/v2_surface.md) for a rendered route index.
 Do not mix the two generations — they also write different on-disk formats.
 
+**Before touching shared code, porting a model, or calling the other generation, read
+[v1-v2-divergence.md](references/v1-v2-divergence.md).** It records where the two
+implementations currently disagree (dependency type rules, template-search defaults,
+frame/unit tracking), one confirmed defect in shared edge-pair code that affects both,
+which side owns each difference, and what is still undecided.
+
 ## Overview
 
-The Measure API is a RESTful service for industrial machine vision measurement. It wraps a PyQt-based template matching + geometric fitting engine into HTTP endpoints.
+The Measure API is a RESTful service for industrial machine vision measurement. It wraps the shared `measure/` engine (template matching + geometric fitting, tkinter GUI on top) into HTTP endpoints.
 
 **Two-phase lifecycle:**
 
@@ -64,7 +70,8 @@ When a user asks to work with the Measure API:
 | [workflow_teaching.md](references/workflow_teaching.md) | When building a measurement model from scratch — detailed steps with parameter guidance |
 | [workflow_measurement.md](references/workflow_measurement.md) | When running batch measurement — loading model, interpreting results, error recovery |
 | [generated/object_contracts.md](references/generated/object_contracts.md) | **Authoritative object types, params and defaults** for v1 *and* v2 |
-| [generated/v2_surface.md](references/generated/v2_surface.md) | The complete v2 route + schema surface, captured from `GET /api/v2/openapi.json` |
+| [generated/v2_surface.md](references/generated/v2_surface.md) | v2 route index + schema index, rendered from `docs/v2-openapi.json` |
+| [v1-v2-divergence.md](references/v1-v2-divergence.md) | **Read first for cross-generation work** — conflicts, shared defects, undecided ownership |
 
 The two files under `references/generated/` are machine-derived from the code and
 pinned by `tests/test_generated_api_docs.py`; they cannot go stale silently. If you

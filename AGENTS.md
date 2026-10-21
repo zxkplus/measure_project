@@ -4,30 +4,57 @@
 
 ```
 .
-├── measure/                    # Unified measurement module
+├── measure/                    # Unified measurement engine (imports no GUI/API)
 │   ├── __init__.py             # Module initialization, exports main classes
 │   ├── constants.py            # Constants (EPS, etc.)
 │   ├── signal_ops.py           # Signal processing utilities
 │   ├── transforms.py           # Coordinate transformations
 │   ├── viz.py                  # Visualization helpers
+│   ├── geometric_fits.py       # Reusable line/circle least-squares fits
 │   ├── measure1D.py            # 1-D edge detection (Halcon1DMeasure)
 │   ├── measure2D.py            # 2-D fit: lines, circles, rectangles
 │   ├── measure_calibration.py  # Camera & stereo‑rig calibration
-│   ├── measure_template.py     # Template‑based matching
+│   ├── pixel_calibration.py    # Scale / mm-per-pixel calibration
+│   ├── measure_template.py     # Template‑based matching (TemplatePoint)
 │   ├── measure_workflow.py     # Orchestrated measurement workflow
-│   └── multi_target_workflow.py # Multi‑target detection pipeline
-├── project_manager.py          # Project serialization / load
+│   ├── multi_target_workflow.py # THE multi-target engine (only implementation)
+│   ├── object_specs.py         # Single registry for all 10 object types
+│   ├── alignment.py            # AlignmentStrategy: pluggable ROI locators
+│   ├── rectify.py              # Pure geometry: crop_and_straighten, affine maps
+│   └── result_format.py        # Result formatting shared by GUI and API layers
 ├── run_gui.py                  # GUI entry point
-├── measure_gui/                # PyQt / OpenCV GUI panels
-│   ├── tool_panel.py, alignment.py, result_panel.py, ...
-├── measure_api/                # REST API for measurements
-│   ├── server.py, project.py, quality.py, ...
-├── tests/                      # Pytest test suite
-│   ├── conftest.py             # Shared fixtures (headless mode, output dirs)
-│   └── test_*.py
-├── data/sample/                # Sample images for testing
+├── measure_gui/                # tkinter / OpenCV GUI panels
+│   ├── app.py, template_view.py, image_canvas.py, tool_panel.py,
+│   ├── project_manager.py, result_panel.py, calibration_dialog.py, dialogs.py
+│   └── alignment.py, multi_target.py, utils.py    # thin shims over measure/*
+├── measure_api/                # REST APIs — two generations, see "APIs" below
+│   ├── server.py, project.py, quality.py, schemas.py, visualizer.py   # v1
+│   ├── v2/                     # stateless FastAPI service (operation families)
+│   └── measure-api/SKILL.md    # agent-facing docs + references/
+├── scripts/                    # migrate_models_to_manifest.py, gen_api_reference.py, …
+├── tests/                      # Pytest test suite (+ tests/v2 for the FastAPI service)
+│   └── conftest.py             # Shared fixtures (headless mode, output dirs)
+├── data/sample/                # Sample images for testing (gitignored)
 └── output/                     # Generated test outputs (gitignored)
 ```
+
+## APIs
+
+Two generations coexist and are **not interchangeable**:
+
+- **v1** — `measure_api/server.py`: Flask, stateful sessions under `/api/session/*`,
+  persists `config.json` + `template.npz` + `reference.png`.
+- **v2** — `measure_api/v2/`: FastAPI, **stateless** atomic operations under `/api/v2/*`,
+  organised as operation families with typed port compatibility. Its authoritative contract
+  is `docs/v2-openapi.json` (`docs/v2-api-reference.md` for field-level detail).
+
+Neither API imports `measure_gui`; both use the shared `measure/` engine. Before working on
+anything that crosses the two, read
+[`measure_api/measure-api/references/v1-v2-divergence.md`](measure_api/measure-api/references/v1-v2-divergence.md)
+— where they disagree, known shared defects, and undecided ownership questions.
+
+Model assets taught by the GUI use manifest contract 3.0 (`manifest.json` + `reference.npy`
++ derived `workflow.npz`); legacy single-file `.npz` models upgrade automatically on open.
 
 The `measure/` package consolidates all measurement-related code into a single, portable module. It includes:
 - **Core utilities**: constants, signal processing, coordinate transforms, visualization
