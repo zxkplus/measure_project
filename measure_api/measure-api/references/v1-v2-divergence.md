@@ -217,14 +217,102 @@ These came from the unification work and are already merged. They are facts, not
 
 ---
 
-## 7. Known open work
+## 7. Planned work: OBB localization (design agreed, implementation paused)
 
-- **OBB / YOLO oriented-box localization** is planned as an `AlignmentStrategy` extension in
-  `measure/alignment.py` — i.e. a pluggable *first-stage ROI locator* alongside template
-  matching, with rectify-then-measure unchanged underneath. This occupies the same layer as
-  v2's `/template-matches`. **Coordinate before building** so the two do not diverge again.
-  Design constraints agreed so far: dependency injection so `measure/` keeps zero torch
-  imports, model identity recorded as path + sha256, strict anchor-failure semantics, no
-  mixing OBB and template localization in one model.
-- Whether GUI/v1 object types should converge onto v2's atomic operations (§2 of the
-  architecture question) remains undecided.
+**Decision taken:** define one shared *localization-source* abstraction and let both
+generations adopt it — v1/GUI through `AlignmentStrategy`, v2 through `Localization`.
+Neither side invents its own second version of the concept. Implementation is on hold
+pending coordination with the v2 owner.
+
+### Why a shared abstraction rather than two implementations
+
+v2 already models exactly the two-stage structure this was designed for. From
+`measure_api/v2/recipe_models.py`:
+
+```python
+class Localization(StrictModel):
+    """One template pose search or a fixed reference ROI, never implicit selection."""
+    template: Optional[FileReference] = None
+    search: TemplateSearch = ...
+    fixed_roi: Optional[RotatedROI] = None
+    max_targets: int = Field(default=1000, ge=1, le=1000)
+
+    def one_source(self):          # validator enforces exactly one source
+        if (self.template is None) == (self.fixed_roi is None):
+            raise ValueError("Localization requires exactly one template or fixed_roi")
+
+
+class TargetAlignment(StrictModel):
+    reference_to_patch: CoordinateMapping
+    controls: List[ControlTemplate]
+    minimum_controls: int = Field(default=2, ge=2)
+    robust: bool = True
+    max_residual: float = Field(default=3, gt=0)
+    estimate_scale: bool = True
+    failure_policy: Literal["fail", "rigid_fallback"] = "fail"
+```
+
+So `Localization` **is** the pluggable first-stage ROI locator, and `TargetAlignment`
+**is** the rectify-then-measure patch frame. Several constraints that were going to be
+new here are already enforced there, and more strictly:
+
+| Intended constraint | Already in v2 |
+|---|---|
+Strict anchor-failure semantics | `"never implicit selection"` + `failure_policy="fail"` default |
+No mixing localization sources | `one_source()` validator rejects zero or two sources |
+Affine/scale-aware back-mapping | `estimate_scale`, `robust`, `max_residual` |
+Rectified-patch measurement frame | `reference_to_patch: CoordinateMapping` |
+
+Adding OBB as a third arm of `Localization` (`fixed_roi` → `template` → `obb_model`) is a
+smaller, direction-consistent change than building a parallel mechanism.
+
+### Agreed design constraints (unchanged by the above)
+
+- **Dependency injection.** An `ObbSource` protocol lives in `measure/`; torch / ultralytics
+  imports stay outside it. Note v2 has the mirror guarantee already:
+  `tests/v2/test_deployment.py` installs a `BlockGUI` meta-path finder that raises for
+  `measure_gui`, `PyQt5/6`, `PySide6`, `tkinter`, `flask`, `waitress`, `matplotlib` — so
+  engine-layer purity is tested, not conventional.
+- **Reproducible model identity**: path + sha256 (+ `imgsz`, `conf`, class names).
+- **Explicit top-k target selection recorded at teaching time**, never re-derived per image.
+- **Angle semantics come from the model's learned positive direction**, not from either
+  side's stored box angle. See §8 for why this matters for the offset-angle case.
+
+### What is still blocked on the conversation
+
+1. Whether OBB lands in v2 only, v1/GUI only, or both behind the shared protocol.
+2. Whether GUI/v1 object types converge onto v2's atomic operations (§2 architecture Q).
+3. Who owns the artifact format for a taught OBB model — v2 publishes its own artifacts and
+   does not read manifest-v3.0 assets; the GUI writes manifest-v3.0 and cannot read his.
+
+## 8. Reference: what the original OBB consumer actually computes
+
+`srv-bottle-3rd/bottles/wlc/src/wlc2d/wlc2d_offsetangle.py` derives its offset angle from
+**two oriented boxes**, not from one box's rotation:
+
+```python
+result = model.inference(img)[0].obb
+idx = np.argmax(result.conf[result.cls == 0])          # cls 0 = "oritent"; top-1
+xywhr_box = result.xywhr[result.cls == 0][idx]         # anchor box centre
+# cls 1 = "bottle_center" supplies the second centre (cal_midline_mode dependent)
+angle_cal = math.degrees(math.atan2(-(y_obb - cy_cam), x_obb - cx_cam))
+angle_cal += initial_left_angle if camera_pos == 'left' else initial_right_angle
+angle_cal = (angle_cal + 360) % 360
+angle_cal *= rotation_flage                            # ±1 direction flip
+```
+
+Consequences for any implementation:
+
+- The value is a **bearing between two detected centres**. It is a composed relation over two
+  localizations, not an attribute of a single box, and the OBB's own `r` field is unused here.
+- `camera_pos`, `initial_left_angle` / `initial_right_angle` and `rotation_flage` are
+  **caller context plus calibration constants** — they must not be captured inside a
+  detector abstraction.
+- Failure is currently collapsed into `offset_angle = 0` with `status = 'error'`. Any new
+  implementation should keep "not found" distinguishable from "measured zero degrees".
+- Input is converted BGR → gray → `merge([g,g,g])` before inference, i.e. the model expects
+  three channels of luma. Reproduce this exactly or scores will silently differ.
+- v2 currently has **no OBB/YOLO capability at all** (verified: no matches for
+  obb/yolo/ultralytics under `measure_api/v2/`, and no torch/onnx in `pyproject.toml` or
+  `requirements.lock`). Whichever side adds it introduces ML dependencies to that layer, so
+  the injection rule above is load-bearing.
