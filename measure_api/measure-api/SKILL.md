@@ -54,9 +54,16 @@ When a user asks to work with the Measure API:
 
 | File | When to read |
 |---|---|
-| [api_reference.md](references/api_reference.md) | When writing API call code — complete endpoint list, request/response schemas, curl examples |
+| [api_reference.md](references/api_reference.md) | When writing v1 API call code — endpoint list, request/response schemas, curl examples |
 | [workflow_teaching.md](references/workflow_teaching.md) | When building a measurement model from scratch — detailed steps with parameter guidance |
 | [workflow_measurement.md](references/workflow_measurement.md) | When running batch measurement — loading model, interpreting results, error recovery |
+| [generated/object_contracts.md](references/generated/object_contracts.md) | **Authoritative object types, params and defaults** for v1 *and* v2 |
+| [generated/v2_surface.md](references/generated/v2_surface.md) | The complete v2 route + schema surface, captured from `GET /api/v2/openapi.json` |
+
+The two files under `references/generated/` are machine-derived from the code and
+pinned by `tests/test_generated_api_docs.py`; they cannot go stale silently. If you
+need a parameter default or type name, read those rather than trusting prose. To
+regenerate after changing the engine: `python scripts/gen_api_reference.py`.
 
 ## Common Pitfalls
 
@@ -70,7 +77,7 @@ When a user asks to work with the Measure API:
 - **Branch on `measurements[label]["type"]`**, not on key presence. Line results have no length field — derive it from `start_row/col` and `end_row/col`.
 - **`include_visual=true` means different things per endpoint.** On `/measurements` and `/composed` it overlays only that one tool; on `/measure` it draws **all** detected targets and all their measurements (a full-scene PNG). Both are base64 PNG — size accordingly in production.
 - **`quality` is sparse and partly misleading if taken literally.** `expected_edges` is usually `0` (the fitters don't record `num_measures` in `meta`), which forces `coverage_ratio` to `0.0`; the `rms` key is never actually emitted. Judge fit quality from `result.meta.mean_error` / `max_error` (pixels) and `meta.num_points`, and always read optional keys with `.get()`.
-- **Composed dependencies are not type-checked.** Pointing a `point_*` slot at a line returns 200 and keeps `dag_valid: true`; it only fails at run time via `meta.reason == "measurement raised exception"`. Verify producer result types yourself.
+- **Composed dependencies are type-checked, with one deliberate exception.** A `point` slot also accepts a fitted circle (`CircleResult.row/col` alias its centre) — the shipped models rely on that. Anything else mismatches and now returns 400 instead of failing silently at run time. But a dependency may only name an object that actually publishes results: a **valid** `EdgePair` exposes just `<label>_A` / `<label>_B`, never its bare label. Pointing at the bare label is rejected with a message naming both endpoints.
 - **A run-time exception truncates every later tool and adds `"_error"`.** The engine wraps the whole per-target tool loop in one `try`, so if tool *N* raises, tools *N+1…* are never evaluated and `targets[].measurements` gains a string-valued `"_error"` key. Do not iterate `measurements` assuming every entry is a result dict — skip `_error` (and any missing label) explicitly. A cleanly *invalid* measurement, by contrast, does appear as `{"type": ..., "label": ..., "valid": false}` with no value keys.
 - **`POST /measurements` registers the tool even when the test fails.** The definition is appended regardless of `valid`, so tuning by repeated POSTs silently accumulates tools and eventually hits `Duplicate measurement label`. Iterate with `POST /measurements/test` (no side effects) or `PUT /measurements/<label>`, and only POST once you are happy.
 - **Cascade delete**: Deleting a primitive measurement removes all composed measurements that depend on it.

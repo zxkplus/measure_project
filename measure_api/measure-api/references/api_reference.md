@@ -95,6 +95,10 @@ too-coarse value can miss the true orientation. All four are persisted with the 
 
 Primitive measurement types — **the complete set**. Any other name returns 400.
 
+> Machine-generated and always current: see
+> [generated/object_contracts.md](generated/object_contracts.md). The table below is
+> hand-written for readability; trust the generated one if they disagree.
+
 | Type | Result | Required params | Optional params (default) |
 |---|---|---|---|
 | `FitCircle` | circle | `center`, `radius`, `measure_length1`, `measure_length2` | `num_measures`(12), `sigma`(1.0), `threshold`(30.0), `transition`("all"), `start_phi`(0.0), `end_phi`(2π), `radius_min`(null), `radius_max`(null) |
@@ -206,31 +210,30 @@ For parameter exploration before committing. Request same as POST.
 Composed types — **the complete set**. A composed type takes no tuning params, only
 dependencies.
 
-| Type | Result | Dependency slots | Slot should hold a |
+The name is `PointLineDistance`, **not** `PointToLineDistance`.
+
+| Type | Result | Dependency slot | Slot accepts result types |
 |---|---|---|---|
-| `TwoPointsDistance` | distance | `point_a_label`, `point_b_label` | point |
-| `TwoPointsLine` | line | `point_a_label`, `point_b_label` | point |
+| `TwoPointsDistance` | distance | `point_a_label`, `point_b_label` | point, circle |
+| `TwoPointsLine` | line | `point_a_label`, `point_b_label` | point, circle |
 | `TwoLinesAngle` | angle | `line_a_label`, `line_b_label` | line |
-| `PointLineDistance` | distance | `point_label`, `line_label` | point / line |
-| `PointCircleDistance` | distance | `point_label`, `circle_label` | point / circle |
+| `PointLineDistance` | distance | `point_label` | point, circle |
+| | | `line_label` | line |
+| `PointCircleDistance` | distance | `point_label` | point, circle |
+| | | `circle_label` | circle |
 
-The name is `PointLineDistance`, **not** `PointToLineDistance`. A `FitCircle` satisfies a
-`point` slot via its center. An `EdgePair` also exposes virtual endpoint labels
-`<label>_A` / `<label>_B`, which composed tools may reference.
-
-**Validation is by existence only.** The server checks that each required slot is filled and
-that the referenced label names an existing measurement — it does **not** check that the
-referenced object actually produces the right result type. Wiring a `FitLine` into
-`point_a_label` returns **200**, leaves `dag_valid: true`, and fails only at run time with:
+**Dependencies are type-checked at add time.** A `point` slot also accepts a fitted
+circle, because `CircleResult` exposes `row`/`col` as aliases for its centre and the
+shipped models depend on that. Any other mismatch is rejected:
 
 ```json
-{"valid": false, "type": "distance",
- "meta": {"reason": "measurement raised exception",
-          "error": "'LineResult' object has no attribute 'row'"}}
+{"error": "Dependency 'line_1' (key=point_a_label) produces 'line' but TwoPointsDistance requires 'point'"}
 ```
 
-Match slot semantics to the producer's result type yourself; nothing downstream will catch
-it for you.
+A `FitCircle` therefore satisfies both `point_*` and `circle_label` slots. An `EdgePair`
+exposes virtual endpoint labels `<label>_A` / `<label>_B`, which point slots may reference —
+but **only those**: a valid EdgePair publishes no bare-label result, so referencing the pair
+by its own name is rejected with a message pointing at both endpoints.
 
 ### `POST /api/session/<sid>/composed` — Add composed measurement
 

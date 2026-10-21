@@ -180,9 +180,15 @@ All composed types (5 total):
 | `PointLineDistance` | Distance from a point to a line | point_label, line_label |
 | `PointCircleDistance` | Distance from a point to a circle center | point_label, circle_label |
 
-The name is `PointLineDistance`, not `PointToLineDistance`. A `FitCircle` satisfies a
-`point` slot via its center. Each dependency must resolve to an object producing the
-matching result type (`point` / `line` / `circle`), otherwise the DAG is invalid.
+The name is `PointLineDistance`, not `PointToLineDistance`.
+
+Slots are type-checked when you add the composed tool, so a wrong reference fails with 400
+instead of surfacing much later at run time. A `point` slot accepts a fitted circle as well
+as a point (`CircleResult.row/col` alias its centre); `line_label` and `circle_label` accept
+only their own kind. An `EdgePair` is addressable **only** through its virtual endpoints
+`<label>_A` / `<label>_B` — its bare label publishes no result and is rejected.
+
+Full parameter tables and defaults: [generated/object_contracts.md](generated/object_contracts.md).
 
 ### 8. Validate DAG
 
