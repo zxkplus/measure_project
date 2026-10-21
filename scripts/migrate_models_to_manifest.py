@@ -37,7 +37,8 @@ from measure.multi_target_workflow import (  # noqa: E402
     MultiTargetWorkflow,
 )
 
-LEGACY_BACKUP_SUFFIX = ".legacy.npz"
+# Name of the preserved original inside a migrated model directory.
+LEGACY_BACKUP_NAME = "workflow.legacy.npz"
 
 
 def find_legacy_models(root: Path) -> list[Path]:
@@ -84,22 +85,30 @@ def migrate_model(model_dir: Path, out_dir: Path | None, *, keep_backup: bool) -
 
     before = _normalise(legacy.measure(reference))
 
-    target_dir.mkdir(parents=True, exist_ok=True)
-    legacy.save(str(target_dir))
-
-    # verify: reload from disk and re-measure
-    reloaded = MultiTargetWorkflow.load(str(target_dir))
-    after = _normalise(reloaded.measure(reference))
-    if before != after:
-        raise AssertionError(
-            f"migration changed measurement results for {model_dir.name}"
-        )
-
+    # Back up BEFORE writing: save() overwrites workflow.npz with the derived
+    # cache, so copying afterwards would "preserve" the new file and lose the
+    # original.
     backup = None
     if target_dir == model_dir and keep_backup:
-        backup = legacy_path.with_name(legacy_path.name + LEGACY_BACKUP_SUFFIX)
-        if not backup.exists():
-            shutil.copy2(legacy_path, backup)
+        backup = legacy_path.with_name(LEGACY_BACKUP_NAME)
+        shutil.copy2(legacy_path, backup)
+
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        legacy.save(str(target_dir))
+
+        # verify: reload from disk and re-measure
+        reloaded = MultiTargetWorkflow.load(str(target_dir))
+        after = _normalise(reloaded.measure(reference))
+        if before != after:
+            raise AssertionError(
+                f"migration changed measurement results for {model_dir.name}"
+            )
+    except BaseException:
+        # Never leave a half-migrated directory behind.
+        if backup is not None and not (target_dir / "manifest.json").exists():
+            shutil.copy2(backup, legacy_path)
+        raise
 
     return {
         "model": model_dir.name,

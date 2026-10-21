@@ -239,6 +239,18 @@ class TestFailureModes:
 # ---------------------------------------------------------------------------
 
 
+def _raise_after_truncating(target):
+    """Build a save() stand-in that corrupts *target* then raises.
+
+    Simulates a migration interrupted after the overwrite, to prove the
+    rollback restores the original file.
+    """
+    def _save(self, path, model_id="", object_ids=None):
+        Path(target).write_bytes(b"")          # damage the live workflow file
+        raise RuntimeError("simulated write failure")
+    return _save
+
+
 class TestMigrationScript:
     def _write_legacy_asset(self, model_dir: Path) -> MultiTargetWorkflow:
         """Create a legacy-format model by reusing the legacy writer path."""
@@ -292,10 +304,51 @@ class TestMigrationScript:
         assert migrate.main([str(model_dir)]) == 0
 
         assert (model_dir / MANIFEST_FILENAME).is_file()
-        assert (model_dir / "workflow.npz.legacy.npz").is_file()
-
         reloaded = MultiTargetWorkflow.load(str(model_dir))
         assert _measure_summary(reloaded, insp) == before
+
+    def test_backup_holds_the_original_legacy_bytes(self, tmp_path: Path):
+        """The preserved copy must be the legacy file, not the new cache.
+
+        Regression: save() overwrites workflow.npz with the derived cache, so a
+        backup taken afterwards captured the wrong content and the original was
+        unrecoverable.
+        """
+        migrate = pytest.importorskip("migrate_models_to_manifest")
+
+        model_dir = tmp_path / "model"
+        self._write_legacy_asset(model_dir)
+        original = (model_dir / DERIVED_FILENAME).read_bytes()
+
+        assert migrate.main([str(model_dir)]) == 0
+
+        backup = model_dir / "workflow.legacy.npz"
+        assert backup.is_file()
+        assert backup.read_bytes() == original, "backup is not the pre-migration file"
+
+        # the live workflow.npz is now the derived cache, i.e. it changed
+        assert (model_dir / DERIVED_FILENAME).read_bytes() != original
+
+        # and the backup is still readable as a legacy model
+        restored = MultiTargetWorkflow.load_legacy(str(backup))
+        assert restored.template_image is not None
+
+    def test_failed_migration_restores_the_original(self, tmp_path: Path,
+                                                   monkeypatch):
+        """A migration that does not finish must leave the model loadable."""
+        import measure.multi_target_workflow as mtw
+        migrate = pytest.importorskip("migrate_models_to_manifest")
+
+        model_dir = tmp_path / "model"
+        self._write_legacy_asset(model_dir)
+        original = (model_dir / DERIVED_FILENAME).read_bytes()
+
+        monkeypatch.setattr(mtw.MultiTargetWorkflow, "save",
+                            _raise_after_truncating(model_dir / DERIVED_FILENAME))
+        with pytest.raises(RuntimeError):
+            migrate.migrate_model(model_dir, None, keep_backup=True)
+
+        assert (model_dir / DERIVED_FILENAME).read_bytes() == original
 
     def test_dry_run_writes_nothing(self, tmp_path: Path):
         migrate = pytest.importorskip("migrate_models_to_manifest")

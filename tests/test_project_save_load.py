@@ -448,7 +448,7 @@ def _write_legacy_project(project_dir: str, workflow: MultiTargetWorkflow,
         "crop_center_col": tp._crop_center_col,
         "crop_h": tp._crop_h,
         "crop_w": tp._crop_w,
-        "measurement_defs": [],
+        "measurement_defs": [dict(d) for d in workflow.measurement_defs],
         "alignment_mode": "single_box",
         "alignment_roi_state": workflow._alignment.get_roi_state(),
     }
@@ -476,7 +476,9 @@ def _write_legacy_project(project_dir: str, workflow: MultiTargetWorkflow,
         "tool_list_order": [], "tool_visibility": {}, "gui": {},
         "alignment": {"mode": "single_box"}, "calibration": {},
     }
-    if project_json_version >= 3:
+    if project_json_version:
+        # 0 means "no project.json at all" (a bare legacy .npz model)
+        legacy_project_json["version"] = project_json_version
         with open(os.path.join(project_dir, "project.json"), "w") as f:
             json.dump(legacy_project_json, f)
     return legacy_project_json
@@ -507,6 +509,39 @@ class TestLegacyProjectUpgrade:
         assert os.path.isfile(os.path.join(project_dir, "manifest.json"))
         assert os.path.isfile(os.path.join(project_dir, "reference.npy"))
         assert os.path.isfile(os.path.join(project_dir, "workflow.npz.legacy"))
+
+    @pytest.mark.parametrize("legacy_version", [1, 2, 3])
+    def test_any_legacy_project_version_opens_and_upgrades(self, tmp_path,
+                                                          taught_workflow,
+                                                          legacy_version):
+        """Projects from every pre-manifest era must open without manual steps."""
+        project_dir = str(tmp_path / f"old_v{legacy_version}")
+        os.makedirs(project_dir)
+        _write_legacy_project(project_dir, taught_workflow,
+                              project_json_version=legacy_version)
+
+        app = FakeApp()
+        ProjectManager.load_project(project_dir, app)
+
+        assert app._workflow is not None
+        assert app._ref_canvas.roi_center == pytest.approx(ROI_CENTER)
+        # converted so later saves are plain v4
+        assert os.path.isfile(os.path.join(project_dir, "manifest.json"))
+
+    def test_upgrade_keeps_the_measurement_tools(self, tmp_path, taught_workflow):
+        """Tools defined on the old project survive the conversion."""
+        project_dir = str(tmp_path / "old_tools")
+        os.makedirs(project_dir)
+        _write_legacy_project(project_dir, taught_workflow, project_json_version=2)
+        assert [d["label"] for d in taught_workflow.measurement_defs] == ["line_1"]
+
+        app = FakeApp()
+        ProjectManager.load_project(project_dir, app)
+
+        labels = [d["label"] for d in app._workflow.measurement_defs]
+        assert labels == ["line_1"]
+        restored = [c for c in app.tool_panel.calls if c[0] == "restore_tool_list"]
+        assert restored[0][1] == ["line_1"]
 
     def test_converted_asset_preserves_the_taught_matching_values(self, tmp_path,
                                                                  taught_workflow):
