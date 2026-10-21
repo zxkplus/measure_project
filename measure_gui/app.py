@@ -429,8 +429,11 @@ class MeasureApp:
                     dst_npz = os.path.join(project_dir, "workflow.npz")
                     shutil.copy2(filepath, dst_npz)
 
-                    # Load workflow from the copy
-                    self._workflow = MultiTargetWorkflow.load(dst_npz)
+                    # Load workflow from the copy.  _load_workflow converts a
+                    # legacy single-file model into a manifest asset in place;
+                    # MultiTargetWorkflow.load() alone would reject it.
+                    self._workflow = ProjectManager._load_workflow(
+                        project_dir, dst_npz)
                     self._current_project_dir = project_dir
                     self._current_project_path = None
                     self._created_at = datetime.now().isoformat()

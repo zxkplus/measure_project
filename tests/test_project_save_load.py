@@ -415,3 +415,133 @@ class TestLegacyProjectCompatibility:
         with pytest.raises(Exception) as excinfo:
             ProjectManager.load_project(project_dir, app)
         assert "migrate_models_to_manifest" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Legacy projects saved before the manifest format existed
+# ---------------------------------------------------------------------------
+
+
+def _write_legacy_project(project_dir: str, workflow: MultiTargetWorkflow,
+                          *, project_json_version: int) -> dict:
+    """Write a pre-manifest project: single-file workflow.npz (+ old project.json)."""
+    tp = workflow._alignment.template_point
+    meta = {
+        "version": 1,
+        "box_center": list(workflow._alignment.box_center),
+        "box_size": list(workflow._alignment.box_size),
+        "box_angle_deg": workflow._alignment.box_angle_deg,
+        "template_size": workflow._alignment._template_size,
+        "match_score_threshold": 0.55,
+        "angle_range": [-20.0, 20.0],
+        "angle_step": 2.0,
+        "max_matches": 0,
+        "overlap": 0.3,
+        "coarse_fine": True,
+        "coarse_angle_step": 5.0,
+        "pyramid_decimate": tp.pyramid_decimate,
+        "pyramid_max_template_size": tp.pyramid_max_template_size,
+        "preprocessor_data": tp.preprocessor.serialize(),
+        "click_row": tp.click_row,
+        "click_col": tp.click_col,
+        "crop_center_row": tp._crop_center_row,
+        "crop_center_col": tp._crop_center_col,
+        "crop_h": tp._crop_h,
+        "crop_w": tp._crop_w,
+        "measurement_defs": [],
+        "alignment_mode": "single_box",
+        "alignment_roi_state": workflow._alignment.get_roi_state(),
+    }
+    np.savez_compressed(
+        os.path.join(project_dir, "workflow.npz"),
+        workflow_meta=np.array([json.dumps(meta)], dtype=object),
+        edge_template=tp.edge_template,
+        template_image=workflow._alignment.template_image,
+        reference_image=workflow._alignment._reference_image,
+    )
+
+    legacy_project_json = {
+        "version": project_json_version,
+        "project_name": os.path.basename(project_dir),
+        "created_at": "x", "updated_at": "y",
+        "reference_image_path": None, "inspection_image_path": None,
+        "matching": {"preprocessor_type": "raw", "match_score_threshold": 0.55,
+                     "angle_range_deg": 20.0, "angle_step_deg": 2.0,
+                     "max_matches": 0, "overlap": 0.3},
+        "roi": {"center_row": ROI_CENTER[0], "center_col": ROI_CENTER[1],
+                "height": ROI_SIZE[0], "width": ROI_SIZE[1],
+                "angle_deg": workflow._alignment.box_angle_deg,
+                "confirmed": True, "alignment_mode": "single_box"},
+        "ref_canvas_state": {}, "insp_canvas_state": {}, "template_view": {},
+        "tool_list_order": [], "tool_visibility": {}, "gui": {},
+        "alignment": {"mode": "single_box"}, "calibration": {},
+    }
+    if project_json_version >= 3:
+        with open(os.path.join(project_dir, "project.json"), "w") as f:
+            json.dump(legacy_project_json, f)
+    return legacy_project_json
+
+
+class TestLegacyProjectUpgrade:
+    """Old projects must open, not dead-end on a script the user has to run."""
+
+    def test_v3_project_without_model_manifest_loads_and_upgrades(self, tmp_path,
+                                                                taught_workflow):
+        project_dir = str(tmp_path / "old_v3")
+        os.makedirs(project_dir)
+        _write_legacy_project(project_dir, taught_workflow, project_json_version=3)
+        assert not os.path.exists(os.path.join(project_dir, "manifest.json"))
+
+        app = FakeApp()
+        ProjectManager.load_project(project_dir, app)
+
+        # ROI and matching restored from the converted model asset
+        assert app._ref_canvas.roi_center == pytest.approx(ROI_CENTER)
+        assert app._ref_canvas.roi_angle == pytest.approx(12.5)
+        assert app._ref_canvas.roi_confirmed is True
+        calls = [c for c in app.tool_panel.calls if c[0] == "set_matching_params"]
+        assert calls[0][2] == pytest.approx(0.55)
+        assert calls[0][6] == pytest.approx(2.0)
+
+        # upgraded in place, original preserved
+        assert os.path.isfile(os.path.join(project_dir, "manifest.json"))
+        assert os.path.isfile(os.path.join(project_dir, "reference.npy"))
+        assert os.path.isfile(os.path.join(project_dir, "workflow.npz.legacy"))
+
+    def test_converted_asset_preserves_the_taught_matching_values(self, tmp_path,
+                                                                 taught_workflow):
+        """The upgrade must not flatten non-default matching parameters."""
+        project_dir = str(tmp_path / "old_v3b")
+        os.makedirs(project_dir)
+        _write_legacy_project(project_dir, taught_workflow, project_json_version=3)
+
+        ProjectManager.load_project(project_dir, FakeApp())
+        model = json.load(open(os.path.join(project_dir, "manifest.json")))
+        assert model["matching"]["match_score_threshold"] == pytest.approx(0.55)
+        assert model["matching"]["angle_step"] == pytest.approx(2.0)
+        assert model["matching"]["angle_range"] == [-20.0, 20.0]
+
+    def test_bare_legacy_npz_still_reports_actionably(self, tmp_path,
+                                                    taught_workflow):
+        """A lone legacy .npz with no project.json cannot be opened by load_project."""
+        project_dir = str(tmp_path / "bare")
+        os.makedirs(project_dir)
+        _write_legacy_project(project_dir, taught_workflow, project_json_version=0)
+
+        with pytest.raises(FileNotFoundError, match="项目清单不存在"):
+            ProjectManager.load_project(project_dir, FakeApp())
+
+    def test_load_workflow_is_idempotent_on_an_already_converted_dir(self, tmp_path,
+                                                                    taught_workflow):
+        project_dir = str(tmp_path / "twice")
+        os.makedirs(project_dir)
+        _write_legacy_project(project_dir, taught_workflow, project_json_version=3)
+
+        first = ProjectManager._load_workflow(
+            project_dir, os.path.join(project_dir, "workflow.npz"))
+        second = ProjectManager._load_workflow(
+            project_dir, os.path.join(project_dir, "workflow.npz"))
+
+        assert first._alignment.box_center == second._alignment.box_center
+        assert second._alignment.box_angle_deg == pytest.approx(
+            first._alignment.box_angle_deg)

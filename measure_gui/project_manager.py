@@ -215,7 +215,7 @@ class ProjectManager:
         if not os.path.exists(workflow_path):
             raise FileNotFoundError(f"工作流文件不存在: {workflow_path}")
 
-        app._workflow = MultiTargetWorkflow.load(workflow_path)
+        app._workflow = ProjectManager._load_workflow(project_dir, workflow_path)
         app._current_project_dir = project_dir
         app._current_project_path = None
         app._created_at = manifest.get("created_at")
@@ -343,6 +343,57 @@ class ProjectManager:
     # =====================================================================
     # Model-asset readers (the single source of measurement truth)
     # =====================================================================
+
+    @staticmethod
+    def _load_workflow(project_dir: str, workflow_path: str) -> MultiTargetWorkflow:
+        """Load the workflow, upgrading a legacy single-file model in place first.
+
+        Projects saved before the manifest format carry only ``workflow.npz``
+        with a ``workflow_meta`` blob inside.  Rather than failing, convert them
+        to a model asset on the spot and keep the original file alongside as
+        ``workflow.npz.legacy`` — so an old project opens, and its ROI/matching
+        parameters become available to restore from.
+
+        Args:
+            project_dir: Project directory to write the converted asset into.
+            workflow_path: Path of the project's ``workflow.npz``.
+
+        Returns:
+            The loaded MultiTargetWorkflow.
+        """
+        manifest_present = os.path.isfile(
+            os.path.join(project_dir, MODEL_MANIFEST_FILENAME))
+        if manifest_present:
+            return MultiTargetWorkflow.load(workflow_path)
+
+        if not ProjectManager._is_legacy_single_file(workflow_path):
+            # No model manifest and nothing convertible: this is a broken or
+            # half-migrated asset, not an old project.  Say so actionably
+            # instead of surfacing a KeyError from inside the legacy reader.
+            raise ValueError(
+                f"'{project_dir}' has no {MODEL_MANIFEST_FILENAME} and "
+                f"'{workflow_path}' is not a readable legacy model. Legacy "
+                f"single-file .npz models are converted automatically; run "
+                f"scripts/migrate_models_to_manifest.py for standalone models."
+            )
+
+        workflow = MultiTargetWorkflow.load_legacy(workflow_path)
+        backup = workflow_path + ".legacy"
+        if not os.path.exists(backup):
+            shutil.copy2(workflow_path, backup)
+        # Re-save through the engine so the directory gains manifest.json +
+        # reference.npy; load again to prove the conversion is usable.
+        workflow.save(project_dir)
+        return MultiTargetWorkflow.load(workflow_path)
+
+    @staticmethod
+    def _is_legacy_single_file(path: str) -> bool:
+        """True when *path* is a pre-manifest single-file workflow archive."""
+        try:
+            with np.load(path, allow_pickle=True) as data:
+                return "workflow_meta" in data
+        except (OSError, ValueError):
+            return False
 
     @staticmethod
     def _read_model_manifest(project_dir: str) -> Dict[str, Any]:
