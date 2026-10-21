@@ -12,6 +12,7 @@ implementations, so this file covers the behaviour both of them relied on:
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -348,6 +349,46 @@ class TestAlignment:
 
 
 class TestSerialization:
+    def test_matching_params_read_from_the_live_template(self, tmp_path: Path):
+        """Non-default matching settings must survive save/load.
+
+        Regression: _manifest() used to read the workflow-level attribute cache,
+        which teach_template() never populated, so every asset silently recorded
+        the constructor defaults (0.5 / ±30° / step 1.0) instead of what was
+        actually taught.
+        """
+        wf = MultiTargetWorkflow()
+        wf.teach_template(make_reference(), center=ROI_CENTER, size=ROI_SIZE,
+                          angle_deg=0.0, match_score_threshold=0.42,
+                          angle_range=(-17.0, 17.0), angle_step=0.5,
+                          max_matches=6, overlap=0.7)
+        wf.save(str(tmp_path))
+
+        manifest = json.loads((tmp_path / "manifest.json").read_text())
+        assert manifest["matching"]["match_score_threshold"] == pytest.approx(0.42)
+        assert manifest["matching"]["angle_range"] == [-17.0, 17.0]
+        assert manifest["matching"]["angle_step"] == pytest.approx(0.5)
+        assert manifest["matching"]["max_matches"] == 6
+        assert manifest["matching"]["overlap"] == pytest.approx(0.7)
+
+        reloaded = MultiTargetWorkflow.load(str(tmp_path))
+        tp = reloaded._alignment.template_point
+        assert tp.match_score_threshold == pytest.approx(0.42)
+        assert tp.angle_step == pytest.approx(0.5)
+        assert tp.max_matches == 6
+
+    def test_teach_syncs_public_matching_properties(self):
+        """Public properties must report what was taught, not stale defaults."""
+        wf = MultiTargetWorkflow()
+        wf.teach_template(make_reference(), center=ROI_CENTER, size=ROI_SIZE,
+                          angle_deg=0.0, match_score_threshold=0.61,
+                          angle_range=(-11.0, 11.0), angle_step=2.0,
+                          max_matches=5, overlap=0.4)
+        assert wf.match_score_threshold == pytest.approx(0.61)
+        assert tuple(wf.angle_range) == (-11.0, 11.0)
+        assert wf.max_matches == 5
+        assert wf.overlap == pytest.approx(0.4)
+
     def test_save_load_roundtrip(self, tmp_path: Path):
         wf = taught_workflow()
         path = tmp_path / "workflow.npz"

@@ -1008,6 +1008,17 @@ class MultiTargetWorkflow:
             pyramid_max_template_size=pyramid_max_template_size,
         )
 
+        # Keep the workflow-level matching cache in sync with what was taught.
+        # Without this the public match_score_threshold / angle_range / ...
+        # properties keep reporting stale defaults after a re-teach.
+        self._match_score_threshold = float(match_score_threshold)
+        self._angle_range = tuple(angle_range)
+        self._angle_step = float(angle_step)
+        self._max_matches = int(max_matches)
+        self._overlap = float(overlap)
+        self._coarse_fine = bool(coarse_fine)
+        self._coarse_angle_step = float(coarse_angle_step)
+
         # Convenience: keep local references to frequently-accessed items
         self._template_image_legacy = self._alignment.template_image
         self._box_center_legacy = self._alignment.box_center
@@ -1665,14 +1676,19 @@ class MultiTargetWorkflow:
                 "template_size": self._alignment._template_size,
                 "preprocessor": tp.preprocessor.serialize(),
             },
+            # Read from the template point — that is what actually runs at match
+            # time.  The workflow-level attributes are only a cache:
+            # teach_template() forwards its parameters to the alignment
+            # strategy, so trusting the cache would persist whatever defaults
+            # the widget never touched.
             "matching": {
-                "match_score_threshold": self._match_score_threshold,
-                "angle_range": list(self._angle_range),
-                "angle_step": self._angle_step,
-                "max_matches": self._max_matches,
-                "overlap": self._overlap,
-                "coarse_fine": self._coarse_fine,
-                "coarse_angle_step": self._coarse_angle_step,
+                "match_score_threshold": float(tp.match_score_threshold),
+                "angle_range": list(tp.angle_range),
+                "angle_step": float(tp.angle_step),
+                "max_matches": int(tp.max_matches),
+                "overlap": float(tp.overlap),
+                "coarse_fine": bool(tp.coarse_fine),
+                "coarse_angle_step": float(tp.coarse_angle_step),
                 "pyramid_decimate": tp.pyramid_decimate,
                 "pyramid_max_template_size": tp.pyramid_max_template_size,
             },

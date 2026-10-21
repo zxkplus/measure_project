@@ -34,7 +34,17 @@ WORKFLOW_FILENAME = "workflow.npz"
 REF_IMAGE_FILENAME = "reference.png"
 INSP_IMAGE_FILENAME = "inspection.png"
 CALIB_BOARD_FILENAME = "calibration_board.png"
-MANIFEST_VERSION = 3
+# Model asset manifest written by MultiTargetWorkflow.save().
+MODEL_MANIFEST_FILENAME = "manifest.json"
+
+# project.json schema version.
+#   4 — measurement config (matching / roi / alignment) is no longer duplicated
+#       here: the model asset's manifest.json owns it.  Purely GUI state is
+#       grouped under "view".
+MANIFEST_VERSION = 4
+
+# Keys older project.json files carry; still read (as a fallback) but never written.
+_LEGACY_MEASUREMENT_KEYS = ("matching", "roi", "alignment")
 MAX_RECENT = 10
 
 
@@ -140,6 +150,22 @@ class ProjectManager:
             except (OSError, TypeError):
                 pass
 
+        # Measurement configuration (ROI geometry, matching parameters and
+        # alignment mode) is NOT written here any more.  It belongs to the model
+        # asset (manifest.json), saved by MultiTargetWorkflow.save() below, which
+        # keeps the two in lockstep by construction.  Duplicating it let the GUI
+        # restore a ROI the engine was never taught with.
+        #
+        # What stays here is state the model asset deliberately does not carry:
+        # window/canvas presentation plus the user's ROI *interaction* flag.
+        roi_state = _to_json(app._get_roi_state())
+        view: Dict[str, Any] = {
+            "roi_confirmed": bool(roi_state.get("confirmed", False)),
+            "ref_canvas_state": _to_json(app._ref_canvas.get_view_state()),
+            "insp_canvas_state": _to_json(app._insp_canvas.get_view_state()),
+            "template_view": _to_json(app.template_view.get_state()),
+        }
+
         manifest: Dict[str, Any] = {
             "version": MANIFEST_VERSION,
             "project_name": os.path.basename(project_dir),
@@ -147,15 +173,10 @@ class ProjectManager:
             "updated_at": now,
             "reference_image_path": getattr(app, '_reference_image_path', None),
             "inspection_image_path": inspection_path,
-            "matching": _to_json(app.get_matching_state()),
-            "roi": _to_json(app._get_roi_state()),
-            "ref_canvas_state": _to_json(app._ref_canvas.get_view_state()),
-            "insp_canvas_state": _to_json(app._insp_canvas.get_view_state()),
-            "template_view": _to_json(app.template_view.get_state()),
+            "view": view,
             "tool_list_order": _to_json(app.get_tool_list_order()),
             "tool_visibility": _to_json(dict(app.tool_panel._tool_visibility)),
             "gui": _to_json(app.get_gui_state()),
-            "alignment": _to_json(app.get_alignment_state()),
             "calibration": _to_json(app.get_calibration_state()),
         }
         return manifest
@@ -168,8 +189,9 @@ class ProjectManager:
     def load_project(project_dir: str, app: MeasureApp) -> None:
         """Load a complete project from a directory.
 
-        1. Reads project.json manifest
-        2. Loads workflow.npz
+        1. Loads the model asset (manifest.json + workflow.npz) — this owns the
+           ROI geometry, matching parameters and alignment mode
+        2. Reads project.json for purely GUI state (views, layout, tool order)
         3. Restores all GUI state (ROI, tools, canvas views, layout)
         4. Updates recent projects list
         """
@@ -198,36 +220,46 @@ class ProjectManager:
         app._current_project_path = None
         app._created_at = manifest.get("created_at")
 
+        # The model asset is the single source of truth for measurement config.
+        model = ProjectManager._read_model_manifest(project_dir)
+        view = manifest.get("view") or {}
+
         # Restore reference image
         ref_img = app._workflow.reference_image
         if ref_img is not None:
             app._reference_image = ref_img
             app._ref_canvas.load_image(ref_img)
 
-            # Restore ROI
-            roi = manifest.get("roi", {})
+            roi = ProjectManager._roi_from_model(model) or manifest.get("roi", {})
             if roi:
                 app._ref_canvas.set_roi(
                     (roi["center_row"], roi["center_col"]),
                     (roi["height"], roi["width"]),
                     roi["angle_deg"],
                 )
-                if roi.get("confirmed", False):
+                # 'confirmed' is GUI interaction state, never model state: it
+                # comes from project.json ("view" now, "roi" in older files).
+                confirmed = view.get("roi_confirmed",
+                                     manifest.get("roi", {}).get("confirmed", False))
+                if confirmed:
                     app._ref_canvas.confirm_roi()
 
-                # Restore alignment mode
-                alignment_mode = roi.get("alignment_mode", "single_box")
+                alignment_mode = (ProjectManager._alignment_mode(model)
+                                  or roi.get("alignment_mode")
+                                  or "single_box")
                 app.tool_panel.set_alignment_mode(alignment_mode)
 
                 # Restore control points if multi-point
                 if alignment_mode == "multi_point":
-                    cps = roi.get("control_points", [])
+                    cps = (ProjectManager._control_points(model)
+                           or roi.get("control_points") or [])
                     if cps:
                         points = [(cp["row"], cp["col"]) for cp in cps]
                         app._ref_canvas.set_control_points(points)
 
             # Restore ref canvas view state
-            ref_state = manifest.get("ref_canvas_state", {})
+            ref_state = view.get("ref_canvas_state") or manifest.get(
+                "ref_canvas_state", {})
             if ref_state:
                 app._ref_canvas.set_view_state(ref_state)
 
@@ -235,7 +267,8 @@ class ProjectManager:
         tmpl = app._workflow.template_image
         if tmpl is not None:
             app.template_view.load_template(tmpl, clear_tools=False)
-            tmpl_state = manifest.get("template_view", {})
+            tmpl_state = view.get("template_view") or manifest.get(
+                "template_view", {})
             if tmpl_state:
                 app.template_view.set_state(tmpl_state)
 
@@ -249,16 +282,18 @@ class ProjectManager:
             app.template_view.set_tool_visibility(tool_visibility)
         app.tool_panel.restore_tool_list(tools_from_wf, tool_order)
 
-        # Restore matching params in UI widgets
-        matching = manifest.get("matching", {})
+        # Restore matching params in UI widgets — from the model asset, falling
+        # back to a legacy project.json block for older projects.
+        matching = ProjectManager._matching_from_model(model) or manifest.get(
+            "matching", {})
         if matching:
             app.tool_panel.set_matching_params(
-                matching.get("preprocessor_type", "raw"),
-                matching.get("match_score_threshold", 0.5),
-                matching.get("angle_range_deg", 30.0),
-                matching.get("max_matches", 0),
-                matching.get("overlap", 0.3),
-                angle_step_deg=matching.get("angle_step_deg", 1.0),
+                matching["preprocessor_type"],
+                matching["match_score_threshold"],
+                matching["angle_range_half"],
+                matching["max_matches"],
+                overlap=matching["overlap"],
+                angle_step_deg=matching["angle_step_deg"],
             )
 
         # Restore inspection image if available
@@ -266,7 +301,8 @@ class ProjectManager:
         if insp_img is not None:
             app._inspection_image = insp_img
             app._insp_canvas.load_image(insp_img)
-            insp_state = manifest.get("insp_canvas_state", {})
+            insp_state = view.get("insp_canvas_state") or manifest.get(
+                "insp_canvas_state", {})
             if insp_state:
                 app._insp_canvas.set_view_state(insp_state)
 
@@ -303,6 +339,88 @@ class ProjectManager:
 
         # Update recent projects
         ProjectManager.add_recent_project(project_dir, project_name)
+
+    # =====================================================================
+    # Model-asset readers (the single source of measurement truth)
+    # =====================================================================
+
+    @staticmethod
+    def _read_model_manifest(project_dir: str) -> Dict[str, Any]:
+        """Read the model asset's manifest.json next to workflow.npz.
+
+        Returns:
+            The model manifest, or ``{}`` when it is absent (a project saved by
+            an older build).
+        """
+        path = os.path.join(project_dir, MODEL_MANIFEST_FILENAME)
+        if not os.path.isfile(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _roi_from_model(model: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Translate the model manifest's ROI into the canvas' ROI state form.
+
+        Returns ``None`` when the model carries no ROI, so callers can fall back
+        to a legacy project.json.
+        """
+        alignment = model.get("alignment") or {}
+        center = alignment.get("box_center")
+        size = alignment.get("box_size")
+        if not center or not size:
+            return None
+        roi = {
+            "center_row": float(center[0]),
+            "center_col": float(center[1]),
+            "height": float(size[0]),
+            "width": float(size[1]),
+            "angle_deg": float(alignment.get("box_angle_deg", 0.0)),
+            "alignment_mode": alignment.get("mode", "single_box"),
+        }
+        control_points = ProjectManager._control_points(model)
+        if control_points:
+            roi["control_points"] = control_points
+        return roi
+
+    @staticmethod
+    def _alignment_mode(model: Dict[str, Any]) -> Optional[str]:
+        """Alignment mode recorded in the model asset."""
+        mode = (model.get("alignment") or {}).get("mode")
+        return mode or None
+
+    @staticmethod
+    def _control_points(model: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Control points stored in the model asset's ROI state."""
+        roi_state = (model.get("alignment") or {}).get("roi_state") or {}
+        points = roi_state.get("control_points") or []
+        return list(points)
+
+    @staticmethod
+    def _matching_from_model(model: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Translate the model manifest's matching block into widget values.
+
+        The model stores ``angle_range`` as a [min, max] pair while the tool
+        panel works with a half-range, so the conversion happens here rather
+        than leaving two incompatible spellings of the same setting around.
+        """
+        matching = model.get("matching") or {}
+        if not matching:
+            return None
+        angle_range = matching.get("angle_range") or (-30.0, 30.0)
+        preprocessor = (model.get("alignment") or {}).get("preprocessor") or {}
+        return {
+            "preprocessor_type": preprocessor.get("type", "raw"),
+            "match_score_threshold": float(matching.get("match_score_threshold", 0.5)),
+            "angle_range_half": max(abs(float(v)) for v in angle_range),
+            "angle_step_deg": float(matching.get("angle_step", 1.0)),
+            "max_matches": int(matching.get("max_matches", 0)),
+            "overlap": float(matching.get("overlap", 0.3)),
+        }
 
     @staticmethod
     def _resolve_inspection_image(

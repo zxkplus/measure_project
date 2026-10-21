@@ -129,7 +129,15 @@ class TestManifestSchema(TestCase):
     """Test manifest JSON schema compatibility."""
 
     def test_manifest_version(self):
-        self.assertEqual(MANIFEST_VERSION, 3)
+        """Version must be an int that load_project still accepts.
+
+        v4 dropped the duplicated measurement config (matching/roi/alignment)
+        from project.json — the model asset's manifest.json owns those — and
+        grouped purely GUI state under "view".  Assert the invariant rather than
+        pinning a magic number, so future schema bumps stay meaningful.
+        """
+        self.assertIsInstance(MANIFEST_VERSION, int)
+        self.assertGreaterEqual(MANIFEST_VERSION, 4)
 
     def test_manifest_serializable(self):
         """A minimal manifest should be JSON-serializable."""
