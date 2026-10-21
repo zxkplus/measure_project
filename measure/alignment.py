@@ -1,18 +1,36 @@
 """
 Alignment strategies for ROI extraction and straightening.
 
-Supports two modes:
-  - SingleBoxAlignment: rigid (rotation + translation) via crop_and_straighten
+Modes:
+  - NoneAlignment:       no localisation at all — the inspection image *is*
+                         the measurement frame (fixed workpiece position)
+  - FixedRoiAlignment:   crop a known ROI without searching for it
+  - SingleBoxAlignment:  rigid (rotation + translation) via crop_and_straighten
   - MultiPointAlignment: affine refinement via control point matching
 
-Both implement the AlignmentStrategy interface so downstream measurement
-code works identically regardless of the alignment mode.
+All implement the AlignmentStrategy interface so downstream measurement code
+works identically regardless of the mode.
 
 Architecture:
-                ┌── SingleBoxAlignment ──→ crop_and_straighten (rigid)
-  AlignmentStrategy ──┤
-                └── MultiPointAlignment ──→ parent match → control-point
-                                              refinement → getAffineTransform
+                              ┌── NoneAlignment ──────→ identity, full image
+                              ├── FixedRoiAlignment ──→ crop, no search
+  AlignmentStrategy ──────────┤
+                              └── template-matching modes:
+                                    SingleBoxAlignment → crop_and_straighten
+                                    MultiPointAlignment → parent match →
+                                        control-point refinement →
+                                        getAffineTransform
+
+Why the first two exist
+-----------------------
+Template matching is one way to answer "where is the part", but it is not free:
+it costs time, can mismatch, and quantises orientation to ``angle_step``.  When
+the part's pose is already known — a fixed fixture, or a detector upstream that
+already returned a box — searching again is pure loss.  Worse, rectification
+*removes* pose from the patch by design, so any measurement that needs the
+orientation itself (for example a bearing between two detected centres) cannot be
+expressed in a rectified frame.  These two modes make stage 1 explicitly
+skippable instead of forcing every model through a template.
 """
 
 from __future__ import annotations
@@ -215,6 +233,141 @@ class AlignmentStrategy:
         with the full set of parameters.
         """
         raise NotImplementedError
+
+
+# =============================================================================
+# NoneAlignment — stage 1 skipped entirely
+# =============================================================================
+
+
+class NoneAlignment(AlignmentStrategy):
+    """Skip localisation: the inspection image is already the measurement frame.
+
+    For a fixed-position workpiece, or when some upstream detector has already
+    established the pose.  :meth:`align` returns the image untouched with an
+    identity mapping, so measurement coordinates *are* image coordinates and
+    orientation-dependent measurements remain expressible.
+
+    Teaching still records geometry for visualisation, but deliberately creates
+    no :class:`TemplatePoint`: there is nothing to search for, and a template
+    would imply a search that this mode exists to avoid.
+    """
+
+    mode_name = "none"
+
+    def teach(self, *args, **kwargs) -> None:
+        """Store geometry only — never builds a matching template."""
+        reference_image = args[0] if args else kwargs.get("reference_image")
+        if reference_image is None:
+            raise ValueError("teach() requires a reference image")
+        center = args[1] if len(args) > 1 else kwargs.get("center", (0.0, 0.0))
+        size = args[2] if len(args) > 2 else kwargs.get("size", (0.0, 0.0))
+        angle_deg = args[3] if len(args) > 3 else kwargs.get("angle_deg", 0.0)
+
+        self._reference_image = np.asarray(reference_image).copy()
+        self._box_center = (float(center[0]), float(center[1]))
+        self._box_size = (float(size[0]), float(size[1]))
+        self._box_angle_deg = float(angle_deg)
+        self._template_point = None
+        self._template_image = self._reference_image
+        self._template_size = int(max(self._reference_image.shape[:2]))
+
+    def align(
+        self,
+        inspection_image: np.ndarray,
+        matched_row: float,
+        matched_col: float,
+        rotation_deg: float,
+    ) -> AlignResult:
+        """Return the full image with an identity mapping.
+
+        ``matched_*`` / ``rotation_deg`` are ignored: with no stage 1 there is no
+        match to consume.  The engine supplies the image centre and 0.0 in that
+        case (see :meth:`MultiTargetWorkflow.measure`).
+        """
+        image = np.asarray(inspection_image)
+        identity = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        return AlignResult(patch=image, M_inv=identity)
+
+    @classmethod
+    def from_roi_state(cls, data, **kwargs) -> "NoneAlignment":
+        return cls()
+
+
+# =============================================================================
+# FixedRoiAlignment — crop a known ROI without searching
+# =============================================================================
+
+
+class FixedRoiAlignment(AlignmentStrategy):
+    """Crop a taught ROI from every inspection image, with no template search.
+
+    Use when the part's position is repeatable enough that finding it again is
+    waste, but the measurement still wants a rectified patch rather than the raw
+    frame.  This mirrors v2's ``Localization.fixed_roi``: exactly one source is
+    active, and here that source is the stored ROI itself.
+
+    Unlike :class:`NoneAlignment` this *does* deskew, so it removes pose from
+    the patch; use ``none`` when the orientation must survive into the
+    measurement stage.
+    """
+
+    mode_name = "fixed_roi"
+
+    def teach(self, *args, **kwargs) -> None:
+        """Store the ROI geometry; builds no TemplatePoint."""
+        reference_image = args[0] if args else kwargs.get("reference_image")
+        if reference_image is None:
+            raise ValueError("teach() requires a reference image")
+        center = args[1] if len(args) > 1 else kwargs.get("center")
+        size = args[2] if len(args) > 2 else kwargs.get("size")
+        angle_deg = args[3] if len(args) > 3 else kwargs.get("angle_deg", 0.0)
+        if center is None or size is None:
+            raise ValueError("FixedRoiAlignment.teach() requires center and size")
+
+        self._reference_image = np.asarray(reference_image).copy()
+        self._box_center = (float(center[0]), float(center[1]))
+        self._box_size = (float(size[0]), float(size[1]))
+        self._box_angle_deg = float(angle_deg)
+        self._preprocessor = kwargs.get("preprocessor")
+        self._template_point = None
+
+        # The straightened reference ROI doubles as the patch frame of record.
+        self._template_image, _ = crop_and_straighten(
+            self._reference_image, self._box_center, self._box_size,
+            self._box_angle_deg,
+        )
+        self._template_size = int(max(self._box_size))
+
+    def align(
+        self,
+        inspection_image: np.ndarray,
+        matched_row: float,
+        matched_col: float,
+        rotation_deg: float,
+    ) -> AlignResult:
+        """Crop the fixed ROI.
+
+        ``matched_*`` default back to the taught centre when the engine has no
+        stage-1 result to offer, which keeps this strategy usable whether or not
+        a caller happens to pass a pose.
+        """
+        if matched_row is None or matched_col is None:
+            matched_row, matched_col = self._box_center
+        if rotation_deg is None:
+            rotation_deg = 0.0
+        target_angle = self._box_angle_deg - rotation_deg
+        patch, M_inv_3x3 = crop_and_straighten(
+            inspection_image,
+            (matched_row, matched_col),
+            self._box_size,
+            target_angle,
+        )
+        return AlignResult(patch=patch, M_inv=M_inv_3x3[:2, :])
+
+    @classmethod
+    def from_roi_state(cls, data, **kwargs) -> "FixedRoiAlignment":
+        return cls()
 
 
 # =============================================================================
@@ -581,6 +734,8 @@ def _compose_affine_2x3(
 # =============================================================================
 
 _ALIGNMENT_STRATEGY_REGISTRY: Dict[str, type] = {
+    "none": NoneAlignment,
+    "fixed_roi": FixedRoiAlignment,
     "single_box": SingleBoxAlignment,
     "multi_point": MultiPointAlignment,
 }

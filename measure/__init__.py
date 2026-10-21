@@ -84,10 +84,13 @@ from measure.measure_workflow import (
 # Multi-target workflow (unified engine shared by GUI, API v1 and API v2)
 from measure.multi_target_workflow import MultiTargetWorkflow, TargetResult
 
-# ROI alignment strategies used by the multi-target workflow
+# ROI alignment strategies used by the multi-target workflow.  ``none`` and
+# ``fixed_roi`` skip stage 1 entirely; see measure.alignment for why.
 from measure.alignment import (
     AlignmentStrategy,
     AlignResult,
+    FixedRoiAlignment,
+    NoneAlignment,
     SingleBoxAlignment,
     MultiPointAlignment,
     ControlPoint,

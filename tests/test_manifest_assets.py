@@ -230,7 +230,13 @@ class TestFailureModes:
             MultiTargetWorkflow.load(str(tmp_path))
 
     def test_save_without_template_raises(self, tmp_path: Path):
-        with pytest.raises(RuntimeError, match="No template defined"):
+        """An untaught workflow must not be saved.
+
+        The gate used to be "has a template"; search-free modes legitimately have
+        none, so it is now "has a reference image".  A model with no reference
+        cannot be reconstructed — that is the property being protected.
+        """
+        with pytest.raises(RuntimeError, match="Nothing taught yet"):
             MultiTargetWorkflow().save(str(tmp_path))
 
 

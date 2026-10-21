@@ -1232,8 +1232,10 @@ class MeasureApp:
 
     def get_alignment_state(self) -> dict:
         """Collect alignment mode and control points for project serialization."""
-        mode = self.tool_panel._alignment_var.get()
-        state: dict = {"mode": "single_box" if mode != "多点仿射" else "multi_point"}
+        # Route through the panel's mapping instead of re-testing the Chinese
+        # label here, so a second hard-coded comparison cannot disagree with
+        # get_alignment_mode() about what the combobox currently means.
+        state: dict = {"mode": self.tool_panel.get_alignment_mode()}
         if state["mode"] == "multi_point":
             points = self._ref_canvas.get_control_points()
             state["control_points"] = [

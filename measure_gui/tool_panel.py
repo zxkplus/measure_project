@@ -41,6 +41,15 @@ class ToolPanel(ttk.Frame):
         on_export_csv: () -> None
     """
 
+    # Combobox label <-> alignment mode key.  Single source of truth so the two
+    # directions can never drift apart, and so modes that exist in the engine but
+    # are not offered here (``none``, ``fixed_roi``) round-trip by identity
+    # instead of being silently rewritten to ``single_box``.
+    _ALIGNMENT_LABELS = {
+        "旋转框": "single_box",
+        "多点仿射": "multi_point",
+    }
+
     def __init__(self, parent: tk.Widget, **kwargs):
         super().__init__(parent, **kwargs)
 
@@ -129,7 +138,7 @@ class ToolPanel(ttk.Frame):
         self._alignment_var = tk.StringVar(value="旋转框")
         alignment_combo = ttk.Combobox(
             tmpl_frame, textvariable=self._alignment_var,
-            values=["旋转框", "多点仿射"],
+            values=list(self._ALIGNMENT_LABELS),
             state="readonly", width=18,
         )
         alignment_combo.pack(fill=tk.X, **pad)
@@ -443,16 +452,26 @@ class ToolPanel(ttk.Frame):
         self._angle_step_var.set(angle_step_deg)
 
     def get_alignment_mode(self) -> str:
-        """Return 'single_box' or 'multi_point'."""
-        if self._alignment_var.get() == "多点仿射":
-            return "multi_point"
-        return "single_box"
+        """Return the selected alignment mode key.
+
+        An unrecognised label falls back to ``single_box`` rather than guessing,
+        so a stale combobox value cannot silently select a different strategy
+        than the one on screen.
+        """
+        return self._ALIGNMENT_LABELS.get(
+            self._alignment_var.get(), "single_box")
 
     def set_alignment_mode(self, mode: str):
-        """Set alignment mode: 'single_box' or 'multi_point'."""
-        self._alignment_var.set(
-            "多点仿射" if mode == "multi_point" else "旋转框"
-        )
+        """Select an alignment mode by key, e.g. ``'multi_point'``.
+
+        Modes with no combobox entry keep their raw key instead of being coerced
+        to ``旋转框``: relabelling ``fixed_roi`` as a template search would show
+        the user one thing while the saved model meant another.  Those modes are
+        currently reachable only through a taught model or the API.
+        """
+        label = next((lab for lab, key in self._ALIGNMENT_LABELS.items()
+                      if key == mode), mode)
+        self._alignment_var.set(label)
 
     @property
     def debug_save_enabled(self) -> bool:

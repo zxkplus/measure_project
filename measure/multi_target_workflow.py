@@ -72,6 +72,8 @@ from measure.object_specs import (
 from measure.alignment import (
     AlignmentStrategy,
     AlignResult,
+    FixedRoiAlignment,
+    NoneAlignment,
     SingleBoxAlignment,
     MultiPointAlignment,
     strategy_from_roi_state,
@@ -960,6 +962,58 @@ class MultiTargetWorkflow:
     # Teaching
     # ------------------------------------------------------------------
 
+    def teach_without_search(
+        self,
+        reference_image: np.ndarray,
+        center: Tuple[float, float],
+        size: Tuple[float, float],
+        angle_deg: float = 0.0,
+    ) -> None:
+        """Teach a model that performs no template search.
+
+        Public entry point for the ``none`` and ``fixed_roi`` alignment modes:
+        stage 1 is skipped, so there are no matching parameters to tune and no
+        template to build.  The ROI geometry is still recorded because it defines
+        the measurement frame and drives visualisation.
+
+        Args:
+            reference_image: The reference (teaching) image.
+            center: ``(row, col)`` of the fixed ROI; ignored by ``none`` mode.
+            size: ``(height, width)`` of the fixed ROI.
+            angle_deg: ROI rotation in degrees.
+        """
+        strategy = self._alignment
+        if not isinstance(strategy, (NoneAlignment, FixedRoiAlignment)):
+            raise RuntimeError(
+                f"Alignment mode '{strategy.mode_name}' requires a template "
+                f"search; use teach_template() instead."
+            )
+        strategy.teach(reference_image, center, size, angle_deg)
+        self._after_teach()
+
+    def _teach_without_search(
+        self,
+        reference_image: np.ndarray,
+        alignment: Dict[str, Any],
+    ) -> None:
+        """Restore a search-free model from its manifest ``alignment`` block."""
+        self.teach_without_search(
+            reference_image,
+            center=tuple(alignment["box_center"]),
+            size=tuple(alignment["box_size"]),
+            angle_deg=float(alignment["box_angle_deg"]),
+        )
+
+    def _after_teach(self) -> None:
+        """Refresh the workflow-level caches shared by every teach path."""
+        # Convenience: keep local references to frequently-accessed items
+        self._template_image_legacy = self._alignment.template_image
+        self._box_center_legacy = self._alignment.box_center
+        self._box_size_legacy = self._alignment.box_size
+        self._box_angle_deg_legacy = self._alignment.box_angle_deg
+        # Build TemplateMatchPoint instances from the template image
+        self._build_template_match_points()
+
     def teach_template(
         self,
         reference_image: np.ndarray,
@@ -1019,14 +1073,7 @@ class MultiTargetWorkflow:
         self._coarse_fine = bool(coarse_fine)
         self._coarse_angle_step = float(coarse_angle_step)
 
-        # Convenience: keep local references to frequently-accessed items
-        self._template_image_legacy = self._alignment.template_image
-        self._box_center_legacy = self._alignment.box_center
-        self._box_size_legacy = self._alignment.box_size
-        self._box_angle_deg_legacy = self._alignment.box_angle_deg
-
-        # Build TemplateMatchPoint instances from the template image
-        self._build_template_match_points()
+        self._after_teach()
 
     def _build_template_match_points(self):
         """Create TemplatePoint instances for all TemplateMatchPoint definitions.
@@ -1202,25 +1249,44 @@ class MultiTargetWorkflow:
         self._last_inspection_image = inspection_image.copy()
         self._results = []
 
-        if self._alignment.template_point is None:
-            raise RuntimeError("No template defined. Call teach_template() first.")
-
-        # Debug: save template image used for matching
-        if self._debug_dir and self._alignment.template_image is not None:
-            self._debug_save("template.png", self._alignment.template_image)
-
-        # Step 1: Multi-target matching
+        # Stage 1 is pluggable, and "no stage 1" is a legitimate choice.
+        # Strategies without a template (``none``, ``fixed_roi``) synthesise one
+        # pseudo-match so the rest of the pipeline — per-target measurement,
+        # coordinate mapping, debug capture — stays on a single path instead of
+        # branching.  The score is 1.0 because there was nothing to score.
         t0 = time.perf_counter()
         self._timer_match = t0
-        match_result = self._alignment.template_point.measure(inspection_image)
-        matches = match_result.get("matches", [])
+        if self._alignment.template_point is None:
+            centre_row, centre_col = self._alignment.box_center
+            height, width = self._alignment.box_size
+            if height <= 0 or width <= 0:
+                raise RuntimeError(
+                    "No template defined and no ROI taught. Call teach_template() "
+                    "first, or use an alignment mode that stores a fixed ROI."
+                )
+            matches = [{
+                "matched_row": centre_row,
+                "matched_col": centre_col,
+                "match_score": 1.0,
+                "best_rotation_deg": 0.0,
+                "best_scale": 1.0,
+                "valid": True,
+            }]
+        else:
+            # Debug: save template image used for matching
+            if self._debug_dir and self._alignment.template_image is not None:
+                self._debug_save("template.png", self._alignment.template_image)
 
-        if not matches:
-            # Try single-target result
-            if match_result.get("valid", False):
-                matches = [match_result]
-            else:
-                return []
+            # Step 1: Multi-target matching
+            match_result = self._alignment.template_point.measure(inspection_image)
+            matches = match_result.get("matches", [])
+
+            if not matches:
+                # Try single-target result
+                if match_result.get("valid", False):
+                    matches = [match_result]
+                else:
+                    return []
 
         # Step 2: Process each match
         t_match_end = time.perf_counter()
@@ -1616,8 +1682,6 @@ class MultiTargetWorkflow:
             JSON-serializable manifest body (without the ``files`` digests).
         """
         tp = self._alignment.template_point
-        if tp is None:
-            raise RuntimeError("No template defined. Call teach_template() first.")
         if self._alignment._reference_image is None:
             raise RuntimeError(
                 "No reference image available on the alignment strategy; "
@@ -1674,14 +1738,20 @@ class MultiTargetWorkflow:
                 "box_size": list(self._alignment.box_size),
                 "box_angle_deg": self._alignment.box_angle_deg,
                 "template_size": self._alignment._template_size,
-                "preprocessor": tp.preprocessor.serialize(),
+                "preprocessor": (tp.preprocessor.serialize() if tp is not None
+                                 else None),
             },
             # Read from the template point — that is what actually runs at match
             # time.  The workflow-level attributes are only a cache:
             # teach_template() forwards its parameters to the alignment
             # strategy, so trusting the cache would persist whatever defaults
             # the widget never touched.
-            "matching": {
+            #
+            # Search-free modes (``none``, ``fixed_roi``) have no template and
+            # therefore no matching behaviour to record; an empty dict says
+            # "nothing was searched" honestly instead of storing defaults that
+            # would look like real tuning.
+            "matching": ({} if tp is None else {
                 "match_score_threshold": float(tp.match_score_threshold),
                 "angle_range": list(tp.angle_range),
                 "angle_step": float(tp.angle_step),
@@ -1691,7 +1761,7 @@ class MultiTargetWorkflow:
                 "coarse_angle_step": float(tp.coarse_angle_step),
                 "pyramid_decimate": tp.pyramid_decimate,
                 "pyramid_max_template_size": tp.pyramid_max_template_size,
-            },
+            }),
             "physical_scale_mm": self._physical_scale_mm,
             "objects": objects,
             "derived_fingerprint": self._derived_fingerprint(),
@@ -1742,8 +1812,11 @@ class MultiTargetWorkflow:
           template).  Loading always re-derives this state from the manifest,
           so the cache is never required and can be deleted safely.
         """
-        if self._alignment.template_point is None:
-            raise RuntimeError("No template defined. Call teach_template() first.")
+        if self._alignment._reference_image is None:
+            raise RuntimeError(
+                "Nothing taught yet: call teach_template() before saving.  "
+                "A model with no reference image cannot be reconstructed."
+            )
 
         target = Path(path)
         if target.suffix == ".npz":
@@ -1760,17 +1833,27 @@ class MultiTargetWorkflow:
         np.save(str(reference_path), reference, allow_pickle=False)
 
         tp = self._alignment.template_point
-        np.savez_compressed(
-            str(derived_path),
-            edge_template=tp.edge_template,
-            template_image=self._alignment.template_image,
-        )
-
-        manifest = self._manifest(model_id=model_id, object_ids=object_ids)
-        manifest["files"] = {
-            REFERENCE_FILENAME: _sha256_file(reference_path),
-            derived_path.name: _sha256_file(derived_path),
-        }
+        if tp is None:
+            # Search-free modes derive nothing from a template, so there is no
+            # cache to write.  The manifest already declares the cache optional
+            # ("derived cache only, safe to delete"), so omitting it entirely is
+            # consistent — and writing an npz without edge_template would make
+            # the loader's cache path disagree with its own contract.
+            if derived_path.exists():
+                derived_path.unlink()
+            manifest = self._manifest(model_id=model_id, object_ids=object_ids)
+            manifest["files"] = {REFERENCE_FILENAME: _sha256_file(reference_path)}
+        else:
+            np.savez_compressed(
+                str(derived_path),
+                edge_template=tp.edge_template,
+                template_image=self._alignment.template_image,
+            )
+            manifest = self._manifest(model_id=model_id, object_ids=object_ids)
+            manifest["files"] = {
+                REFERENCE_FILENAME: _sha256_file(reference_path),
+                derived_path.name: _sha256_file(derived_path),
+            }
         # Same digest as files[reference.npy] — kept here too so a reader can
         # verify the reference image without knowing the asset's file layout.
         manifest["reference_image"]["sha256"] = manifest["files"][REFERENCE_FILENAME]
@@ -1841,29 +1924,38 @@ class MultiTargetWorkflow:
         reference = np.load(str(reference_path), allow_pickle=False)
 
         alignment = manifest["alignment"]
-        matching = manifest["matching"]
+        matching = manifest.get("matching") or {}
 
         wf = cls()
         wf._physical_scale_mm = manifest.get("physical_scale_mm")
-        wf._alignment = strategy_from_roi_state(
+        strategy = strategy_from_roi_state(
             alignment.get("roi_state", {}), reference
         )
-        wf.teach_template(
-            reference,
-            center=tuple(alignment["box_center"]),
-            size=tuple(alignment["box_size"]),
-            angle_deg=float(alignment["box_angle_deg"]),
-            preprocessor=_deserialize_preprocessor(alignment["preprocessor"]),
-            match_score_threshold=float(matching["match_score_threshold"]),
-            angle_range=tuple(matching["angle_range"]),
-            angle_step=float(matching["angle_step"]),
-            max_matches=int(matching["max_matches"]),
-            overlap=float(matching["overlap"]),
-            coarse_fine=bool(matching["coarse_fine"]),
-            coarse_angle_step=float(matching["coarse_angle_step"]),
-            pyramid_decimate=int(matching["pyramid_decimate"]),
-            pyramid_max_template_size=int(matching["pyramid_max_template_size"]),
-        )
+        wf._alignment = strategy
+        # Search-free modes store an empty ``matching`` block and must stay that
+        # way.  Routing them through teach_template() would hand the base
+        # implementation's TemplatePoint constructor a None preprocessor (it
+        # defaults to RawPreprocessor, silently changing semantics) and would
+        # rebuild exactly the matcher these modes exist to avoid.
+        if isinstance(strategy, (NoneAlignment, FixedRoiAlignment)):
+            wf._teach_without_search(reference, alignment)
+        else:
+            wf.teach_template(
+                reference,
+                center=tuple(alignment["box_center"]),
+                size=tuple(alignment["box_size"]),
+                angle_deg=float(alignment["box_angle_deg"]),
+                preprocessor=_deserialize_preprocessor(alignment["preprocessor"]),
+                match_score_threshold=float(matching["match_score_threshold"]),
+                angle_range=tuple(matching["angle_range"]),
+                angle_step=float(matching["angle_step"]),
+                max_matches=int(matching["max_matches"]),
+                overlap=float(matching["overlap"]),
+                coarse_fine=bool(matching["coarse_fine"]),
+                coarse_angle_step=float(matching["coarse_angle_step"]),
+                pyramid_decimate=int(matching["pyramid_decimate"]),
+                pyramid_max_template_size=int(matching["pyramid_max_template_size"]),
+            )
 
         # Translate the manifest's dependency references back to label form.
         label_by_id = {obj["object_id"]: obj["label"] for obj in manifest["objects"]}
