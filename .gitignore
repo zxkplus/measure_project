@@ -19,3 +19,9 @@ docs/*
 .venv-docs/*
 # local verification deps (worktree-only)
 .deps/
+
+# test artifacts written to the repo root by tests/test_1d_measure.py and
+# tests/test_measure_workflow.py — they reappear on every pytest run
+/inspection.png
+/result_image.png
+/roi_image.png
