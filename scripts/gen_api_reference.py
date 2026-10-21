@@ -163,21 +163,45 @@ def _schema_inline(node: Dict[str, Any], depth: int = 0) -> str:
     return kind + hints
 
 
+V2_OPENAPI_SNAPSHOT = ROOT / "docs" / "v2-openapi.json"
+
+
+def _load_v2_document() -> Dict[str, Any]:
+    """Read the v2 contract from the committed OpenAPI snapshot.
+
+    The v2 API is a stateless FastAPI service whose document is generated at
+    runtime and checked in as ``docs/v2-openapi.json`` — its README names that
+    snapshot as the source for client generation.  Reading the committed file
+    keeps this generator dependency-free (no fastapi/uvicorn needed to render
+    docs) and pins it to exactly what the v2 owner published.
+
+    Raises:
+        FileNotFoundError: if the snapshot is missing, rather than silently
+            emitting an empty surface that would read as "v2 has no routes".
+    """
+    if not V2_OPENAPI_SNAPSHOT.exists():
+        try:
+            shown = str(V2_OPENAPI_SNAPSHOT.relative_to(ROOT))
+        except ValueError:      # outside the repo, e.g. an injected test path
+            shown = str(V2_OPENAPI_SNAPSHOT)
+        raise FileNotFoundError(
+            f"{shown} is missing. The v2 contract is owned by measure_api/v2 "
+            f"(FastAPI); regenerate its snapshot there before rendering docs."
+        )
+    return json.loads(V2_OPENAPI_SNAPSHOT.read_text(encoding="utf-8"))
+
+
 def v2_surface_md() -> str:
     """Render the whole v2 HTTP surface from the app's own OpenAPI document."""
-    from measure_api.v2.application import EngineApplication
-    from measure_api.v2.http import create_production_app
-
-    app = create_production_app(EngineApplication(str(ROOT / "output" / "_docgen")))
-    with app.test_client() as client:
-        doc = client.get("/api/v2/openapi.json").get_json()
+    doc = _load_v2_document()
 
     schemas = doc.get("components", {}).get("schemas", {})
     lines: List[str] = [
         "# Measure API v2 — Endpoint Surface (generated)",
         "",
-        "Captured from `GET /api/v2/openapi.json`, served by the code itself. This",
-        "is the authoritative v2 contract; the hand-written v1 reference in",
+        "Rendered from `docs/v2-openapi.json` — the committed snapshot of the",
+        "stateless FastAPI v2 service, which its own README designates as the",
+        "authoritative contract. The hand-written v1 reference in",
         "`../api_reference.md` does not describe these routes.",
         "",
         f"Paths: **{len(doc['paths'])}** · Schemas: **{len(schemas)}**",
@@ -207,35 +231,30 @@ def v2_surface_md() -> str:
         "",
         "## Schemas",
         "",
-        "`*` marks a required property. Objects reject unknown fields unless noted.",
+        "Every v2 request/response schema is defined by the service itself and",
+        "documented in full in `docs/v2-api-reference.md` (4670 lines) plus the raw",
+        "`docs/v2-openapi.json`. Only the route index is rendered here — duplicating",
+        "222 schemas into this skill would bury it and drift from his docs.",
         "",
+        "## Schema index",
+        "",
+        f"{len(schemas)} schemas; see `docs/v2-api-reference.md` for every field.",
+        "",
+        "| Schema | Kind | Properties |",
+        "|---|---|---|",
     ]
     for name in sorted(schemas):
         node = schemas[name]
         variants = node.get("oneOf") or node.get("anyOf")
-        lines.append(f"### `{name}`")
-        lines.append("")
         if variants:
-            tags = [v.get("properties", {}).get("object_type", {}).get("const")
-                    for v in variants]
-            tags = [t for t in tags if t]
-            if tags:
-                lines.append(f"Union over {len(variants)} variants"
-                             + (f" (`object_type`: {', '.join('`%s`' % t for t in tags)})"))
-            else:
-                lines.append(f"Union of {len(variants)} variants.")
-            for v in variants:
-                lines.append(f"- {_schema_inline(v)}")
-            lines.append("")
-            continue
-        desc = node.get("description")
-        if desc:
-            lines.append(desc)
-            lines.append("")
-        lines.append("```json")
-        lines.append(json.dumps(node, indent=2, ensure_ascii=False))
-        lines.append("```")
-        lines.append("")
+            kind, props = f"union ({len(variants)})", "—"
+        else:
+            kind = node.get("type", "?")
+            props = str(len(node.get("properties", {})))
+        desc = (node.get("description") or "").strip()
+        desc = desc.split(". ")[0][:90].replace("|", "/")
+        lines.append(f"| `{name}` | {kind} | {props} |")
+    lines.append("")
     return "\n".join(lines)
 
 

@@ -93,34 +93,43 @@ class TestObjectContractsMatchRegistry:
                 assert f"`{key}`(" in text, f"{spec.object_type}.{key} has no default shown"
 
 
-class TestV2SurfaceMatchesApp:
-    """The v2 route table must mirror the app's live url map."""
+class TestV2SurfaceMatchesSnapshot:
+    """The v2 table must mirror the snapshot the v2 owner publishes.
 
-    def test_all_routes_present(self) -> None:
-        from measure_api.v2.application import EngineApplication
-        from measure_api.v2.http import create_production_app
+    v2 is a FastAPI service whose contract lives in ``docs/v2-openapi.json``;
+    these checks guard against the generator silently rendering an empty or
+    truncated surface when that file moves, shrinks or disappears.
+    """
 
-        app = create_production_app(EngineApplication(str(ROOT / "output" / "_docgen_t")))
+    def test_snapshot_exists_and_is_substantial(self) -> None:
+        assert gen.V2_OPENAPI_SNAPSHOT.exists(), (
+            "docs/v2-openapi.json missing — v2_surface.md cannot be trusted"
+        )
+        doc = gen._load_v2_document()
+        assert len(doc.get("paths", {})) >= 50, (
+            f"v2 snapshot has only {len(doc.get('paths', {}))} paths; expected the "
+            f"full surface. Did the snapshot get truncated or replaced?"
+        )
+
+    def test_every_snapshot_path_appears_in_the_table(self) -> None:
+        doc = gen._load_v2_document()
         text = (gen.GENERATED_DIR / "v2_surface.md").read_text(encoding="utf-8")
-        seen = 0
-        for rule in app.url_map.iter_rules():
-            if rule.endpoint == "static":
-                continue
-            # Flask spells path parameters <name>, OpenAPI {name}. Normalise the
-            # rule to the documented spelling before comparing.
-            documented = str(rule).replace("<", "{").replace(">", "}")
-            assert documented in text, f"{rule} missing from generated surface"
-            seen += 1
-        assert seen >= 19, f"suspiciously few routes discovered: {seen}"
+        for path in doc["paths"]:
+            assert f"`{path}`" in text, f"{path} missing from generated surface"
 
     def test_openapi_paths_and_schema_counts_agree(self) -> None:
-        from measure_api.v2.application import EngineApplication
-        from measure_api.v2.http import create_production_app
-
-        app = create_production_app(EngineApplication(str(ROOT / "output" / "_docgen_t")))
-        with app.test_client() as client:
-            doc = client.get("/api/v2/openapi.json").get_json()
+        doc = gen._load_v2_document()
         text = (gen.GENERATED_DIR / "v2_surface.md").read_text(encoding="utf-8")
         assert f"Paths: **{len(doc['paths'])}**" in text
         n_schemas = len(doc.get("components", {}).get("schemas", {}))
         assert f"Schemas: **{n_schemas}**" in text
+
+    def test_missing_snapshot_fails_loudly(self, tmp_path) -> None:
+        """A vanished snapshot must raise, not emit an empty route list."""
+        original = gen.V2_OPENAPI_SNAPSHOT
+        try:
+            gen.V2_OPENAPI_SNAPSHOT = tmp_path / "absent.json"
+            with pytest.raises(FileNotFoundError):
+                gen._load_v2_document()
+        finally:
+            gen.V2_OPENAPI_SNAPSHOT = original

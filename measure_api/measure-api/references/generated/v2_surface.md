@@ -4,1504 +4,313 @@
 
 # Measure API v2 — Endpoint Surface (generated)
 
-Captured from `GET /api/v2/openapi.json`, served by the code itself. This
-is the authoritative v2 contract; the hand-written v1 reference in
+Rendered from `docs/v2-openapi.json` — the committed snapshot of the
+stateless FastAPI v2 service, which its own README designates as the
+authoritative contract. The hand-written v1 reference in
 `../api_reference.md` does not describe these routes.
 
-Paths: **15** · Schemas: **32**
+Paths: **63** · Schemas: **222**
 
 ## Endpoints
 
 | Method | Path | Request body | Success responses |
 |---|---|---|---|
-| `GET` | `/api/v2/health` | — | 200 |
-| `POST` | `/api/v2/measurements` | `MeasurementRequest` | 200, 202 |
-| `POST` | `/api/v2/modeling-sessions` | `CreateSessionRequest` | 201 |
-| `DELETE` | `/api/v2/modeling-sessions/{session_id}` | — | 204 |
-| `GET` | `/api/v2/modeling-sessions/{session_id}` | — | 200 |
-| `GET` | `/api/v2/modeling-sessions/{session_id}/objects` | — | 200 |
-| `POST` | `/api/v2/modeling-sessions/{session_id}/objects` | `MeasurementObjectCreate` | 201 |
-| `DELETE` | `/api/v2/modeling-sessions/{session_id}/objects/{object_id}` | — | 204 |
-| `GET` | `/api/v2/modeling-sessions/{session_id}/objects/{object_id}` | — | 200 |
-| `PUT` | `/api/v2/modeling-sessions/{session_id}/objects/{object_id}` | `MeasurementObjectUpdate` | 200 |
-| `GET` | `/api/v2/modeling-sessions/{session_id}/roi` | — | 200 |
-| `PUT` | `/api/v2/modeling-sessions/{session_id}/roi` | `ModelingRoiCreate` | 200 |
-| `POST` | `/api/v2/modeling-sessions/{session_id}:preview` | `PreviewRequest` | 200, 202 |
-| `POST` | `/api/v2/modeling-sessions/{session_id}:publish` | `PublishRequest` | 200, 202 |
-| `POST` | `/api/v2/modeling-sessions:import` | — | 200, 202 |
-| `POST` | `/api/v2/models/{calibration_model_id}:export` | `ExportRequest` | 200, 202 |
-| `GET` | `/api/v2/openapi.json` | — | 200 |
-| `GET` | `/api/v2/operations` | — | 200 |
-| `GET` | `/api/v2/operations/{operation_id}` | — | 200 |
-| `POST` | `/api/v2/operations/{operation_id}:cancel` | — | 200 |
+| `POST` | `/api/v2/alignments/control-points` | `ControlAlignmentRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/alignments/rigid` | `RigidAlignmentRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibration-exports` | `CalibrationExportRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibration-features/checkerboard-corners` | `CheckerboardRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibration-features/dot-grids` | `DotGridRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibration-imports` | `CalibrationUtilityRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibration-inspections` | `CalibrationUtilityRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibration-origin-adjustments` | `OriginRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibration-validations` | `CalibrationValidationRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibrations/cameras` | `CameraRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibrations/plane-mappings` | `PlaneRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibrations/scales` | `ScaleRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibrations/stereo-rigs` | `StereoRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `GET` | `/api/v2/capabilities` | — | 200, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/edge-profiles` | `ProfileRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/evaluations/centerline-deviation` | `DeviationRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/evaluations/diameter-variation` | `VariationRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/evaluations/ranges` | `RangeRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/geometry/camera-projections` | `CameraProjectionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/geometry/circle-dimensions` | `CircleDimensionsRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/geometry/circles:fit` | `PointFitRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/geometry/length-conversions` | `LengthConversionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/geometry/line-angles` | `LineAngleRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/geometry/lines:fit` | `PointFitRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/geometry/point-circle-distances` | `PointCircleRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/geometry/point-distances` | `TwoPointRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/geometry/point-line-distances` | `PointLineRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/geometry/stereo-transforms` | `StereoTransformRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/geometry/transforms` | `GeometryTransformRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/geometry/two-point-lines` | `TwoPointRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `GET` | `/api/v2/health/live` | — | 200, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `GET` | `/api/v2/health/ready` | — | 200, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/image-crops` | `ImageCropRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/image-inspections` | `ImageInspectionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/image-preprocessings` | `ImagePreprocessingRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/image-previews` | `ImagePreviewRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/image-stitches` | `StitchRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/image-undistortions` | `UndistortionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/legacy-project-conversions` | `LegacyConversionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/measurement-batches` | `MeasurementBatchRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/measurements/circles` | `ImageCircleRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/measurements/edge-pairs` | `PairRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/measurements/edge-points` | `ProbeRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/measurements/lines` | `ImageLineRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/measurements/template-points` | `TemplatePointRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `GET` | `/api/v2/operations` | — | 200, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `GET` | `/api/v2/operations/{identity}` | — | 200, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `GET` | `/api/v2/operations/{identity}/diagnostics` | — | 200, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/operations/{identity}:cancel` | — | 200, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/recipe-exports` | `RecipeExportRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/recipe-imports` | `RecipeImportRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/recipe-previews` | `PreviewRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/recipe-validations` | `RecipeRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/replays` | `ReplayRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/result-exports` | `ResultExportRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/run-batches` | `RunBatchRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/runs` | `RunRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/template-builds` | `TemplateBuildRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/template-inspections` | `TemplateInspectionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/template-matches` | `TemplateMatchRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `GET` | `/api/v2/traces/{trace_id}` | — | 200, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/transforms/similarity-estimates` | `SimilarityEstimateRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/visualizations` | `VisualizationRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 
 ## Schemas
 
-`*` marks a required property. Objects reject unknown fields unless noted.
-
-### `CircleObservation`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "center_col": {
-      "type": "number"
-    },
-    "center_row": {
-      "type": "number"
-    },
-    "radius": {
-      "type": "number"
-    },
-    "type": {
-      "const": "circle"
-    }
-  },
-  "required": [
-    "type",
-    "center_row",
-    "center_col",
-    "radius"
-  ],
-  "type": "object"
-}
-```
-
-### `CreateSessionRequest`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "image": {
-      "$ref": "#/components/schemas/ImageDescriptor"
-    }
-  },
-  "required": [
-    "image"
-  ],
-  "type": "object"
-}
-```
-
-### `EngineError`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "category": {
-      "enum": [
-        "request",
-        "image",
-        "model",
-        "measurement",
-        "timeout",
-        "cancelled",
-        "operation",
-        "internal"
-      ],
-      "type": "string"
-    },
-    "code": {
-      "type": "string"
-    },
-    "details": {
-      "type": "object"
-    },
-    "message": {
-      "type": "string"
-    },
-    "retryable": {
-      "type": "boolean"
-    },
-    "trace_id": {
-      "type": "string"
-    }
-  },
-  "required": [
-    "code",
-    "category",
-    "message",
-    "retryable",
-    "details",
-    "trace_id"
-  ],
-  "type": "object"
-}
-```
-
-### `ErrorEnvelope`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "error": {
-      "$ref": "#/components/schemas/EngineError"
-    }
-  },
-  "required": [
-    "error"
-  ],
-  "type": "object"
-}
-```
-
-### `ExportRequest`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "asset_ref": {
-      "minLength": 1,
-      "type": "string"
-    },
-    "client_request_id": {
-      "type": "string"
-    },
-    "timeout_ms": {
-      "default": 60000,
-      "maximum": 300000,
-      "minimum": 1,
-      "type": "integer"
-    },
-    "wait_ms": {
-      "default": 0,
-      "minimum": 0,
-      "type": "integer"
-    }
-  },
-  "required": [
-    "asset_ref"
-  ],
-  "type": "object"
-}
-```
-
-### `ExportResult`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "download_ref": {
-      "type": "string"
-    },
-    "package_contract_version": {
-      "const": "2.0"
-    },
-    "sha256": {
-      "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
-    },
-    "size": {
-      "minimum": 1,
-      "type": "integer"
-    }
-  },
-  "required": [
-    "download_ref",
-    "sha256",
-    "size",
-    "package_contract_version"
-  ],
-  "type": "object"
-}
-```
-
-### `Health`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "status": {
-      "const": "ok"
-    }
-  },
-  "required": [
-    "status"
-  ],
-  "type": "object"
-}
-```
-
-### `ImageDescriptor`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "bin_index": {
-      "type": "integer"
-    },
-    "camera_sn": {
-      "minLength": 1,
-      "type": "string"
-    },
-    "channel": {
-      "const": 1
-    },
-    "height": {
-      "type": "integer"
-    },
-    "jpeg_size": {
-      "type": "integer"
-    },
-    "timestamp": {},
-    "type": {
-      "const": "jpg"
-    },
-    "uuid": {
-      "minLength": 1,
-      "type": "string"
-    },
-    "width": {
-      "type": "integer"
-    }
-  },
-  "required": [
-    "uuid",
-    "camera_sn",
-    "type",
-    "height",
-    "width",
-    "channel",
-    "jpeg_size",
-    "bin_index",
-    "timestamp"
-  ],
-  "type": "object"
-}
-```
-
-### `ImportResult`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "session_id": {
-      "type": "string"
-    }
-  },
-  "required": [
-    "session_id"
-  ],
-  "type": "object"
-}
-```
-
-### `LineObservation`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "a": {
-      "type": "number"
-    },
-    "b": {
-      "type": "number"
-    },
-    "c": {
-      "type": "number"
-    },
-    "end_col": {
-      "type": "number"
-    },
-    "end_row": {
-      "type": "number"
-    },
-    "start_col": {
-      "type": "number"
-    },
-    "start_row": {
-      "type": "number"
-    },
-    "type": {
-      "const": "line"
-    }
-  },
-  "required": [
-    "type",
-    "a",
-    "b",
-    "c",
-    "start_row",
-    "start_col",
-    "end_row",
-    "end_col"
-  ],
-  "type": "object"
-}
-```
-
-### `MeasurementObject`
-
-Union over 10 variants (`object_type`: `EdgePoint`, `EdgePair`, `FitLine`, `FitCircle`, `TemplateMatchPoint`, `TwoPointsLine`, `TwoPointsDistance`, `PointLineDistance`, `TwoLinesAngle`, `PointCircleDistance`)
-- { input_object_ids: array<string>, label*: string, object_id*: string, object_type*: const "EdgePoint", parameters*: { angle*: number, col*: number, interpolation: `"linear"` | `"nearest"` | `"cubic"`, length1*: number, length2*: number, row*: number, sigma: number, threshold: number } (+unknown rejected) } (+unknown rejected)
-- { input_object_ids: array<string>, label*: string, object_id*: string, object_type*: const "EdgePair", parameters*: { angle*: number, col*: number, interpolation: `"linear"` | `"nearest"` | `"cubic"`, length1*: number, length2*: number, row*: number, sigma: number, threshold: number } (+unknown rejected) } (+unknown rejected)
-- { input_object_ids: array<string>, label*: string, object_id*: string, object_type*: const "FitLine", parameters*: { end*: array<number>, measure_length1*: number, measure_length2*: number, num_measures: integer, sigma: number, start*: array<number>, threshold: number, transition: `"all"` | `"positive"` | `"negative"` } (+unknown rejected) } (+unknown rejected)
-- { input_object_ids: array<string>, label*: string, object_id*: string, object_type*: const "FitCircle", parameters*: { center*: array<number>, end_phi: number, measure_length1*: number, measure_length2*: number, num_measures: integer, radius*: number, radius_max: number | null, radius_min: number | null, sigma: number, start_phi: number, threshold: number, transition: `"all"` | `"positive"` | `"negative"` } (+unknown rejected) } (+unknown rejected)
-- { input_object_ids: array<string>, label*: string, object_id*: string, object_type*: const "TemplateMatchPoint", parameters*: { angle_range_half: number, angle_step: number, col*: number, match_score_threshold: number, preprocessor_type: `"raw"` | `"canny"` | `"sobel"` | `"clahe"` | `"threshold"`, pyramid_decimate: number, pyramid_max_template_size: number, row*: number, template_size: integer, use_subpixel: boolean } (+unknown rejected) } (+unknown rejected)
-- { input_object_ids*: array<string>, label*: string, object_id*: string, object_type*: const "TwoPointsLine", parameters*: {} (+unknown rejected) } (+unknown rejected)
-- { input_object_ids*: array<string>, label*: string, object_id*: string, object_type*: const "TwoPointsDistance", parameters*: {} (+unknown rejected) } (+unknown rejected)
-- { input_object_ids*: array<string>, label*: string, object_id*: string, object_type*: const "PointLineDistance", parameters*: {} (+unknown rejected) } (+unknown rejected)
-- { input_object_ids*: array<string>, label*: string, object_id*: string, object_type*: const "TwoLinesAngle", parameters*: {} (+unknown rejected) } (+unknown rejected)
-- { input_object_ids*: array<string>, label*: string, object_id*: string, object_type*: const "PointCircleDistance", parameters*: {} (+unknown rejected) } (+unknown rejected)
-
-### `MeasurementObjectCreate`
-
-Union over 10 variants (`object_type`: `EdgePoint`, `EdgePair`, `FitLine`, `FitCircle`, `TemplateMatchPoint`, `TwoPointsLine`, `TwoPointsDistance`, `PointLineDistance`, `TwoLinesAngle`, `PointCircleDistance`)
-- { input_object_ids: array<string>, label*: string, object_type*: const "EdgePoint", parameters*: { angle*: number, col*: number, interpolation: `"linear"` | `"nearest"` | `"cubic"`, length1*: number, length2*: number, row*: number, sigma: number, threshold: number } (+unknown rejected) } (+unknown rejected)
-- { input_object_ids: array<string>, label*: string, object_type*: const "EdgePair", parameters*: { angle*: number, col*: number, interpolation: `"linear"` | `"nearest"` | `"cubic"`, length1*: number, length2*: number, row*: number, sigma: number, threshold: number } (+unknown rejected) } (+unknown rejected)
-- { input_object_ids: array<string>, label*: string, object_type*: const "FitLine", parameters*: { end*: array<number>, measure_length1*: number, measure_length2*: number, num_measures: integer, sigma: number, start*: array<number>, threshold: number, transition: `"all"` | `"positive"` | `"negative"` } (+unknown rejected) } (+unknown rejected)
-- { input_object_ids: array<string>, label*: string, object_type*: const "FitCircle", parameters*: { center*: array<number>, end_phi: number, measure_length1*: number, measure_length2*: number, num_measures: integer, radius*: number, radius_max: number | null, radius_min: number | null, sigma: number, start_phi: number, threshold: number, transition: `"all"` | `"positive"` | `"negative"` } (+unknown rejected) } (+unknown rejected)
-- { input_object_ids: array<string>, label*: string, object_type*: const "TemplateMatchPoint", parameters*: { angle_range_half: number, angle_step: number, col*: number, match_score_threshold: number, preprocessor_type: `"raw"` | `"canny"` | `"sobel"` | `"clahe"` | `"threshold"`, pyramid_decimate: number, pyramid_max_template_size: number, row*: number, template_size: integer, use_subpixel: boolean } (+unknown rejected) } (+unknown rejected)
-- { input_object_ids*: array<string>, label*: string, object_type*: const "TwoPointsLine", parameters*: {} (+unknown rejected) } (+unknown rejected)
-- { input_object_ids*: array<string>, label*: string, object_type*: const "TwoPointsDistance", parameters*: {} (+unknown rejected) } (+unknown rejected)
-- { input_object_ids*: array<string>, label*: string, object_type*: const "PointLineDistance", parameters*: {} (+unknown rejected) } (+unknown rejected)
-- { input_object_ids*: array<string>, label*: string, object_type*: const "TwoLinesAngle", parameters*: {} (+unknown rejected) } (+unknown rejected)
-- { input_object_ids*: array<string>, label*: string, object_type*: const "PointCircleDistance", parameters*: {} (+unknown rejected) } (+unknown rejected)
-
-### `MeasurementObjectList`
-
-```json
-{
-  "properties": {
-    "objects": {
-      "items": {
-        "$ref": "#/components/schemas/MeasurementObject"
-      },
-      "type": "array"
-    }
-  },
-  "required": [
-    "objects"
-  ],
-  "type": "object"
-}
-```
-
-### `MeasurementObjectResult`
-
-Union of 10 variants.
-- [MeasurementObjectResultBase] | { object_type: const "EdgePoint", observation: [PointObservation] | null }
-- [MeasurementObjectResultBase] | { object_type: const "EdgePair", observation: [PointObservation] | null }
-- [MeasurementObjectResultBase] | { object_type: const "FitLine", observation: [LineObservation] | null }
-- [MeasurementObjectResultBase] | { object_type: const "FitCircle", observation: [CircleObservation] | null }
-- [MeasurementObjectResultBase] | { object_type: const "TemplateMatchPoint", observation: [PointObservation] | null }
-- [MeasurementObjectResultBase] | { object_type: const "TwoPointsLine", observation: [LineObservation] | null }
-- [MeasurementObjectResultBase] | { object_type: const "TwoPointsDistance", observation: [ScalarObservation] | null }
-- [MeasurementObjectResultBase] | { object_type: const "PointLineDistance", observation: [ScalarObservation] | null }
-- [MeasurementObjectResultBase] | { object_type: const "TwoLinesAngle", observation: [ScalarObservation] | null }
-- [MeasurementObjectResultBase] | { object_type: const "PointCircleDistance", observation: [ScalarObservation] | null }
-
-### `MeasurementObjectResultBase`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "error": {
-      "anyOf": [
-        {
-          "$ref": "#/components/schemas/EngineError"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "label": {
-      "type": "string"
-    },
-    "object_id": {
-      "type": "string"
-    },
-    "object_type": {
-      "type": "string"
-    },
-    "observation": {},
-    "quality": {
-      "type": "object"
-    },
-    "valid": {
-      "type": "boolean"
-    }
-  },
-  "required": [
-    "object_id",
-    "object_type",
-    "label",
-    "valid",
-    "observation",
-    "quality",
-    "error"
-  ],
-  "type": "object"
-}
-```
-
-### `MeasurementObjectUpdate`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "input_object_ids": {
-      "items": {
-        "minLength": 1,
-        "type": "string"
-      },
-      "type": "array",
-      "uniqueItems": true
-    },
-    "label": {
-      "minLength": 1,
-      "type": "string"
-    },
-    "parameters": {
-      "anyOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "angle": {
-              "type": "number"
-            },
-            "col": {
-              "type": "number"
-            },
-            "interpolation": {
-              "default": "linear",
-              "enum": [
-                "linear",
-                "nearest",
-                "cubic"
-              ],
-              "type": "string"
-            },
-            "length1": {
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            "length2": {
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            "row": {
-              "type": "number"
-            },
-            "sigma": {
-              "default": 1.0,
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            "threshold": {
-              "default": 30.0,
-              "minimum": 0,
-              "type": "number"
-            }
-          },
-          "required": [
-            "row",
-            "col",
-            "angle",
-            "length1",
-            "length2"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "angle": {
-              "type": "number"
-            },
-            "col": {
-              "type": "number"
-            },
-            "interpolation": {
-              "default": "linear",
-              "enum": [
-                "linear",
-                "nearest",
-                "cubic"
-              ],
-              "type": "string"
-            },
-            "length1": {
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            "length2": {
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            "row": {
-              "type": "number"
-            },
-            "sigma": {
-              "default": 1.0,
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            "threshold": {
-              "default": 30.0,
-              "minimum": 0,
-              "type": "number"
-            }
-          },
-          "required": [
-            "row",
-            "col",
-            "angle",
-            "length1",
-            "length2"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "end": {
-              "items": {
-                "type": "number"
-              },
-              "maxItems": 2,
-              "minItems": 2,
-              "type": "array"
-            },
-            "measure_length1": {
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            "measure_length2": {
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            "num_measures": {
-              "default": 10,
-              "minimum": 2,
-              "type": "integer"
-            },
-            "sigma": {
-              "default": 1.0,
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            "start": {
-              "items": {
-                "type": "number"
-              },
-              "maxItems": 2,
-              "minItems": 2,
-              "type": "array"
-            },
-            "threshold": {
-              "default": 30.0,
-              "minimum": 0,
-              "type": "number"
-            },
-            "transition": {
-              "default": "all",
-              "enum": [
-                "all",
-                "positive",
-                "negative"
-              ],
-              "type": "string"
-            }
-          },
-          "required": [
-            "start",
-            "end",
-            "measure_length1",
-            "measure_length2"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "center": {
-              "items": {
-                "type": "number"
-              },
-              "maxItems": 2,
-              "minItems": 2,
-              "type": "array"
-            },
-            "end_phi": {
-              "default": 6.283185307179586,
-              "type": "number"
-            },
-            "measure_length1": {
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            "measure_length2": {
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            "num_measures": {
-              "default": 12,
-              "minimum": 3,
-              "type": "integer"
-            },
-            "radius": {
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            "radius_max": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null
-            },
-            "radius_min": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null
-            },
-            "sigma": {
-              "default": 1.0,
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            "start_phi": {
-              "default": 0.0,
-              "type": "number"
-            },
-            "threshold": {
-              "default": 30.0,
-              "minimum": 0,
-              "type": "number"
-            },
-            "transition": {
-              "default": "all",
-              "enum": [
-                "all",
-                "positive",
-                "negative"
-              ],
-              "type": "string"
-            }
-          },
-          "required": [
-            "center",
-            "radius",
-            "measure_length1",
-            "measure_length2"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "angle_range_half": {
-              "default": 15.0,
-              "type": "number"
-            },
-            "angle_step": {
-              "default": 1.0,
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            "col": {
-              "type": "number"
-            },
-            "match_score_threshold": {
-              "default": 0.5,
-              "type": "number"
-            },
-            "preprocessor_type": {
-              "default": "raw",
-              "enum": [
-                "raw",
-                "canny",
-                "sobel",
-                "clahe",
-                "threshold"
-              ],
-              "type": "string"
-            },
-            "pyramid_decimate": {
-              "default": 0,
-              "type": "number"
-            },
-            "pyramid_max_template_size": {
-              "default": 400,
-              "type": "number"
-            },
-            "row": {
-              "type": "number"
-            },
-            "template_size": {
-              "default": 40,
-              "exclusiveMinimum": 0,
-              "type": "integer"
-            },
-            "use_subpixel": {
-              "default": true,
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "row",
-            "col"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {},
-          "required": [],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {},
-          "required": [],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {},
-          "required": [],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {},
-          "required": [],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {},
-          "required": [],
-          "type": "object"
-        }
-      ]
-    }
-  },
-  "type": "object"
-}
-```
-
-### `MeasurementRequest`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "asset_ref": {
-      "minLength": 1,
-      "type": "string"
-    },
-    "calibration_model_id": {
-      "minLength": 1,
-      "type": "string"
-    },
-    "client_request_id": {
-      "type": "string"
-    },
-    "image": {
-      "$ref": "#/components/schemas/ImageDescriptor"
-    },
-    "timeout_ms": {
-      "default": 10000,
-      "maximum": 60000,
-      "minimum": 1,
-      "type": "integer"
-    },
-    "wait_ms": {
-      "default": 0,
-      "minimum": 0,
-      "type": "integer"
-    }
-  },
-  "required": [
-    "calibration_model_id",
-    "asset_ref",
-    "image"
-  ],
-  "type": "object"
-}
-```
-
-### `MeasurementResult`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "asset_ref": {
-      "type": "string"
-    },
-    "calibration_model_id": {
-      "type": "string"
-    },
-    "instances": {
-      "description": "One entry per detected target (top-k), each carrying its own per-object measurements.",
-      "items": {
-        "$ref": "#/components/schemas/TargetInstance"
-      },
-      "type": "array"
-    },
-    "objects": {
-      "description": "Per-object results for the primary (highest scoring) instance. Use 'instances' for all detected targets.",
-      "items": {
-        "$ref": "#/components/schemas/MeasurementObjectResult"
-      },
-      "type": "array"
-    }
-  },
-  "required": [
-    "calibration_model_id",
-    "asset_ref",
-    "objects",
-    "instances"
-  ],
-  "type": "object"
-}
-```
-
-### `ModelingRoi`
-
-```json
-{
-  "additionalProperties": true,
-  "properties": {
-    "alignment_mode": {
-      "default": "single_box",
-      "enum": [
-        "single_box",
-        "multi_point"
-      ],
-      "type": "string"
-    },
-    "angle_deg": {
-      "default": 0.0,
-      "type": "number"
-    },
-    "angle_range": {
-      "default": [
-        -30.0,
-        30.0
-      ],
-      "items": {
-        "type": "number"
-      },
-      "maxItems": 2,
-      "minItems": 2,
-      "type": "array"
-    },
-    "angle_step": {
-      "default": 1.0,
-      "exclusiveMinimum": 0,
-      "type": "number"
-    },
-    "center": {
-      "description": "ROI centre [row, col] in reference-image coordinates.",
-      "items": {
-        "type": "number"
-      },
-      "maxItems": 2,
-      "minItems": 2,
-      "type": "array"
-    },
-    "coarse_angle_step": {
-      "default": 5.0,
-      "exclusiveMinimum": 0,
-      "type": "number"
-    },
-    "coarse_fine": {
-      "default": true,
-      "type": "boolean"
-    },
-    "match_score_threshold": {
-      "default": 0.5,
-      "type": "number"
-    },
-    "max_matches": {
-      "default": 0,
-      "description": "0 means unlimited (all instances).",
-      "minimum": 0,
-      "type": "integer"
-    },
-    "overlap": {
-      "default": 0.3,
-      "maximum": 1,
-      "minimum": 0,
-      "type": "number"
-    },
-    "preprocessor": {
-      "additionalProperties": true,
-      "type": "object"
-    },
-    "preprocessor_type": {
-      "default": "raw",
-      "type": "string"
-    },
-    "pyramid_decimate": {
-      "default": 0,
-      "minimum": 0,
-      "type": "integer"
-    },
-    "pyramid_max_template_size": {
-      "default": 400,
-      "minimum": 1,
-      "type": "integer"
-    },
-    "roi_state": {
-      "additionalProperties": true,
-      "type": "object"
-    },
-    "size": {
-      "description": "ROI size [height, width] before rotation.",
-      "items": {
-        "type": "number"
-      },
-      "maxItems": 2,
-      "minItems": 2,
-      "type": "array"
-    }
-  },
-  "type": "object"
-}
-```
-
-### `ModelingRoiCreate`
-
-Stage-1 ROI. It is located on the whole inspection image and the straightened patch it produces is the coordinate system that measurement objects are defined in.
-
-```json
-{
-  "additionalProperties": false,
-  "description": "Stage-1 ROI. It is located on the whole inspection image and the straightened patch it produces is the coordinate system that measurement objects are defined in.",
-  "properties": {
-    "alignment_mode": {
-      "default": "single_box",
-      "enum": [
-        "single_box",
-        "multi_point"
-      ],
-      "type": "string"
-    },
-    "angle_deg": {
-      "default": 0.0,
-      "type": "number"
-    },
-    "angle_range": {
-      "default": [
-        -30.0,
-        30.0
-      ],
-      "items": {
-        "type": "number"
-      },
-      "maxItems": 2,
-      "minItems": 2,
-      "type": "array"
-    },
-    "angle_step": {
-      "default": 1.0,
-      "exclusiveMinimum": 0,
-      "type": "number"
-    },
-    "center": {
-      "description": "ROI centre [row, col] in reference-image coordinates.",
-      "items": {
-        "type": "number"
-      },
-      "maxItems": 2,
-      "minItems": 2,
-      "type": "array"
-    },
-    "coarse_angle_step": {
-      "default": 5.0,
-      "exclusiveMinimum": 0,
-      "type": "number"
-    },
-    "coarse_fine": {
-      "default": true,
-      "type": "boolean"
-    },
-    "match_score_threshold": {
-      "default": 0.5,
-      "type": "number"
-    },
-    "max_matches": {
-      "default": 0,
-      "description": "0 means unlimited (all instances).",
-      "minimum": 0,
-      "type": "integer"
-    },
-    "overlap": {
-      "default": 0.3,
-      "maximum": 1,
-      "minimum": 0,
-      "type": "number"
-    },
-    "preprocessor_type": {
-      "default": "raw",
-      "type": "string"
-    },
-    "pyramid_decimate": {
-      "default": 0,
-      "minimum": 0,
-      "type": "integer"
-    },
-    "pyramid_max_template_size": {
-      "default": 400,
-      "minimum": 1,
-      "type": "integer"
-    },
-    "size": {
-      "description": "ROI size [height, width] before rotation.",
-      "items": {
-        "type": "number"
-      },
-      "maxItems": 2,
-      "minItems": 2,
-      "type": "array"
-    }
-  },
-  "required": [
-    "center",
-    "size"
-  ],
-  "type": "object"
-}
-```
-
-### `ModelingSession`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "created_at": {
-      "format": "date-time",
-      "type": "string"
-    },
-    "expires_at": {
-      "format": "date-time",
-      "type": "string"
-    },
-    "object_count": {
-      "minimum": 0,
-      "type": "integer"
-    },
-    "session_id": {
-      "type": "string"
-    }
-  },
-  "required": [
-    "session_id",
-    "created_at",
-    "expires_at",
-    "object_count"
-  ],
-  "type": "object"
-}
-```
-
-### `Operation`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "accepted_at": {
-      "format": "date-time",
-      "type": "string"
-    },
-    "client_request_id": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "completed_at": {
-      "anyOf": [
-        {
-          "format": "date-time",
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "contract_version": {
-      "const": "2.0"
-    },
-    "error": {
-      "anyOf": [
-        {
-          "$ref": "#/components/schemas/EngineError"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "kind": {
-      "enum": [
-        "preview",
-        "publish",
-        "measure",
-        "import",
-        "export"
-      ],
-      "type": "string"
-    },
-    "operation_id": {
-      "type": "string"
-    },
-    "result": {
-      "anyOf": [
-        {
-          "$ref": "#/components/schemas/OperationResult"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "started_at": {
-      "anyOf": [
-        {
-          "format": "date-time",
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "status": {
-      "enum": [
-        "queued",
-        "running",
-        "succeeded",
-        "failed",
-        "cancelled",
-        "timed_out"
-      ],
-      "type": "string"
-    },
-    "timeout_ms": {
-      "minimum": 1,
-      "type": "integer"
-    },
-    "trace_id": {
-      "type": "string"
-    }
-  },
-  "required": [
-    "contract_version",
-    "operation_id",
-    "trace_id",
-    "kind",
-    "status",
-    "client_request_id",
-    "accepted_at",
-    "started_at",
-    "completed_at",
-    "timeout_ms",
-    "result",
-    "error"
-  ],
-  "type": "object"
-}
-```
-
-### `OperationList`
-
-```json
-{
-  "properties": {
-    "operations": {
-      "items": {
-        "$ref": "#/components/schemas/Operation"
-      },
-      "type": "array"
-    }
-  },
-  "required": [
-    "operations"
-  ],
-  "type": "object"
-}
-```
-
-### `OperationResult`
-
-Union of 5 variants.
-- [PreviewResult]
-- [PublishResult]
-- [MeasurementResult]
-- [ImportResult]
-- [ExportResult]
-
-### `PointObservation`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "col": {
-      "type": "number"
-    },
-    "row": {
-      "type": "number"
-    },
-    "type": {
-      "const": "point"
-    }
-  },
-  "required": [
-    "type",
-    "row",
-    "col"
-  ],
-  "type": "object"
-}
-```
-
-### `PreviewRequest`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "client_request_id": {
-      "type": "string"
-    },
-    "image": {
-      "$ref": "#/components/schemas/ImageDescriptor"
-    },
-    "timeout_ms": {
-      "default": 30000,
-      "maximum": 120000,
-      "minimum": 1,
-      "type": "integer"
-    },
-    "wait_ms": {
-      "default": 0,
-      "minimum": 0,
-      "type": "integer"
-    }
-  },
-  "type": "object"
-}
-```
-
-### `PreviewResult`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "instances": {
-      "description": "One entry per detected target (top-k).",
-      "items": {
-        "$ref": "#/components/schemas/TargetInstance"
-      },
-      "type": "array"
-    },
-    "objects": {
-      "description": "Per-object results for the primary (highest scoring) instance. Use 'instances' for all detected targets.",
-      "items": {
-        "$ref": "#/components/schemas/MeasurementObjectResult"
-      },
-      "type": "array"
-    }
-  },
-  "required": [
-    "objects",
-    "instances"
-  ],
-  "type": "object"
-}
-```
-
-### `PublishRequest`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "calibration_model_id": {
-      "minLength": 1,
-      "type": "string"
-    },
-    "client_request_id": {
-      "type": "string"
-    },
-    "timeout_ms": {
-      "default": 60000,
-      "maximum": 300000,
-      "minimum": 1,
-      "type": "integer"
-    },
-    "wait_ms": {
-      "default": 0,
-      "minimum": 0,
-      "type": "integer"
-    }
-  },
-  "required": [
-    "calibration_model_id"
-  ],
-  "type": "object"
-}
-```
-
-### `PublishResult`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "asset_ref": {
-      "type": "string"
-    },
-    "calibration_model_id": {
-      "type": "string"
-    }
-  },
-  "required": [
-    "calibration_model_id",
-    "asset_ref"
-  ],
-  "type": "object"
-}
-```
-
-### `ScalarObservation`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "type": {
-      "const": "scalar"
-    },
-    "unit": {
-      "enum": [
-        "pixel",
-        "degree"
-      ],
-      "type": "string"
-    },
-    "value": {
-      "type": "number"
-    }
-  },
-  "required": [
-    "type",
-    "value",
-    "unit"
-  ],
-  "type": "object"
-}
-```
-
-### `TargetInstance`
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "center_col": {
-      "type": "number"
-    },
-    "center_row": {
-      "type": "number"
-    },
-    "index": {
-      "description": "1-based instance index matching display order.",
-      "minimum": 1,
-      "type": "integer"
-    },
-    "measurements": {
-      "items": {
-        "$ref": "#/components/schemas/MeasurementObjectResult"
-      },
-      "type": "array"
-    },
-    "rotation_deg": {
-      "type": "number"
-    },
-    "scale": {
-      "type": "number"
-    },
-    "score": {
-      "type": "number"
-    },
-    "valid": {
-      "type": "boolean"
-    }
-  },
-  "required": [
-    "index",
-    "score",
-    "rotation_deg",
-    "scale",
-    "center_row",
-    "center_col",
-    "valid",
-    "measurements"
-  ],
-  "type": "object"
-}
-```
-
-### `TimeoutLimits`
-
-```json
-{
-  "properties": {
-    "measurement_ms": {
-      "default": 10000,
-      "maximum": 60000,
-      "type": "integer"
-    },
-    "model_ms": {
-      "default": 60000,
-      "maximum": 300000,
-      "type": "integer"
-    },
-    "preview_ms": {
-      "default": 30000,
-      "maximum": 120000,
-      "type": "integer"
-    }
-  },
-  "type": "object"
-}
-```
+Every v2 request/response schema is defined by the service itself and
+documented in full in `docs/v2-api-reference.md` (4670 lines) plus the raw
+`docs/v2-openapi.json`. Only the route index is rendered here — duplicating
+222 schemas into this skill would bury it and drift from his docs.
+
+## Schema index
+
+222 schemas; see `docs/v2-api-reference.md` for every field.
+
+| Schema | Kind | Properties |
+|---|---|---|
+| `AlignmentResult` | object | 11 |
+| `AtomicSuppliedResult` | object | 8 |
+| `BatchMeasurement` | object | 3 |
+| `BatchMeasurementResult` | object | 6 |
+| `BatchOutcome-Input` | object | 5 |
+| `BatchOutcome-Output` | object | 5 |
+| `Binding` | object | 3 |
+| `BlobOptions` | object | 5 |
+| `BoardGrid` | object | 2 |
+| `BoardValidationObservation` | object | 7 |
+| `CalculationRequest` | object | 4 |
+| `CalibrationApplicability` | object | 4 |
+| `CalibrationAsset-Input` | object | 5 |
+| `CalibrationAsset-Output` | object | 5 |
+| `CalibrationExportRequest` | object | 6 |
+| `CalibrationInput-Input` | object | 2 |
+| `CalibrationInput-Output` | object | 2 |
+| `CalibrationResult` | object | 7 |
+| `CalibrationUtilityRequest` | object | 5 |
+| `CalibrationValidationRequest` | object | 9 |
+| `CameraCalibration-Input` | object | 5 |
+| `CameraCalibration-Output` | object | 5 |
+| `CameraImageView` | object | 2 |
+| `CameraObservation` | object | 6 |
+| `CameraParameters` | object | 3 |
+| `CameraProjectionRequest` | object | 10 |
+| `CameraProjectionResult` | object | 7 |
+| `CameraRequest` | object | 14 |
+| `CannyPreprocessing` | object | 3 |
+| `CheckerboardRequest` | object | 12 |
+| `CheckerboardResult` | object | 6 |
+| `Circle` | object | 6 |
+| `CircleDimensionsRequest` | object | 6 |
+| `CircleDimensionsResult` | object | 7 |
+| `CircleFitResult` | object | 8 |
+| `CircleGeometry` | object | 3 |
+| `ClahePreprocessing` | object | 3 |
+| `CompatibilityDiagnostic` | object | 4 |
+| `ControlAlignmentRequest` | object | 19 |
+| `ControlObservation` | object | 7 |
+| `ControlTemplate` | object | 4 |
+| `CoordinateMapping` | object | 8 |
+| `DetectionROI` | object | 4 |
+| `DeviationRequest` | object | 9 |
+| `DotGridRequest` | object | 11 |
+| `DotGridResult` | object | 8 |
+| `Edge` | object | 4 |
+| `EdgePair` | object | 4 |
+| `EdgeResult` | object | 7 |
+| `ErrorDetail` | object | 6 |
+| `ErrorResponse` | object | 2 |
+| `EvaluationResult` | object | 12 |
+| `FileDescriptor` | object | 6 |
+| `FileReference` | object | 4 |
+| `FitDiagnostics` | object | 7 |
+| `FrozenManifest` | object | 11 |
+| `GeometryTransformRequest` | object | 6 |
+| `GeometryTransformResult` | object | 4 |
+| `ImageCircleRequest` | object | 22 |
+| `ImageCircleResult` | object | 11 |
+| `ImageCropRequest` | object | 10 |
+| `ImageInspectionRequest` | object | 5 |
+| `ImageInspectionResult` | object | 2 |
+| `ImageLineRequest` | object | 18 |
+| `ImageLineResult` | object | 8 |
+| `ImageMetadata` | object | 7 |
+| `ImageOutputResult` | object | 5 |
+| `ImagePreprocessingRequest` | object | 7 |
+| `ImagePreviewRequest` | object | 8 |
+| `ImageSize` | object | 2 |
+| `ImageStage` | object | 3 |
+| `LegacyConversionRequest` | object | 12 |
+| `LegacyConversionResult` | object | 9 |
+| `LengthConversionRequest` | object | 8 |
+| `LengthConversionResult` | object | 5 |
+| `Line` | object | 9 |
+| `LineAngleRequest` | object | 6 |
+| `LineFitResult` | object | 7 |
+| `LineGeometry` | object | 4 |
+| `Localization-Input` | object | 4 |
+| `Localization-Output` | object | 4 |
+| `MeasurementBatchRequest` | object | 7 |
+| `MeasurementBatchResult` | object | 7 |
+| `MetricSetup-Input` | object | 3 |
+| `MetricSetup-Output` | object | 3 |
+| `NodeOutcome` | object | 8 |
+| `ObjectPoint` | object | 3 |
+| `OperationResponse_AlignmentResult_` | object | 9 |
+| `OperationResponse_Any_` | object | 9 |
+| `OperationResponse_CalibrationResult_` | object | 9 |
+| `OperationResponse_CameraProjectionResult_` | object | 9 |
+| `OperationResponse_CheckerboardResult_` | object | 9 |
+| `OperationResponse_CircleDimensionsResult_` | object | 9 |
+| `OperationResponse_CircleFitResult_` | object | 9 |
+| `OperationResponse_DotGridResult_` | object | 9 |
+| `OperationResponse_EdgeResult_` | object | 9 |
+| `OperationResponse_EvaluationResult_` | object | 9 |
+| `OperationResponse_GeometryTransformResult_` | object | 9 |
+| `OperationResponse_ImageCircleResult_` | object | 9 |
+| `OperationResponse_ImageInspectionResult_` | object | 9 |
+| `OperationResponse_ImageLineResult_` | object | 9 |
+| `OperationResponse_ImageOutputResult_` | object | 9 |
+| `OperationResponse_LegacyConversionResult_` | object | 9 |
+| `OperationResponse_LengthConversionResult_` | object | 9 |
+| `OperationResponse_LineFitResult_` | object | 9 |
+| `OperationResponse_MeasurementBatchResult_` | object | 9 |
+| `OperationResponse_PairResult_` | object | 9 |
+| `OperationResponse_PlaneResult_` | object | 9 |
+| `OperationResponse_PlaneStereoResult_` | object | 9 |
+| `OperationResponse_PortableRecipeResult_` | object | 9 |
+| `OperationResponse_ProfileResult_` | object | 9 |
+| `OperationResponse_RecipeValidationResult_` | object | 9 |
+| `OperationResponse_ReplayResult_` | object | 9 |
+| `OperationResponse_ResultExportResult_` | object | 9 |
+| `OperationResponse_RunBatchResult_` | object | 9 |
+| `OperationResponse_RunResult_` | object | 9 |
+| `OperationResponse_Scalar_` | object | 9 |
+| `OperationResponse_SimilarityEstimateResult_` | object | 9 |
+| `OperationResponse_StereoResult_` | object | 9 |
+| `OperationResponse_StereoTransformResult_` | object | 9 |
+| `OperationResponse_StitchResult_` | object | 9 |
+| `OperationResponse_TemplateBuildResult_` | object | 9 |
+| `OperationResponse_TemplateInspectionResult_` | object | 9 |
+| `OperationResponse_TemplateMatchResult_` | object | 9 |
+| `OperationResponse_TemplatePointResult_` | object | 9 |
+| `OperationResponse_UndistortionResult_` | object | 9 |
+| `OperationResponse_VisualizationResult_` | object | 9 |
+| `OriginRequest` | object | 8 |
+| `OutputSpec` | object | 1 |
+| `OverlayPrimitive` | object | 14 |
+| `PairRequest` | object | 12 |
+| `PairResult` | object | 10 |
+| `PlaneCalibration` | object | 5 |
+| `PlaneCanvas` | object | 7 |
+| `PlaneParameters` | object | 5 |
+| `PlaneRequest` | object | 14 |
+| `PlaneResult` | object | 7 |
+| `PlaneStereoResult` | object | 7 |
+| `PlaneView` | object | 9 |
+| `PlaneViewInput` | object | 5 |
+| `Point` | object | 2 |
+| `PointCircleRequest` | object | 6 |
+| `PointFitRequest` | object | 7 |
+| `PointGeometry` | object | 2 |
+| `PointLineRequest` | object | 6 |
+| `PolylineGeometry` | object | 2 |
+| `PortableRecipeResult` | object | 12 |
+| `PositionedPoint` | object | 5 |
+| `PreviewRequest` | object | 14 |
+| `Probe` | object | 6 |
+| `ProbeRequest` | object | 12 |
+| `ProfileRequest` | object | 14 |
+| `ProfileResult` | object | 11 |
+| `ProjectionPose` | object | 3 |
+| `RangeRequest` | object | 9 |
+| `RawPreprocessing` | object | 1 |
+| `Recipe-Input` | object | 12 |
+| `Recipe-Output` | object | 12 |
+| `RecipeExportRequest` | object | 12 |
+| `RecipeImportRequest` | object | 9 |
+| `RecipeNode` | object | 8 |
+| `RecipeRequest` | object | 8 |
+| `RecipeValidationResult` | object | 8 |
+| `RectangleGeometry` | object | 5 |
+| `ReplayRequest` | object | 9 |
+| `ReplayResult` | object | 7 |
+| `ResultExportRequest` | object | 10 |
+| `ResultExportResult` | object | 4 |
+| `RigidAlignmentRequest` | object | 12 |
+| `RotatedROI` | object | 4 |
+| `RunBatchItem` | object | 6 |
+| `RunBatchRequest` | object | 10 |
+| `RunBatchResult-Input` | object | 4 |
+| `RunBatchResult-Output` | object | 4 |
+| `RunRequest` | object | 11 |
+| `RunResult-Input` | object | 20 |
+| `RunResult-Output` | object | 20 |
+| `RuntimeIdentity` | object | 7 |
+| `Scalar` | object | 5 |
+| `ScalarCalibration-Input` | object | 5 |
+| `ScalarCalibration-Output` | object | 5 |
+| `ScalarParameters` | object | 4 |
+| `ScaleRequest` | object | 9 |
+| `SearchRegion` | object | 4 |
+| `SimilarityEstimateRequest` | object | 13 |
+| `SimilarityEstimateResult` | object | 8 |
+| `SobelPreprocessing` | object | 2 |
+| `StereoCalibration` | object | 5 |
+| `StereoPair` | object | 3 |
+| `StereoParameters` | object | 12 |
+| `StereoRequest` | object | 19 |
+| `StereoResult` | object | 7 |
+| `StereoTransformRequest` | object | 10 |
+| `StereoTransformResult` | object | 8 |
+| `StereoViewInput` | object | 3 |
+| `StitchImage` | object | 4 |
+| `StitchRequest` | object | 9 |
+| `StitchResult` | object | 7 |
+| `TargetAlignment-Input` | object | 10 |
+| `TargetAlignment-Output` | object | 10 |
+| `TargetOutcome` | object | 10 |
+| `TargetPolicy` | object | 3 |
+| `TemplateBuildRequest` | object | 10 |
+| `TemplateBuildResult` | object | 4 |
+| `TemplateFeaturePoint` | object | 5 |
+| `TemplateInspectionRequest` | object | 5 |
+| `TemplateInspectionResult` | object | 2 |
+| `TemplateMatch` | object | 8 |
+| `TemplateMatchRequest` | object | 7 |
+| `TemplateMatchResult` | object | 6 |
+| `TemplateMetadata` | object | 10 |
+| `TemplatePointLocalizationDiagnostics` | object | 5 |
+| `TemplatePointRequest` | object | 8 |
+| `TemplatePointResult` | object | 8 |
+| `TemplateSearch` | object | 17 |
+| `ThresholdPreprocessing` | object | 3 |
+| `TwoPointRequest` | object | 6 |
+| `UndistortionRequest` | object | 10 |
+| `UndistortionResult` | object | 6 |
+| `VariationRequest` | object | 9 |
+| `VisualizationRequest` | object | 18 |
+| `VisualizationResult` | object | 5 |

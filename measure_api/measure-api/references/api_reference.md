@@ -297,10 +297,11 @@ by its own name is rejected with a message pointing at both endpoints.
 | `template.npz` | template pixels + workflow state |
 | `reference.png` | reference image (grayscale) |
 
-> **This format is v1-only and is not interchangeable with the GUI / v2 model asset.**
-> v2 `:publish` and the GUI write a manifest-v3.0 asset (`manifest.json` +
-> `reference.npy` + `workflow.npz`). A v1 project directory cannot be imported by v2,
-> and vice versa.
+> **This format is v1-only and is not interchangeable with the GUI model asset.**
+> The GUI writes a manifest-v3.0 asset (`manifest.json` + `reference.npy` +
+> `workflow.npz`). v2 is stateless and does not own a project directory at all — it
+> consumes upstream-committed file references and publishes its own artifacts. A v1
+> project directory cannot be loaded by v2.
 
 ### `POST /api/session/<sid>/load` — Load saved project
 

@@ -15,10 +15,16 @@ description: |
 ## Scope of this skill
 
 This skill documents the **v1 session-oriented API** under `/api/session/*`. A second,
-newer generation exists at **`/api/v2/*`** (modeling sessions with a separate ROI step,
-`:preview` / `:publish`, shared-memory image descriptors, and async operations). v2 is not
-covered here; its authoritative contract is served at runtime by
-`GET /api/v2/openapi.json`. Do not mix the two — they also write different on-disk formats.
+newer generation exists at **`/api/v2/*`**: a *stateless* FastAPI computation service
+organized as atomic operation families (`templates`, `alignment`, `measurements`,
+`geometry`, `calibrations`, `plane_stereo`, `recipes`, `results`) with typed port
+compatibility, upstream-owned shared-file references, and sync/async operations via
+`wait_ms` → 200/202. It has no modeling session and no ROI resource.
+
+v2 is **not** covered here. Its authoritative contract is `docs/v2-openapi.json`
+(63 paths, 222 schemas), with field-level docs in `docs/v2-api-reference.md`; see
+[generated/v2_surface.md](references/generated/v2_surface.md) for a rendered route index.
+Do not mix the two generations — they also write different on-disk formats.
 
 ## Overview
 
