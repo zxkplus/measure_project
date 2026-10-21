@@ -57,7 +57,7 @@ The response contains one entry per detected target (controlled by `max_matches`
   "num_targets": 1,
   "targets": [
     {
-      "target_id": 0,
+      "target_id": 1,
       "score": 0.6522,
       "row": 1234.5,
       "col": 987.6,
@@ -87,15 +87,23 @@ The response contains one entry per detected target (controlled by `max_matches`
 ```
 
 **Key fields:**
+- `target.target_id`: **1-based**, stable for a given image, and matches the numbering the GUI result table shows. It is not a positional index into `targets`.
 - `target.score`: NCC template match score (0.0-1.0). Higher = better match. 0.5+ is typical.
 - `target.row`, `target.col`: Location of the detected part in the original image.
 - `target.rotation_deg`: Part rotation relative to template.
+- `target.valid`: Whether this target produced usable results at all.
 - `target.measurements`: Object keyed by measurement label. Each contains:
+  - `type`: `circle` | `line` | `point` | `distance` | `angle` — branch on this, not on key presence
   - `valid`: Whether the measurement was successful on this target
   - For circles: `center_row`, `center_col`, `radius`
   - For lines: `a`, `b`, `c`, `start_row/col`, `end_row/col`
   - For distances/angles: `value`, `value_deg`
+  - For points: `row`, `col`
+  - When `valid` is false you get only `type` + `label` + `valid` — **no value keys**. Check `valid` before reading any field.
+- A special `"_error"` key (string-valued) appears when a tool raised during evaluation. It means every tool registered **after** it in DAG order was skipped, so their labels are simply absent from `measurements`. Treat `_error` as "this target's results are incomplete", and never assume a value dict shape for that entry.
 - `visual_b64`: Base64-encoded PNG overlay showing detected features (if requested)
+
+All coordinates are already mapped back to the **original inspection image** — no client-side rectification is needed.
 
 ### 5. Batch Processing Pattern
 
@@ -125,17 +133,30 @@ for img_file in sorted(os.listdir("/data/inspections")):
     # Extract measurement values
     for target in result["targets"]:
         for label, m in target["measurements"].items():
+            if label == "_error":
+                print(f"  {img_file}: engine error — later tools were skipped: {m}")
+                continue
             if not m.get("valid"):
                 print(f"  {img_file}: {label} measurement FAILED")
                 continue
-            # Circle measurements
-            if "radius" in m:
+            kind = m.get("type")
+            if kind == "circle":
                 print(f"  {label}: center=({m['center_row']:.1f}, {m['center_col']:.1f}) r={m['radius']:.2f}")
-            # Distance/angle measurements
-            if "value" in m:
-                unit = "deg" if m.get("value_deg") else "pixels"
+            elif kind == "line":
+                print(f"  {label}: a={m['a']:.4f} b={m['b']:.4f} c={m['c']:.4f}")
+                # Line length is not a field — derive it from the endpoints:
+                import math
+                length = math.hypot(m['end_row'] - m['start_row'],
+                                    m['end_col'] - m['start_col'])
+            elif kind in ("distance", "angle"):
+                unit = "deg" if kind == "angle" else "pixels"
                 print(f"  {label}: {m['value']:.2f} {unit}")
+            elif kind == "point":
+                print(f"  {label}: ({m['row']:.1f}, {m['col']:.1f})")
 ```
+
+Branch on `type` rather than probing for keys — a `TemplateMatchPoint` and an `EdgePair`
+both carry coordinates but under different key names.
 
 ### 6. Clean Up
 

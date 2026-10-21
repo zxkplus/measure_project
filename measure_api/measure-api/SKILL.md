@@ -12,6 +12,14 @@ description: |
 
 # Measure API
 
+## Scope of this skill
+
+This skill documents the **v1 session-oriented API** under `/api/session/*`. A second,
+newer generation exists at **`/api/v2/*`** (modeling sessions with a separate ROI step,
+`:preview` / `:publish`, shared-memory image descriptors, and async operations). v2 is not
+covered here; its authoritative contract is served at runtime by
+`GET /api/v2/openapi.json`. Do not mix the two — they also write different on-disk formats.
+
 ## Overview
 
 The Measure API is a RESTful service for industrial machine vision measurement. It wraps a PyQt-based template matching + geometric fitting engine into HTTP endpoints.
@@ -52,8 +60,18 @@ When a user asks to work with the Measure API:
 
 ## Common Pitfalls
 
-- **Wrong call order**: Must call `load_reference` → `set_template` → `add_measurements` → `measure`. The session phase tracks this — check with `GET /api/session/<sid>`.
+- **`object_type` must come from the registry — there are exactly 10.** Primitives: `FitCircle`, `FitLine`, `EdgePoint`, `EdgePair`, `TemplateMatchPoint`. Composed: `TwoPointsDistance`, `TwoPointsLine`, `TwoLinesAngle`, `PointLineDistance`, `PointCircleDistance`. Names like `FitEdge`, `FindCircle`, `FitRectangle`, `FindLine`, `PointToLineDistance` do **not** exist and return 400.
+- **Wrong call order**: Must call `load_reference` → `set_template` → `add_measurements` → `measure`. The session phase tracks this — check with `GET /api/session/<sid>`. State-machine violations come back as **400**, not 409.
+- **Phase guards are checked *before* argument validation.** If you are in the wrong phase, a bad `object_type` will not be reported — you get the phase error instead. Fix the phase first, then re-check your payload.
 - **File paths on server**: All image paths are server-side file paths. The server reads them directly; you cannot upload images through the API.
 - **`max_matches` = 0 means unlimited**: If you want single-target mode, set `max_matches=1`.
-- **`include_visual=true`**: Only visualizes the first measurement/result. Use for debugging, not production.
+- **`angle_range_deg` is a half-range**: 30 means ±30°. The four optional search fields (`angle_step`, `coarse_angle_step`, `coarse_fine`, `overlap`) are easy to omit by accident and are persisted with the model — `angle_step` in particular trades speed against orientation accuracy.
+- **`target_id` is 1-based**, matching the GUI result table. It is not an index into `targets`.
+- **Branch on `measurements[label]["type"]`**, not on key presence. Line results have no length field — derive it from `start_row/col` and `end_row/col`.
+- **`include_visual=true` means different things per endpoint.** On `/measurements` and `/composed` it overlays only that one tool; on `/measure` it draws **all** detected targets and all their measurements (a full-scene PNG). Both are base64 PNG — size accordingly in production.
+- **`quality` is sparse and partly misleading if taken literally.** `expected_edges` is usually `0` (the fitters don't record `num_measures` in `meta`), which forces `coverage_ratio` to `0.0`; the `rms` key is never actually emitted. Judge fit quality from `result.meta.mean_error` / `max_error` (pixels) and `meta.num_points`, and always read optional keys with `.get()`.
+- **Composed dependencies are not type-checked.** Pointing a `point_*` slot at a line returns 200 and keeps `dag_valid: true`; it only fails at run time via `meta.reason == "measurement raised exception"`. Verify producer result types yourself.
+- **A run-time exception truncates every later tool and adds `"_error"`.** The engine wraps the whole per-target tool loop in one `try`, so if tool *N* raises, tools *N+1…* are never evaluated and `targets[].measurements` gains a string-valued `"_error"` key. Do not iterate `measurements` assuming every entry is a result dict — skip `_error` (and any missing label) explicitly. A cleanly *invalid* measurement, by contrast, does appear as `{"type": ..., "label": ..., "valid": false}` with no value keys.
+- **`POST /measurements` registers the tool even when the test fails.** The definition is appended regardless of `valid`, so tuning by repeated POSTs silently accumulates tools and eventually hits `Duplicate measurement label`. Iterate with `POST /measurements/test` (no side effects) or `PUT /measurements/<label>`, and only POST once you are happy.
 - **Cascade delete**: Deleting a primitive measurement removes all composed measurements that depend on it.
+- **v1 storage is not v2 storage**: `save()` writes `config.json` + `template.npz` + `reference.png`. The GUI and the v2 API use a different manifest-v3.0 asset (`manifest.json` + `reference.npy` + `workflow.npz`). The two directories are not interchangeable.
