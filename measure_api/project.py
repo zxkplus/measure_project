@@ -33,7 +33,14 @@ import numpy as np
 from measure_api.logger import get_logger
 from measure_api.config import Config
 from measure_api.quality import compute_quality
-from measure_api.schemas import COMPOSED_DEPS, COMPOSED_TYPES, PRIMITIVE_TYPES
+from measure_api.schemas import (
+    COMPOSED_DEPS,
+    COMPOSED_TYPES,
+    PRIMITIVE_TYPES,
+    RESULT_TYPES,
+    accepts_result_type,
+    expected_input_types,
+)
 from measure_api.visualizer import generate_overview_visual, generate_visual
 
 logger = get_logger("project")
@@ -45,7 +52,11 @@ logger = get_logger("project")
 
 from measure.multi_target_workflow import MultiTargetWorkflow as _MTW  # noqa: E402
 from measure.object_specs import factory_table as _factory_table  # noqa: E402
-from measure.measure_workflow import MeasurementWorkflow  # noqa: E402
+from measure.measure_workflow import (  # noqa: E402
+    MeasurementWorkflow,
+    MeasureObject,
+    PointResult,
+)
 
 _OBJECT_FACTORIES = _factory_table()
 
@@ -118,6 +129,92 @@ def _phase_label(phase: str) -> str:
         PHASE_MEASURED: "measured",
     }
     return labels.get(phase, phase)
+
+
+class _EndpointProxy(MeasureObject):
+    """Runs a wrapped primitive object and republishes its result verbatim.
+
+    Used only by the teaching-time composed test so that an ``EdgePair`` can be
+    registered while synthetic ``_A``/``_B`` endpoint objects depend on it.  The
+    wrapper must forward ``calibrate()`` or the pair would measure at uncalibrated
+    coordinates; ``result`` is read straight off the delegate, so no copy is made.
+    """
+
+    def __init__(self, inner: MeasureObject):
+        super().__init__(inner.label)
+        self._inner = inner
+        # Primitive: no input labels, so the workflow calibrates it.
+        self._input_labels = []
+
+    def result_type(self) -> str:
+        return self._inner.result_type()
+
+    def calibrate(self, transform) -> None:
+        self._inner.calibrate(transform)
+
+    def measure(self, image):
+        self._inner.measure(image)
+        self.result = self._inner.result
+        return self.result
+
+    def to_dict(self) -> Dict[str, Any]:
+        # Never persisted: it exists only inside one teaching-time test.
+        return self._inner.to_dict()
+
+    @classmethod
+    def from_dict(cls, label: str, data: Dict[str, Any]) -> "MeasureObject":
+        raise NotImplementedError("_EndpointProxy is not serializable")
+
+    def __getattr__(self, name: str):
+        # Transparent pass-through for anything the proxy does not define
+        # itself (point_a / point_b / _cached_measure / ...).
+        inner = self.__dict__.get("_inner")
+        if inner is None:
+            raise AttributeError(name)
+        return getattr(inner, name)
+
+
+class _VirtualEndpointObject(MeasureObject):
+    """Reads one edge of an EdgePair as a standalone point.
+
+    ``MeasurementWorkflow`` binds dependencies strictly by object label, so the
+    engine's synthetic ``"<pair>_A"`` / ``"<pair>_B"`` endpoints — which the real
+    multi-target pipeline materialises at run time — have no counterpart here.
+    This object supplies them for the teaching test, deriving its point from the
+    parent pair's ``edge_a_*`` / ``edge_b_*`` meta exactly as the engine does.
+    """
+
+    def __init__(self, label: str, parent_label: str, suffix: str):
+        super().__init__(label)
+        self._parent_label = parent_label
+        self._suffix = suffix
+        self._input_labels = [parent_label]
+
+    def result_type(self) -> str:
+        return "point"
+
+    def measure(self, image):
+        parent = self.get_input_result(0)
+        key_row = f"edge_{self._suffix.lower()}_row"
+        key_col = f"edge_{self._suffix.lower()}_col"
+        meta = getattr(parent, "meta", None) or {}
+        if getattr(parent, "valid", False) and key_row in meta:
+            self.result = PointResult(
+                label=self.label,
+                row=float(meta[key_row]),
+                col=float(meta[key_col]),
+                valid=True,
+            )
+        else:
+            self.result = PointResult(label=self.label, valid=False)
+        return self.result
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"parent_label": self._parent_label, "suffix": self._suffix}
+
+    @classmethod
+    def from_dict(cls, label: str, data: Dict[str, Any]) -> "MeasureObject":
+        return cls(label, data["parent_label"], suffix=data["suffix"])
 
 
 # ============================================================================
@@ -575,17 +672,37 @@ class MeasureProject:
                 f"Supported: {sorted(COMPOSED_TYPES)}"
             )
 
-        # Validate dependencies exist
-        expected_deps = COMPOSED_DEPS.get(composed_type, [])
-        for key in expected_deps:
-            dep_label = deps.get(key)
+        # Validate dependencies exist and produce the expected result types.
+        # Existence alone is not enough: a composed tool reads typed attributes
+        # off its inputs (``point.row``, ``line.a``, ...), so wiring a line into
+        # a point slot used to be accepted here and only surface much later as an
+        # exception swallowed by the engine's per-target try — which also dropped
+        # every measurement registered after it.
+        for dep_param, expected_type in expected_input_types(composed_type):
+            dep_label = deps.get(dep_param)
             if dep_label is None:
-                raise ValueError(f"Missing dependency '{key}' for {composed_type}")
-            found = any(d["label"] == dep_label for d in self._measurement_defs)
-            if not found:
                 raise ValueError(
-                    f"Dependency '{dep_label}' (key={key}) not found "
-                    f"among measurements"
+                    f"Missing dependency '{dep_param}' for {composed_type}"
+                )
+            source_type = self._dependency_source_type(dep_label)
+            if source_type is None:
+                hint = ""
+                for d in self._measurement_defs:
+                    if d["label"] == dep_label and d["object_type"] == "EdgePair":
+                        hint = (
+                            f" — an EdgePair publishes only '{dep_label}_A' / "
+                            f"'{dep_label}_B', not its bare label"
+                        )
+                        break
+                raise ValueError(
+                    f"Dependency '{dep_label}' (key={dep_param}) not found "
+                    f"among measurements{hint}"
+                )
+            if not accepts_result_type(expected_type, source_type):
+                raise ValueError(
+                    f"Dependency '{dep_label}' (key={dep_param}) produces "
+                    f"'{source_type}' but {composed_type} requires "
+                    f"'{expected_type}'"
                 )
 
         # Check duplicate label
@@ -904,27 +1021,57 @@ class MeasureProject:
 
         temp_wf = MeasurementWorkflow()
 
-        # Add all dependencies first
+        # Add all dependencies first.  A dependency may name an EdgePair virtual
+        # endpoint ("<pair>_A"/"<pair>_B").  The standalone MeasurementWorkflow
+        # binds inputs by object label only, so those endpoints have to be
+        # registered as their own objects — otherwise resolve() rejects them and
+        # the teaching test reports "not found" for a reference the real engine
+        # would happily accept.
         dep_labels = set(deps.values())
-        dep_map = {}  # dep_label -> actual label in temp_wf
+        built_pairs = set()  # parent labels already added under their own name
 
-        # Find the defs for the dependencies
-        for dep_label in dep_labels:
+        for dep_label in sorted(dep_labels):
             defn = next(
                 (d for d in self._measurement_defs if d["label"] == dep_label),
                 None,
             )
-            if defn is None:
-                return {
-                    "label": label,
-                    "valid": False,
-                    "result": {"valid": False},
-                    "error": f"Dependency '{dep_label}' not found",
-                }
-            obj = self._build_measurement_object(
-                defn["object_type"], defn["label"], defn["params"],
-            )
-            temp_wf.add(obj)
+            if defn is not None:
+                obj = self._build_measurement_object(
+                    defn["object_type"], defn["label"], defn["params"],
+                )
+                if defn["object_type"] == "EdgePair":
+                    # Keep the pair itself addressable as "<label>_A"/"_B" below.
+                    built_pairs.add(defn["label"])
+                    temp_wf.add(_EndpointProxy(obj))
+                else:
+                    temp_wf.add(obj)
+                continue
+
+            if dep_label.endswith(("_A", "_B")):
+                base = dep_label[:-2]
+                parent = next(
+                    (d for d in self._measurement_defs
+                     if d["label"] == base and d["object_type"] == "EdgePair"),
+                    None,
+                )
+                if parent is not None:
+                    if base not in built_pairs:
+                        pair_obj = self._build_measurement_object(
+                            "EdgePair", base, parent["params"],
+                        )
+                        temp_wf.add(_EndpointProxy(pair_obj))
+                        built_pairs.add(base)
+                    temp_wf.add(_VirtualEndpointObject(
+                        dep_label, base, suffix=dep_label[-1],
+                    ))
+                    continue
+
+            return {
+                "label": label,
+                "valid": False,
+                "result": {"valid": False},
+                "error": f"Dependency '{dep_label}' not found",
+            }
 
         # Add the composed object
         factory_tuple = _OBJECT_FACTORIES.get(composed_type)
@@ -1198,6 +1345,33 @@ class MeasureProject:
     # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
+
+    def _dependency_source_type(self, dep_label: str) -> Optional[str]:
+        """Result type a composed dependency label resolves to, or None.
+
+        ``None`` means the label does not name anything the engine can feed.
+        Mirrors the engine's own label handling:
+
+        * a registered primitive yields its spec's result type;
+        * an ``EdgePair`` exposes its two detected edges as virtual endpoints
+          named ``"<label>_A"`` / ``"<label>_B"``, which point slots may use;
+        * a **valid** ``EdgePair`` publishes *only* those two endpoints — the bare
+          label is absent from the result set (it appears solely as an invalid
+          placeholder when the pair fails).  So a bare EdgePair label is not a
+          resolvable dependency and must be rejected here rather than surfacing
+          later as an exception that also cancels every tool after it.
+        """
+        if dep_label.endswith(("_A", "_B")):
+            base = dep_label[:-2]
+            for d in self._measurement_defs:
+                if d["label"] == base and d["object_type"] == "EdgePair":
+                    return "point"
+        for d in self._measurement_defs:
+            if d["label"] == dep_label:
+                if d["object_type"] == "EdgePair":
+                    return None
+                return RESULT_TYPES.get(d["object_type"])
+        return None
 
     def _resolve_path(self, path: str) -> str:
         """Resolve a potentially relative path against project_dir."""

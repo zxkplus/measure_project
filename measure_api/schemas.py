@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
-from measure.object_specs import composed_deps, composed_types, primitive_types
+from measure.object_specs import (
+    OBJECT_SPECS,
+    composed_deps,
+    composed_types,
+    primitive_types,
+)
 
 # ---------------------------------------------------------------------------
 # Measurement result types
@@ -130,3 +135,36 @@ ALL_TYPES = PRIMITIVE_TYPES | COMPOSED_TYPES
 
 # Mapping from composed type to its dependency parameter names
 COMPOSED_DEPS: Dict[str, List[str]] = composed_deps()
+
+# Mapping from any object type to the result type it produces.  Composed types
+# declare which result type each of their dependency slots expects via
+# ``COMPOSED_DEPS`` + this table, so a caller can reject "line wired into a
+# point slot" before it silently fails at run time.
+RESULT_TYPES: Dict[str, str] = {
+    spec.object_type: spec.result_type for spec in OBJECT_SPECS.values()
+}
+
+# A circle is usable wherever a point is expected: ``CircleResult`` exposes
+# ``row``/``col`` as documented compatibility aliases for its centre, and both
+# the GUI dependency picker and the shipped models rely on that.  Keep this in
+# sync with measure.measure_workflow.CircleResult.
+TYPE_COMPATIBILITY: Dict[str, set] = {
+    "point": {"point", "circle"},
+    "line": {"line"},
+    "circle": {"circle"},
+    "distance": {"distance"},
+    "angle": {"angle"},
+}
+
+
+def accepts_result_type(expected: str, actual: str) -> bool:
+    """True when an object producing ``actual`` may feed an ``expected`` slot."""
+    return actual in TYPE_COMPATIBILITY.get(expected, {expected})
+
+
+def expected_input_types(composed_type: str) -> List[Tuple[str, str]]:
+    """Return ``(dependency_param, expected_result_type)`` pairs in order."""
+    spec = OBJECT_SPECS.get(composed_type)
+    if spec is None:
+        return []
+    return list(spec.deps)

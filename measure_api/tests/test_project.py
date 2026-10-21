@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 import cv2
@@ -418,3 +419,135 @@ def _phase_label(phase: str) -> str:
         PHASE_MEASURED: "measured",
     }
     return labels.get(phase, phase)
+
+
+# ===========================================================================
+# Composed dependency result-type validation
+# ===========================================================================
+
+def test_composed_rejects_line_in_point_slot(ready_project):
+    """A line cannot feed a point slot; caught at add time, not run time."""
+    ready_project.add_measurement("FitLine", "l1", {
+        "start": (60, 60), "end": (140, 140),
+        "measure_length1": 20, "measure_length2": 5,
+    })
+    ready_project.add_measurement("EdgePoint", "p1", {
+        "row": 80, "col": 80, "angle": 0.0, "length1": 20, "length2": 5,
+    })
+    with pytest.raises(ValueError, match="produces 'line'.*requires 'point'"):
+        ready_project.add_composed(
+            "TwoPointsDistance", "gap",
+            {"point_a_label": "l1", "point_b_label": "p1"},
+        )
+
+
+def test_composed_rejects_circle_in_line_slot(ready_project):
+    """Only the point slot is circle-compatible; a line slot is not."""
+    ready_project.add_measurement("FitCircle", "c1", {
+        "center": (100, 100), "radius": 60,
+        "measure_length1": 30, "measure_length2": 10,
+    })
+    ready_project.add_measurement("FitLine", "l1", {
+        "start": (60, 60), "end": (140, 140),
+        "measure_length1": 20, "measure_length2": 5,
+    })
+    with pytest.raises(ValueError, match="produces 'circle'.*requires 'line'"):
+        ready_project.add_composed(
+            "TwoLinesAngle", "ang",
+            {"line_a_label": "c1", "line_b_label": "l1"},
+        )
+
+
+def test_composed_accepts_circle_in_point_slot(ready_project):
+    """CircleResult.row/col alias its centre — shipped models rely on this."""
+    ready_project.add_measurement("FitCircle", "c1", {
+        "center": (100, 100), "radius": 60,
+        "measure_length1": 30, "measure_length2": 10,
+    })
+    ready_project.add_measurement("FitCircle", "c2", {
+        "center": (100, 100), "radius": 40,
+        "measure_length1": 20, "measure_length2": 10,
+    })
+    r = ready_project.add_composed(
+        "TwoPointsDistance", "wall",
+        {"point_a_label": "c1", "point_b_label": "c2"},
+    )
+    assert "valid" in r
+
+
+def test_composed_rejects_point_in_circle_slot(ready_project):
+    """Compatibility is one-directional: point does not satisfy circle."""
+    ready_project.add_measurement("EdgePoint", "p1", {
+        "row": 80, "col": 80, "angle": 0.0, "length1": 20, "length2": 5,
+    })
+    ready_project.add_measurement("FitCircle", "c1", {
+        "center": (100, 100), "radius": 60,
+        "measure_length1": 30, "measure_length2": 10,
+    })
+    with pytest.raises(ValueError, match="produces 'point'.*requires 'circle'"):
+        ready_project.add_composed(
+            "PointCircleDistance", "pc",
+            {"point_label": "p1", "circle_label": "p1"},
+        )
+
+
+def test_composed_rejects_bare_edgepair_label(ready_project):
+    """A valid EdgePair publishes only <label>_A/_B, never its bare label."""
+    ready_project.add_measurement("EdgePair", "pair_1", {
+        "row": 100, "col": 100, "angle": 0.0, "length1": 60, "length2": 10,
+    })
+    with pytest.raises(ValueError, match="publishes only 'pair_1_A' / 'pair_1_B'"):
+        ready_project.add_composed(
+            "TwoPointsDistance", "gap",
+            {"point_a_label": "pair_1", "point_b_label": "pair_1_A"},
+        )
+
+
+def test_composed_accepts_edgepair_virtual_endpoints(ready_project):
+    """The endpoint form is the supported way to consume an EdgePair."""
+    ready_project.add_measurement("EdgePair", "pair_1", {
+        "row": 100, "col": 100, "angle": 0.0, "length1": 60, "length2": 10,
+    })
+    r = ready_project.add_composed(
+        "TwoPointsDistance", "gap",
+        {"point_a_label": "pair_1_A", "point_b_label": "pair_1_B"},
+    )
+    assert "valid" in r
+
+
+def test_composed_endpoint_test_resolves_parent_pair(ready_project):
+    """Teaching-time test must build the parent pair for a synthetic endpoint.
+
+    MeasurementWorkflow binds inputs by object label only, so without special
+    handling `pair_1_A` would report "not found" and the composed tool could
+    never be validated during teaching even though it measures correctly later.
+    """
+    ready_project.add_measurement("EdgePair", "pair_1", {
+        "row": 100, "col": 100, "angle": 0.0, "length1": 60, "length2": 10,
+    })
+    r = ready_project.add_composed(
+        "TwoPointsDistance", "gap",
+        {"point_a_label": "pair_1_A", "point_b_label": "pair_1_B"},
+    )
+    assert "not found" not in json.dumps(r)
+
+
+def test_composed_rejects_other_composed_as_dependency(ready_project):
+    """Dependency labels resolve against primitives only."""
+    ready_project.add_measurement("FitCircle", "c1", {
+        "center": (100, 100), "radius": 60,
+        "measure_length1": 30, "measure_length2": 10,
+    })
+    ready_project.add_measurement("FitCircle", "c2", {
+        "center": (100, 100), "radius": 40,
+        "measure_length1": 20, "measure_length2": 10,
+    })
+    ready_project.add_composed(
+        "TwoPointsDistance", "d1",
+        {"point_a_label": "c1", "point_b_label": "c2"},
+    )
+    with pytest.raises(ValueError, match="not found"):
+        ready_project.add_composed(
+            "TwoPointsDistance", "d2",
+            {"point_a_label": "d1", "point_b_label": "c1"},
+        )
