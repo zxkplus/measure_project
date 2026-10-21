@@ -36,15 +36,16 @@ def _make_dot_board() -> np.ndarray:
 
 
 def _generate_views(n: int = 12, seed: int = 42,
-                    border_value: int = 255) -> list:
+                    border_value: int = 255, board: np.ndarray = None) -> list:
     """Rotate the board at different angles to simulate multi-pose capture."""
-    board = _make_dot_board()
+    board = _make_dot_board() if board is None else board
+    height, width = board.shape[:2]
     rng = np.random.RandomState(seed)
     images = []
     for i in range(n):
         angle = (i - n // 2) * 3
-        M = cv2.getRotationMatrix2D((W / 2, H / 2), angle, 1.0)
-        warped = cv2.warpAffine(board, M, (W, H),
+        M = cv2.getRotationMatrix2D((width / 2, height / 2), angle, 1.0)
+        warped = cv2.warpAffine(board, M, (width, height),
                                 borderMode=cv2.BORDER_CONSTANT,
                                 borderValue=border_value)
         noisy = np.clip(warped.astype(np.float32)
@@ -293,8 +294,8 @@ class TestEdgeCases:
         for j in range(4):
             for i in range(5):
                 cv2.circle(img, (30 + i * 20, 30 + j * 20), 4, 0, -1)
-        images = [img, img, img]  # not ideal but tests the code path
-        # Same image won't calibrate, but should detect grids
+        # Distinct poses avoid the singular repeated-image solve in OpenCV 4.11.
+        images = _generate_views(n=3, board=img)
         r = calib.calibrate(images, symmetric_grid=True,
                             subpix_refine=False)
         assert r["num_images"] == 3

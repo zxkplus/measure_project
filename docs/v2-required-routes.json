@@ -1,0 +1,327 @@
+[
+  {
+    "family": "Discovery",
+    "method": "GET",
+    "path": "/api/v2/health/live"
+  },
+  {
+    "family": "Discovery",
+    "method": "GET",
+    "path": "/api/v2/health/ready"
+  },
+  {
+    "family": "Discovery",
+    "method": "GET",
+    "path": "/api/v2/capabilities"
+  },
+  {
+    "family": "Discovery",
+    "method": "GET",
+    "path": "/api/v2/openapi.json"
+  },
+  {
+    "family": "Discovery",
+    "method": "GET",
+    "path": "/api/v2/docs"
+  },
+  {
+    "family": "Images",
+    "method": "POST",
+    "path": "/api/v2/image-inspections"
+  },
+  {
+    "family": "Images",
+    "method": "POST",
+    "path": "/api/v2/image-previews"
+  },
+  {
+    "family": "Images",
+    "method": "POST",
+    "path": "/api/v2/image-preprocessings"
+  },
+  {
+    "family": "Images",
+    "method": "POST",
+    "path": "/api/v2/image-crops"
+  },
+  {
+    "family": "Templates",
+    "method": "POST",
+    "path": "/api/v2/template-builds"
+  },
+  {
+    "family": "Templates",
+    "method": "POST",
+    "path": "/api/v2/template-inspections"
+  },
+  {
+    "family": "Templates",
+    "method": "POST",
+    "path": "/api/v2/template-matches"
+  },
+  {
+    "family": "Alignment",
+    "method": "POST",
+    "path": "/api/v2/transforms/similarity-estimates"
+  },
+  {
+    "family": "Alignment",
+    "method": "POST",
+    "path": "/api/v2/alignments/rigid"
+  },
+  {
+    "family": "Alignment",
+    "method": "POST",
+    "path": "/api/v2/alignments/control-points"
+  },
+  {
+    "family": "Alignment",
+    "method": "POST",
+    "path": "/api/v2/geometry/transforms"
+  },
+  {
+    "family": "Probes",
+    "method": "POST",
+    "path": "/api/v2/edge-profiles"
+  },
+  {
+    "family": "Probes",
+    "method": "POST",
+    "path": "/api/v2/measurements/edge-points"
+  },
+  {
+    "family": "Probes",
+    "method": "POST",
+    "path": "/api/v2/measurements/edge-pairs"
+  },
+  {
+    "family": "Fits/features",
+    "method": "POST",
+    "path": "/api/v2/measurements/lines"
+  },
+  {
+    "family": "Fits/features",
+    "method": "POST",
+    "path": "/api/v2/measurements/circles"
+  },
+  {
+    "family": "Fits/features",
+    "method": "POST",
+    "path": "/api/v2/measurements/template-points"
+  },
+  {
+    "family": "Fits/features",
+    "method": "POST",
+    "path": "/api/v2/geometry/lines:fit"
+  },
+  {
+    "family": "Fits/features",
+    "method": "POST",
+    "path": "/api/v2/geometry/circles:fit"
+  },
+  {
+    "family": "Fits/features",
+    "method": "POST",
+    "path": "/api/v2/measurement-batches"
+  },
+  {
+    "family": "Geometry",
+    "method": "POST",
+    "path": "/api/v2/geometry/two-point-lines"
+  },
+  {
+    "family": "Geometry",
+    "method": "POST",
+    "path": "/api/v2/geometry/point-distances"
+  },
+  {
+    "family": "Geometry",
+    "method": "POST",
+    "path": "/api/v2/geometry/point-line-distances"
+  },
+  {
+    "family": "Geometry",
+    "method": "POST",
+    "path": "/api/v2/geometry/line-angles"
+  },
+  {
+    "family": "Geometry",
+    "method": "POST",
+    "path": "/api/v2/geometry/point-circle-distances"
+  },
+  {
+    "family": "Geometry",
+    "method": "POST",
+    "path": "/api/v2/geometry/circle-dimensions"
+  },
+  {
+    "family": "Geometry",
+    "method": "POST",
+    "path": "/api/v2/geometry/length-conversions"
+  },
+  {
+    "family": "Features/calibration",
+    "method": "POST",
+    "path": "/api/v2/calibration-features/checkerboard-corners"
+  },
+  {
+    "family": "Features/calibration",
+    "method": "POST",
+    "path": "/api/v2/calibration-features/dot-grids"
+  },
+  {
+    "family": "Features/calibration",
+    "method": "POST",
+    "path": "/api/v2/calibrations/scales"
+  },
+  {
+    "family": "Features/calibration",
+    "method": "POST",
+    "path": "/api/v2/calibrations/cameras"
+  },
+  {
+    "family": "Features/calibration",
+    "method": "POST",
+    "path": "/api/v2/calibrations/plane-mappings"
+  },
+  {
+    "family": "Features/calibration",
+    "method": "POST",
+    "path": "/api/v2/calibrations/stereo-rigs"
+  },
+  {
+    "family": "Calibration utilities",
+    "method": "POST",
+    "path": "/api/v2/calibration-validations"
+  },
+  {
+    "family": "Calibration utilities",
+    "method": "POST",
+    "path": "/api/v2/calibration-origin-adjustments"
+  },
+  {
+    "family": "Calibration utilities",
+    "method": "POST",
+    "path": "/api/v2/calibration-inspections"
+  },
+  {
+    "family": "Calibration utilities",
+    "method": "POST",
+    "path": "/api/v2/calibration-exports"
+  },
+  {
+    "family": "Calibration utilities",
+    "method": "POST",
+    "path": "/api/v2/calibration-imports"
+  },
+  {
+    "family": "Correction/stereo",
+    "method": "POST",
+    "path": "/api/v2/image-undistortions"
+  },
+  {
+    "family": "Correction/stereo",
+    "method": "POST",
+    "path": "/api/v2/image-stitches"
+  },
+  {
+    "family": "Correction/stereo",
+    "method": "POST",
+    "path": "/api/v2/geometry/stereo-transforms"
+  },
+  {
+    "family": "Correction/stereo",
+    "method": "POST",
+    "path": "/api/v2/geometry/camera-projections"
+  },
+  {
+    "family": "Recipe",
+    "method": "POST",
+    "path": "/api/v2/recipe-validations"
+  },
+  {
+    "family": "Recipe",
+    "method": "POST",
+    "path": "/api/v2/recipe-previews"
+  },
+  {
+    "family": "Recipe",
+    "method": "POST",
+    "path": "/api/v2/runs"
+  },
+  {
+    "family": "Recipe",
+    "method": "POST",
+    "path": "/api/v2/run-batches"
+  },
+  {
+    "family": "Recipe",
+    "method": "POST",
+    "path": "/api/v2/recipe-exports"
+  },
+  {
+    "family": "Recipe",
+    "method": "POST",
+    "path": "/api/v2/recipe-imports"
+  },
+  {
+    "family": "Recipe",
+    "method": "POST",
+    "path": "/api/v2/legacy-project-conversions"
+  },
+  {
+    "family": "Evaluation",
+    "method": "POST",
+    "path": "/api/v2/evaluations/ranges"
+  },
+  {
+    "family": "Evaluation",
+    "method": "POST",
+    "path": "/api/v2/evaluations/diameter-variation"
+  },
+  {
+    "family": "Evaluation",
+    "method": "POST",
+    "path": "/api/v2/evaluations/centerline-deviation"
+  },
+  {
+    "family": "Results",
+    "method": "POST",
+    "path": "/api/v2/visualizations"
+  },
+  {
+    "family": "Results",
+    "method": "POST",
+    "path": "/api/v2/result-exports"
+  },
+  {
+    "family": "Results",
+    "method": "POST",
+    "path": "/api/v2/replays"
+  },
+  {
+    "family": "Operations",
+    "method": "GET",
+    "path": "/api/v2/operations"
+  },
+  {
+    "family": "Operations",
+    "method": "GET",
+    "path": "/api/v2/operations/{id}"
+  },
+  {
+    "family": "Operations",
+    "method": "GET",
+    "path": "/api/v2/operations/{id}/diagnostics"
+  },
+  {
+    "family": "Operations",
+    "method": "GET",
+    "path": "/api/v2/traces/{trace_id}"
+  },
+  {
+    "family": "Operations",
+    "method": "POST",
+    "path": "/api/v2/operations/{id}:cancel"
+  }
+]

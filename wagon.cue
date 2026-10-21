@@ -23,7 +23,7 @@ dagger.#Plan & {
 	}
 
 	actions: {
-		base_image: "harbor.innoai.tech/c3rd/python-runtime-build:feat-3.11-1.0.0-18183ed0-amd64"
+		base_image: "harbor.innoai.tech/c3rd/python-runtime-build:feat-3.11-1.0.0-1e12b172-amd64"
 
 		Config: cbase.#CompileConfig & {
 			CI_PROJECT_NAME:      client.env.CI_PROJECT_NAME
@@ -67,9 +67,9 @@ dagger.#Plan & {
 			FromImage:     base_image
 
 			CommandChains: [
-				#"if [ -f /etc/apt/sources.list ]; then sed -i 's@http://deb.debian.org@https://mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list && sed -i 's@http://security.debian.org@https://mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list && sed -i 's@http://archive.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list && sed -i 's@http://security.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list; fi"#,
+				#"for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do if [ -f "$source" ]; then sed -i -E 's@https?://(deb.debian.org|security.debian.org|archive.ubuntu.com|security.ubuntu.com)@https://mirrors.ustc.edu.cn@g' "$source"; fi; done"#,
 				#"apt-get update && apt-get install -y --no-install-recommends libgl1 && rm -rf /var/lib/apt/lists/*"#,
-				#"pip3 install -i https://mirrors.aliyun.com/pypi/simple/ -r /usr/local/pkg/measure_project/amd64/bin/measure_project/requirements.txt -r /usr/local/pkg/measure_project/amd64/bin/measure_project/measure_api/requirements.txt"#,
+				#"pip3 install -i https://mirrors.aliyun.com/pypi/simple/ -r /usr/local/pkg/measure_project/amd64/bin/measure_project/measure_api/requirements.txt -r /usr/local/pkg/measure_project/amd64/bin/measure_project/measure_api/v2/requirements.lock"#,
 				#"chmod +x /usr/local/pkg/measure_project/amd64/bin/measure_project/measure_api/run.sh"#,
 			]
 

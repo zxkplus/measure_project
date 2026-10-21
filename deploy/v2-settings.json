@@ -1,0 +1,20 @@
+{
+  "shared_roots": {
+    "exchange": "/shared/exchange",
+    "assets": "/shared/assets",
+    "outputs": "/shared/outputs"
+  },
+  "writable_roots": ["outputs"],
+  "state_directory": "/var/lib/measure-v2/state",
+  "max_workers": 2,
+  "max_pending": 16,
+  "max_input_bytes": 268435456,
+  "max_image_pixels": 67108864,
+  "max_worker_memory_bytes": 2147483648,
+  "cache_max_bytes": 268435456,
+  "cache_max_entries": 64,
+  "operation_retention_seconds": 86400,
+  "expired_retention_seconds": 86400,
+  "max_retained_operations": 10000,
+  "shutdown_wait_seconds": 5
+}

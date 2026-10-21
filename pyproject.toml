@@ -5,6 +5,9 @@ description = "纯 Python 实现的几何测量工具（1D 边缘检测、直线
 readme = "readme.md"
 requires-python = ">=3.9"
 dependencies = [
+    "fastapi==0.115.12",
+    "pydantic==2.11.7",
+    "uvicorn==0.34.3",
     "flask>=2.0.0",
     "numpy>=1.21.0",
     "opencv-python>=4.5.0",
@@ -15,6 +18,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "httpx==0.28.1",
     "mypy>=1.0",
     "pytest>=7.0",
 ]

@@ -1,25 +1,35 @@
 services:
   measure-v2:
-    image: ${MEASURE_V2_IMAGE}
+    image: ${MEASURE_V2_IMAGE:-measure-v2:local}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.v2
+    command: ["python", "-m", "measure_api.v2"]
     restart: unless-stopped
+    init: true
+    user: "${MEASURE_V2_UID:-10001}:${MEASURE_V2_GID:-10001}"
     environment:
       MEASURE_V2_HOST: 0.0.0.0
       MEASURE_V2_PORT: "9004"
-      MEASURE_V2_ASSET_ROOT: /var/lib/measure-v2
-      MEASURE_V2_SHM_NAME: measure_v2_img_shm
+      MEASURE_V2_CONFIG: /etc/measure-v2/settings.json
     ports:
       - "${MEASURE_V2_HOST_PORT:-29004}:9004"
     volumes:
-      - /dev/shm:/dev/shm
-      - ${MEASURE_V2_ASSET_DIR}:/var/lib/measure-v2
+      - ${MEASURE_V2_EXCHANGE_DIR}:/shared/exchange:ro
+      - ${MEASURE_V2_ASSETS_DIR}:/shared/assets:ro
+      - ${MEASURE_V2_OUTPUTS_DIR}:/shared/outputs
+      - ${MEASURE_V2_STATE_DIR}:/var/lib/measure-v2/state
+      - ${MEASURE_V2_SETTINGS_FILE:-./v2-settings.json}:/etc/measure-v2/settings.json:ro
+    mem_limit: ${MEASURE_V2_CONTAINER_MEMORY:-6g}
+    stop_grace_period: 15s
     healthcheck:
       test:
         - CMD
-        - python3
+        - python
         - -c
         - >-
           import urllib.request;
-          urllib.request.urlopen('http://127.0.0.1:9004/api/v2/health', timeout=2)
+          urllib.request.urlopen('http://127.0.0.1:9004/api/v2/health/ready', timeout=2)
       interval: 10s
       timeout: 3s
       retries: 3

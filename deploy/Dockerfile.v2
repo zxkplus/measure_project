@@ -1,0 +1,12 @@
+FROM python:3.11-slim
+WORKDIR /app
+COPY measure_api/v2/requirements.lock /tmp/requirements.lock
+RUN pip install --no-cache-dir -r /tmp/requirements.lock \
+    && useradd --uid 10001 --create-home measure
+COPY measure /app/measure
+COPY measure_api /app/measure_api
+COPY deploy/v2-settings.json /etc/measure-v2/settings.json
+USER 10001:10001
+EXPOSE 9004
+ENV MEASURE_V2_CONFIG=/etc/measure-v2/settings.json
+CMD ["python", "-m", "measure_api.v2"]

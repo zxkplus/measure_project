@@ -7,12 +7,15 @@ Halcon Metrology 模块 - 直线与圆测量
 3. 收集边缘点并拟合几何形状
 """
 
+from __future__ import annotations
+
 import json
 import cv2
 import numpy as np
 from typing import Tuple, List, Optional, Dict, Any
 from measure.measure1D import Halcon1DMeasure
 from measure.constants import EPS
+from measure.geometric_fits import fit_circle_points, fit_line_points
 from measure.viz import to_bgr, draw_text_shadow
 
 
@@ -176,6 +179,8 @@ class LineMeasureObject(_BaseMeasureObject):
                 - 'angle': 直线角度（弧度）
                 - 'num_points': 使用的边缘点数
         """
+        self.result = None
+        self._debug_info = {}
         self.edge_points = []
         self.measure_rectangles = self._generate_measure_rectangles()
         
@@ -238,69 +243,9 @@ class LineMeasureObject(_BaseMeasureObject):
         return self.start + t * self.direction_normalized
     
     def _fit_line(self, points: List[Tuple[float, float]]) -> Dict[str, Any]:
-        """
-        最小二乘拟合直线
-        
-        使用 SVD 方法求解直线方程 ax + by + c = 0
-        """
-        points_arr = np.array(points)
-        x = points_arr[:, 0]  # col
-        y = points_arr[:, 1]  # row
-        
-        # 使用 SVD 方法拟合直线
-        A = np.column_stack([x, y, np.ones(len(x))])
-        U, S, Vt = np.linalg.svd(A)
-        params = Vt[-1, :]
-        
-        a, b, c = params
-        
-        # 归一化参数
-        norm = np.sqrt(a**2 + b**2)
-        if norm > EPS:
-            a, b, c = a/norm, b/norm, c/norm
-        
-        # 计算方向向量
-        # 直线方向垂直于法向量 (a, b)
-        direction = np.array([-b, a])
-        
-        # 计算直线上的一点（所有点的质心投影到直线上）
-        cx = np.mean(x)
-        cy = np.mean(y)
-        
-        # 投影到直线
-        d = (a * cx + b * cy + c) / (a**2 + b**2 + EPS)
-        x0 = cx - a * d
-        y0 = cy - b * d
-        
-        # 计算拟合直线在边缘点范围内的端点
-        t_values = (x - x0) * direction[0] + (y - y0) * direction[1]
-        t_min, t_max = np.min(t_values), np.max(t_values)
-        
-        # 延伸一点
-        extend = (t_max - t_min) * 0.1
-        t_min -= extend
-        t_max += extend
-        
-        fit_start = (y0 + t_min * direction[1], x0 + t_min * direction[0])
-        fit_end = (y0 + t_max * direction[1], x0 + t_max * direction[0])
-        
-        # 计算拟合误差
-        distances = np.abs(a * x + b * y + c) / (np.sqrt(a**2 + b**2) + EPS)
-        mean_error = np.mean(distances)
-        max_error = np.max(distances)
-        
-        return {
-            'params': (a, b, c),
-            'point': (y0, x0),
-            'direction': direction.tolist(),
-            'start': fit_start,
-            'end': fit_end,
-            'angle': np.arctan2(direction[1], direction[0]),
-            'num_points': len(points),
-            'mean_error': mean_error,
-            'max_error': max_error
-        }
-    
+        """Fit selected xy samples through the reusable public numeric implementation."""
+        return fit_line_points(points)
+
     def visualize(self, image: np.ndarray,
                   show_rectangles: bool = True,
                   show_edge_points: bool = True,
@@ -637,6 +582,8 @@ class CircleMeasureObject(_BaseMeasureObject):
                 - 'num_points': 使用的边缘点数
                 - 'mean_error': 平均拟合误差
         """
+        self.result = None
+        self._debug_info = {}
         self.edge_points = []
         self.measure_rectangles = self._generate_measure_rectangles()
         
@@ -692,71 +639,9 @@ class CircleMeasureObject(_BaseMeasureObject):
         return self.result
     
     def _fit_circle(self, points: List[Tuple[float, float]]) -> Dict[str, Any]:
-        """
-        最小二乘拟合圆
-        
-        使用代数方法拟合圆方程 (x-xc)² + (y-yc)² = R²
-        """
-        points_arr = np.array(points)
-        x = points_arr[:, 0]  # col
-        y = points_arr[:, 1]  # row
-        n = len(points)
-        
-        # 方法：构建线性方程组
-        # 圆方程: x² + y² - 2xc*x - 2yc*y + (xc² + yc² - R²) = 0
-        # 令 A = -2xc, B = -2yc, C = xc² + yc² - R²
-        # 则: x² + y² + A*x + B*y + C = 0
-        
-        M = np.column_stack([x, y, np.ones(n)])
-        b = -(x**2 + y**2)
-        
-        # 最小二乘求解
-        params, residuals, rank, s = np.linalg.lstsq(M, b, rcond=None)
-        A, B, C = params
-        
-        # 计算圆心和半径
-        xc = -A / 2
-        yc = -B / 2
-        R_squared = xc**2 + yc**2 - C
-        
-        if R_squared > 0:
-            R = np.sqrt(R_squared)
-        else:
-            R = 0
-        
-        # 计算拟合误差（每个点到圆的距离偏差）
-        distances = np.sqrt((x - xc)**2 + (y - yc)**2)
-        errors = np.abs(distances - R)
-        mean_error = np.mean(errors)
-        max_error = np.max(errors)
-        
-        # 计算椭圆度（最大直径 - 最小直径）
-        if n >= 3:
-            max_idx = np.argmax(distances)
-            min_idx = np.argmin(distances)
-            max_radius = distances[max_idx]
-            min_radius = distances[min_idx]
-            max_radius_point = (x[max_idx], y[max_idx])  # (col, row)
-            min_radius_point = (x[min_idx], y[min_idx])  # (col, row)
-            ellipticity = 2 * (max_radius - min_radius)
-        else:
-            ellipticity = 0.0
-            max_radius = min_radius = 0.0
-            max_radius_point = min_radius_point = None
-        
-        return {
-            'center': (yc, xc),  # (row, col)
-            'radius': R,
-            'num_points': n,
-            'mean_error': mean_error,
-            'max_error': max_error,
-            'ellipticity': ellipticity,
-            'max_radius': max_radius,
-            'min_radius': min_radius,
-            'max_radius_point': max_radius_point,  # (col, row)
-            'min_radius_point': min_radius_point,  # (col, row)
-        }
-    
+        """Fit selected xy samples through the reusable public numeric implementation."""
+        return fit_circle_points(points)
+
     def visualize(self, image: np.ndarray,
                   show_rectangles: bool = True,
                   show_edge_points: bool = True,

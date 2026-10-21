@@ -1,0 +1,1518 @@
+{
+  "baseline": "3b46f24",
+  "head": "9f8f3eb",
+  "scope": "New production Python library and script public functions; nested implementation closures and pytest functions excluded. Existing imported planning documents excluded.",
+  "missing_public_annotations": [
+    {
+      "file": "measure_api/v2/files.py",
+      "line": 352,
+      "function": "filesystem_lock",
+      "missing": [
+        "return"
+      ]
+    },
+    {
+      "file": "measure_api/v2/runtime.py",
+      "line": 66,
+      "function": "worker_job",
+      "missing": [
+        "connection"
+      ]
+    }
+  ],
+  "incomplete_google_docstrings": [
+    {
+      "file": "measure_api/v2/app.py",
+      "line": 24,
+      "function": "create_app",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/atomic_types.py",
+      "line": 37,
+      "function": "Line.normalize",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/atomic_types.py",
+      "line": 54,
+      "function": "Circle.check_circle",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/calibration_assets.py",
+      "line": 57,
+      "function": "ScalarParameters.consistent_scale",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/calibration_assets.py",
+      "line": 109,
+      "function": "calibration_bytes",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/calibration_assets.py",
+      "line": 115,
+      "function": "calibration_digest",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/calibration_assets.py",
+      "line": 120,
+      "function": "validate_calibration",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/calibration_assets.py",
+      "line": 144,
+      "function": "load_calibration",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/calibration_assets.py",
+      "line": 158,
+      "function": "check_applicability",
+      "missing_sections": [
+        "Args"
+      ]
+    },
+    {
+      "file": "measure_api/v2/errors.py",
+      "line": 22,
+      "function": "ServiceError.payload",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/alignment.py",
+      "line": 34,
+      "function": "SimilarityEstimateRequest.paired_points",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/alignment.py",
+      "line": 180,
+      "function": "validated_matrix",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/calibrations.py",
+      "line": 47,
+      "function": "compute_scale",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/calibrations.py",
+      "line": 91,
+      "function": "convert_length",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/calibrations.py",
+      "line": 155,
+      "function": "detect_checkerboard",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/calibrations.py",
+      "line": 227,
+      "function": "board_points",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/calibrations.py",
+      "line": 234,
+      "function": "detect_dot_grid",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/calibrations.py",
+      "line": 324,
+      "function": "asset_result",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/calibrations.py",
+      "line": 339,
+      "function": "compute_camera",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/calibrations.py",
+      "line": 468,
+      "function": "inspect_calibration",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/calibrations.py",
+      "line": 479,
+      "function": "validate_asset",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/calibrations.py",
+      "line": 504,
+      "function": "export_calibration",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/calibrations.py",
+      "line": 551,
+      "function": "undistort_image",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/evaluations.py",
+      "line": 23,
+      "function": "LimitsRequest.check_limits",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/evaluations.py",
+      "line": 76,
+      "function": "evaluate_range",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/evaluations.py",
+      "line": 85,
+      "function": "evaluate_variation",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/evaluations.py",
+      "line": 101,
+      "function": "evaluate_deviation",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/geometry.py",
+      "line": 36,
+      "function": "fit_diagnostics",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/geometry.py",
+      "line": 46,
+      "function": "fit_line",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/geometry.py",
+      "line": 67,
+      "function": "fit_circle",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/geometry.py",
+      "line": 86,
+      "function": "compatible",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/geometry.py",
+      "line": 98,
+      "function": "point_line_distance",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/geometry.py",
+      "line": 122,
+      "function": "two_point_line",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/geometry.py",
+      "line": 134,
+      "function": "point_distance",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/geometry.py",
+      "line": 149,
+      "function": "line_angle",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/geometry.py",
+      "line": 166,
+      "function": "point_circle_distance",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/geometry.py",
+      "line": 189,
+      "function": "circle_dimensions",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/images.py",
+      "line": 35,
+      "function": "inspect_image",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/images.py",
+      "line": 67,
+      "function": "matrix_mapping",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/images.py",
+      "line": 77,
+      "function": "encode_png",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/images.py",
+      "line": 85,
+      "function": "preview_image",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/images.py",
+      "line": 120,
+      "function": "preprocess_image",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/images.py",
+      "line": 172,
+      "function": "crop_image",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/measurement_batches.py",
+      "line": 47,
+      "function": "MeasurementBatchRequest.resolve_requests",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/measurement_batches.py",
+      "line": 105,
+      "function": "execute_batch",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/measurements.py",
+      "line": 47,
+      "function": "ProbeRequest.gray_threshold",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/measurements.py",
+      "line": 80,
+      "function": "ProfileRequest.require_curve_destination",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/measurements.py",
+      "line": 97,
+      "function": "make_probe",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/measurements.py",
+      "line": 120,
+      "function": "read_gray",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/measurements.py",
+      "line": 126,
+      "function": "extract_profile",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/measurements.py",
+      "line": 156,
+      "function": "measure_edges",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/measurements.py",
+      "line": 203,
+      "function": "measure_pairs",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/measurements.py",
+      "line": 300,
+      "function": "measure_line",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/measurements.py",
+      "line": 335,
+      "function": "measure_circle",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 31,
+      "function": "matrix3",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 40,
+      "function": "rotation3",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 211,
+      "function": "resolve_view",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 243,
+      "function": "observation_arrays",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 261,
+      "function": "pose",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 279,
+      "function": "perspective",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 311,
+      "function": "plane_parameters",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 357,
+      "function": "error_summary",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 364,
+      "function": "compute_plane",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 514,
+      "function": "pair_views",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 523,
+      "function": "project_camera",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 534,
+      "function": "validate_pair",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 561,
+      "function": "compute_stereo",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 678,
+      "function": "adjust_origin",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 712,
+      "function": "validate_board_observations",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 806,
+      "function": "transform_stereo",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 869,
+      "function": "project_points",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/plane_stereo.py",
+      "line": 947,
+      "function": "stitch_images",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/recipes.py",
+      "line": 22,
+      "function": "validate",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/templates.py",
+      "line": 61,
+      "function": "coordinate_mapping",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/templates.py",
+      "line": 187,
+      "function": "inspect_template",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/templates.py",
+      "line": 226,
+      "function": "TemplateSearch.validate_search",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/templates.py",
+      "line": 487,
+      "function": "TemplatePointRequest.single_point",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/families/templates.py",
+      "line": 516,
+      "function": "measure_template_point",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/files.py",
+      "line": 38,
+      "function": "SharedFiles.resolve",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/files.py",
+      "line": 58,
+      "function": "SharedFiles.read_bytes",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/files.py",
+      "line": 85,
+      "function": "SharedFiles.read_image",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/files.py",
+      "line": 159,
+      "function": "SharedFiles.finalize",
+      "missing_sections": [
+        "Args"
+      ]
+    },
+    {
+      "file": "measure_api/v2/files.py",
+      "line": 181,
+      "function": "SharedFiles.snapshot_request",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/files.py",
+      "line": 201,
+      "function": "encoded_dimensions",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/files.py",
+      "line": 229,
+      "function": "image_metadata",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/files.py",
+      "line": 248,
+      "function": "ArtifactWriter.commit",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/files.py",
+      "line": 352,
+      "function": "filesystem_lock",
+      "missing_sections": [
+        "Args"
+      ]
+    },
+    {
+      "file": "measure_api/v2/files.py",
+      "line": 360,
+      "function": "check_commit",
+      "missing_sections": [
+        "Args"
+      ]
+    },
+    {
+      "file": "measure_api/v2/files.py",
+      "line": 369,
+      "function": "sync_directory",
+      "missing_sections": [
+        "Args"
+      ]
+    },
+    {
+      "file": "measure_api/v2/files.py",
+      "line": 378,
+      "function": "atomic_json",
+      "missing_sections": [
+        "Args"
+      ]
+    },
+    {
+      "file": "measure_api/v2/legacy_conversion.py",
+      "line": 66,
+      "function": "diagnostic",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/legacy_conversion.py",
+      "line": 75,
+      "function": "legacy_preprocessing",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/legacy_conversion.py",
+      "line": 116,
+      "function": "read_legacy",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/legacy_conversion.py",
+      "line": 212,
+      "function": "prepare_conversion",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/legacy_conversion.py",
+      "line": 338,
+      "function": "xy",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/legacy_conversion.py",
+      "line": 343,
+      "function": "convert_parameters",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/legacy_conversion.py",
+      "line": 389,
+      "function": "convert_legacy",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/models.py",
+      "line": 26,
+      "function": "FileReference.check_reference",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/models.py",
+      "line": 139,
+      "function": "ServiceSettings.normalize_roots",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/models.py",
+      "line": 146,
+      "function": "ServiceSettings.check_writable_roots",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/portable_recipes.py",
+      "line": 37,
+      "function": "canonical",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/portable_recipes.py",
+      "line": 44,
+      "function": "rewrite_references",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/portable_recipes.py",
+      "line": 61,
+      "function": "reference_key",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/portable_recipes.py",
+      "line": 108,
+      "function": "require_valid",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/portable_recipes.py",
+      "line": 118,
+      "function": "bounded_zip",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/portable_recipes.py",
+      "line": 148,
+      "function": "read_package",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/portable_recipes.py",
+      "line": 212,
+      "function": "validate_payload",
+      "missing_sections": [
+        "Args"
+      ]
+    },
+    {
+      "file": "measure_api/v2/portable_recipes.py",
+      "line": 248,
+      "function": "safe_numeric_archive",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/portable_recipes.py",
+      "line": 278,
+      "function": "export_recipe",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/portable_recipes.py",
+      "line": 353,
+      "function": "prepare_export",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/portable_recipes.py",
+      "line": 384,
+      "function": "prepare_import",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/portable_recipes.py",
+      "line": 412,
+      "function": "output_reference",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/portable_recipes.py",
+      "line": 423,
+      "function": "import_recipe",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/preprocessing.py",
+      "line": 28,
+      "function": "CannyPreprocessing.check_thresholds",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/preprocessing.py",
+      "line": 64,
+      "function": "to_gray",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/preprocessing.py",
+      "line": 69,
+      "function": "apply_preprocessing",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/preprocessing.py",
+      "line": 93,
+      "function": "display_preview",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_execution.py",
+      "line": 39,
+      "function": "pin_parameters",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_execution.py",
+      "line": 52,
+      "function": "gather_assets",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_execution.py",
+      "line": 67,
+      "function": "expand_calibrations",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_execution.py",
+      "line": 94,
+      "function": "prepare_recipe",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_execution.py",
+      "line": 155,
+      "function": "validate_snapshot",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_execution.py",
+      "line": 162,
+      "function": "read_port",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_execution.py",
+      "line": 191,
+      "function": "execute_nodes",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_execution.py",
+      "line": 291,
+      "function": "execute_stages",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_execution.py",
+      "line": 364,
+      "function": "localized_targets",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_execution.py",
+      "line": 382,
+      "function": "align_target",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_execution.py",
+      "line": 484,
+      "function": "execute_run",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_execution.py",
+      "line": 663,
+      "function": "prepare_batch",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_execution.py",
+      "line": 707,
+      "function": "execute_batch",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_graph.py",
+      "line": 28,
+      "function": "lookup",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_graph.py",
+      "line": 71,
+      "function": "validate_recipe",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_metrology.py",
+      "line": 52,
+      "function": "SampleMapper.physical_mapping",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/recipe_metrology.py",
+      "line": 149,
+      "function": "SampleMapper.convert",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/registry.py",
+      "line": 29,
+      "function": "CalculationContext.files",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/registry.py",
+      "line": 77,
+      "function": "Operation.operation_id",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/registry.py",
+      "line": 83,
+      "function": "operations",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/replay.py",
+      "line": 35,
+      "function": "numerical_record",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/replay.py",
+      "line": 64,
+      "function": "freeze_run",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/replay.py",
+      "line": 114,
+      "function": "prepare_replay",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/replay.py",
+      "line": 168,
+      "function": "compare_records",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/replay.py",
+      "line": 196,
+      "function": "replay",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/result_models.py",
+      "line": 45,
+      "function": "SuppliedResultRequest.one_result",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/result_models.py",
+      "line": 67,
+      "function": "VisualizationRequest.output_destination",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/result_models.py",
+      "line": 108,
+      "function": "ResultExportRequest.unique_formats",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/runtime.py",
+      "line": 34,
+      "function": "utc_now",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/runtime.py",
+      "line": 51,
+      "function": "configure_worker",
+      "missing_sections": [
+        "Args"
+      ]
+    },
+    {
+      "file": "measure_api/v2/runtime.py",
+      "line": 66,
+      "function": "worker_job",
+      "missing_sections": [
+        "Args"
+      ]
+    },
+    {
+      "file": "measure_api/v2/runtime.py",
+      "line": 120,
+      "function": "resident_bytes",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/runtime.py",
+      "line": 267,
+      "function": "OperationRuntime.wait",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/runtime.py",
+      "line": 278,
+      "function": "OperationRuntime.submit",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/runtime.py",
+      "line": 578,
+      "function": "OperationRuntime.get",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/runtime.py",
+      "line": 587,
+      "function": "OperationRuntime.trace",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/runtime.py",
+      "line": 596,
+      "function": "OperationRuntime.list",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/runtime.py",
+      "line": 604,
+      "function": "OperationRuntime.cancel",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/versions.py",
+      "line": 33,
+      "function": "runtime_dependencies",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "measure_api/v2/versions.py",
+      "line": 49,
+      "function": "decoder_identity",
+      "missing_sections": [
+        "Returns"
+      ]
+    },
+    {
+      "file": "scripts/v2_benchmark.py",
+      "line": 20,
+      "function": "json_pointer",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "scripts/v2_benchmark.py",
+      "line": 32,
+      "function": "percentile",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "scripts/v2_benchmark.py",
+      "line": 37,
+      "function": "execute_case",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "scripts/v2_benchmark.py",
+      "line": 66,
+      "function": "summarize",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "scripts/v2_benchmark.py",
+      "line": 109,
+      "function": "qualify",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "scripts/v2_http_client.py",
+      "line": 21,
+      "function": "V2Client.request",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    },
+    {
+      "file": "scripts/v2_http_client.py",
+      "line": 36,
+      "function": "V2Client.calculate",
+      "missing_sections": [
+        "Args",
+        "Returns"
+      ]
+    }
+  ],
+  "long_production_lines": [
+    {
+      "file": "measure_api/v2/families/calibrations.py",
+      "line": 16,
+      "length": 102
+    },
+    {
+      "file": "measure_api/v2/families/measurement_batches.py",
+      "line": 144,
+      "length": 101
+    }
+  ],
+  "long_new_test_lines": [
+    {
+      "file": "tests/v2/test_alignment_service.py",
+      "line": 107,
+      "length": 105
+    },
+    {
+      "file": "tests/v2/test_alignment_service.py",
+      "line": 183,
+      "length": 101
+    },
+    {
+      "file": "tests/v2/test_alignment_service.py",
+      "line": 185,
+      "length": 101
+    },
+    {
+      "file": "tests/v2/test_template_service.py",
+      "line": 132,
+      "length": 108
+    },
+    {
+      "file": "tests/v2/test_template_service.py",
+      "line": 134,
+      "length": 107
+    },
+    {
+      "file": "tests/v2/test_template_service.py",
+      "line": 170,
+      "length": 111
+    },
+    {
+      "file": "tests/v2/test_template_service.py",
+      "line": 189,
+      "length": 108
+    }
+  ]
+}
