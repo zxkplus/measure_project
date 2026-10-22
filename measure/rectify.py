@@ -83,9 +83,17 @@ def crop_and_straighten(
 
     Returns:
         straightened: Upright image of shape (size[0], size[1], ...).
-        M_inv: 3x3 inverse affine transform matrix that maps a point in the
-               straightened image back to the original image coordinates.
-               Use with map_point_to_original().
+        M_inv: 3x3 matrix that maps **patch coordinates to image coordinates**
+               (the inverse of the ``warpAffine`` matrix above).  Two mappings in
+               this module read the same matrix differently, so be explicit:
+
+               * ``map_point_via_affine(patch_point, M_inv[:2, :])`` — matches
+                 this return value; it inverts internally.
+               * ``cv2.warpAffine`` / ``AlignResult.M_inv`` callers that want
+                 image -> patch must invert first.
+
+               Verified against a taught box: patch centre maps to the box
+               centre.
     """
     cy, cx = center
     h, w = size
