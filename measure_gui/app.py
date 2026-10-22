@@ -56,6 +56,12 @@ class MeasureApp:
         self._inspection_image: Optional[np.ndarray] = None
         self._current_project_path: Optional[str] = None
         self._current_project_dir: Optional[str] = None
+        # True while a project is being restored.  Restoring repaints the ROI and
+        # locks it, which fires the *interactive* "user just confirmed the ROI"
+        # callback; that callback rebuilds the template from the combobox state and
+        # would replace the strategy we just loaded (a fixed_roi/none model came
+        # back as single_box).  The flag suppresses only that re-teach.
+        self._restoring_project = False
 
         # File path tracking
         self._reference_image_path: Optional[str] = None
@@ -319,8 +325,8 @@ class MeasureApp:
 
     def _save_project(self):
         """Save the current project. Uses current project dir or prompts for one."""
-        if self._workflow is None or self._workflow._alignment.template_point is None:
-            messagebox.showwarning("提示", "请先创建模板")
+        if self._workflow is None or not self._workflow.is_taught:
+            messagebox.showwarning("提示", "请先创建/加载模型")
             return
 
         # Determine project directory
@@ -349,8 +355,8 @@ class MeasureApp:
 
     def _save_project_as(self):
         """Save project to a new directory (always prompts)."""
-        if self._workflow is None or self._workflow._alignment.template_point is None:
-            messagebox.showwarning("提示", "请先创建模板")
+        if self._workflow is None or not self._workflow.is_taught:
+            messagebox.showwarning("提示", "请先创建/加载模型")
             return
 
         project_dir = filedialog.askdirectory(
@@ -537,8 +543,10 @@ class MeasureApp:
 
     def _execute(self):
         """Execute multi-target measurement on the inspection image."""
-        if self._workflow is None or self._workflow._alignment.template_point is None:
-            messagebox.showwarning("提示", "请先创建/加载模板")
+        # is_taught, not "has a template": search-free models (none/fixed_roi)
+        # are executable by design and were previously refused here.
+        if self._workflow is None or not self._workflow.is_taught:
+            messagebox.showwarning("提示", "请先创建/加载模型")
             return
 
         if self._inspection_image is None:
@@ -826,7 +834,15 @@ class MeasureApp:
             self.template_view.load_template(patch)
 
     def _on_roi_confirmed(self, center_row, center_col, height, width, angle_deg):
-        """Called when the user confirms the ROI (double-click)."""
+        """Called when the user confirms the ROI (double-click).
+
+        Also fires while a project is being restored, because restoring locks the
+        repaint-ROI.  In that case the workflow already holds the loaded model —
+        rebuilding it here would discard the stored alignment strategy and any
+        search-free mode, so the event is consumed as a no-op.
+        """
+        if self._restoring_project:
+            return
         if self.tool_panel.get_alignment_mode() == "multi_point":
             # Switch to control-point mode; user places points, then
             # double-clicking again calls _on_control_points_confirmed
