@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional
 import cv2
 import numpy as np
 
-from measure.alignment import MultiPointAlignment, SingleBoxAlignment
+from measure.alignment import MultiPointAlignment, ObbAlignment, SingleBoxAlignment
 from .calibration_dialog import CalibrationDialog
 from .image_canvas import CanvasMode, ImageCanvas
 from measure.multi_target_workflow import MultiTargetWorkflow, TargetResult
@@ -181,6 +181,8 @@ class MeasureApp:
         self.tool_panel.on_tool_delete = self._on_tool_delete
         self.tool_panel.on_export_csv = self._on_export_csv
         self.tool_panel.on_alignment_mode_changed = self._on_alignment_mode_changed
+        self.tool_panel.on_browse_obb_model = self._browse_obb_model
+        self.tool_panel.on_obb_settings_changed = self._on_obb_settings_changed
         self.tool_panel.on_tool_visibility_changed = self._on_tool_visibility_changed
         self.tool_panel.on_debug_save_changed = self._on_debug_save_changed
 
@@ -875,16 +877,248 @@ class MeasureApp:
         )
 
     def _on_alignment_mode_changed(self, mode_str: str):
-        """Handle alignment mode change from the tool panel."""
-        if mode_str == "多点仿射":
-            # When multi-point is selected, confirm ROI first then move
-            # to control-point placement
-            pass
-        else:
-            # Single box: restore normal DRAW_ROI mode if needed
-            if self._ref_canvas.get_mode() == CanvasMode.DRAW_CONTROL_POINTS:
-                self._ref_canvas.set_mode(CanvasMode.DRAW_ROI)
+        """React to a new alignment mode: canvas mode, hints, and gating.
+
+        ``mode_str`` is the combobox *label* (display text).  Compare against the
+        mode key instead, or relabelling an option silently stops the match — the
+        original version of this method looked for the literal "多点仿射".
+
+        Note there must be exactly one definition of this method: an earlier
+        duplicate further down the class silently overrode this one, so the form
+        swap and the execution gate never ran.
+        """
+        mode = self.tool_panel.get_alignment_mode()
+
+        if mode == "obb":
+            # A detector finds its own boxes, so ROI drawing is not just
+            # unnecessary but misleading: the user would draw a box that nothing
+            # ever reads.
+            if self._ref_canvas.get_mode() in (CanvasMode.DRAW_ROI,
+                                               CanvasMode.DRAW_CONTROL_POINTS):
                 self._ref_canvas.clear_control_points()
+            # Always end in BROWSE, regardless of the previous mode: a detector
+            # reads no ROI, so leaving the canvas armed for drawing invites the
+            # user to draw a box that nothing will ever consult.
+            self._ref_canvas.set_mode(CanvasMode.BROWSE)
+            self._sync_detector_state()
+            return
+
+        # Template modes need the ROI drawing mode back.
+        if mode == "multi_point":
+            self._ref_canvas.set_mode(CanvasMode.DRAW_CONTROL_POINTS)
+            self._status_text.set("对齐模式: 多点仿射 — 点击放置 ≥3 个控制点")
+        else:
+            if self._ref_canvas.get_mode() == CanvasMode.DRAW_CONTROL_POINTS:
+                self._ref_canvas.clear_control_points()
+            self._ref_canvas.set_mode(CanvasMode.DRAW_ROI)
+            self._status_text.set("对齐模式: 旋转框 — 画旋转矩形")
+
+    # ------------------------------------------------------------------
+    # Detector-backed (OBB) localisation
+    # ------------------------------------------------------------------
+
+    def _browse_obb_model(self):
+        """Pick a detector weight file."""
+        filepath = filedialog.askopenfilename(
+            title="选择 OBB 模型文件",
+            filetypes=[("模型权重", "*.pt *.torchscript"), ("所有文件", "*.*")],
+        )
+        if not filepath:
+            return
+        self.tool_panel.set_obb_model(filepath)
+        self.tool_panel.set_obb_status("已选择模型，点击「载入模型并自检」", None)
+
+    def _load_obb_source(self):
+        """Instantiate the detector adapter, or explain why it is unavailable.
+
+        Imported lazily: ultralytics and torch are heavy and may be absent.  A
+        missing dependency must produce an actionable message, not a traceback
+        from inside a GUI event handler.
+        """
+        try:
+            from measure_obb.ultralytics_source import UltralyticsObbSource
+        except ImportError as exc:
+            messagebox.showerror(
+                "缺少依赖",
+                "OBB 定位需要 ultralytics，当前环境未安装。\n\n"
+                "请在运行本程序的环境中安装：\n    pip install ultralytics\n\n"
+                f"（详细信息：{exc}）",
+            )
+            return None
+
+        settings = self.tool_panel.get_obb_settings()
+        path = settings["model_path"]
+        if not path:
+            messagebox.showwarning("提示", "请先选择 OBB 模型文件")
+            return None
+        try:
+            return UltralyticsObbSource(
+                path, conf=settings["conf"], imgsz=settings["imgsz"])
+        except FileNotFoundError as exc:
+            messagebox.showerror("模型不存在", str(exc))
+        except Exception as exc:  # noqa: BLE001 - surface any loader failure
+            messagebox.showerror("模型载入失败",
+                                 f"{type(exc).__name__}: {exc}")
+        return None
+
+    def _load_obb_model(self):
+        """Attach a detector, self-check it on the reference image, then teach.
+
+        The self-check is the point: it runs the detector on the reference image
+        and refuses to build a model that finds nothing, because such a model
+        would report zero targets on every future inspection with no indication
+        that the cause was setup rather than the part being absent.
+        """
+        source = self._load_obb_source()
+        if source is None:
+            return
+
+        self.tool_panel.set_obb_model(source.model_path, source.model_sha256)
+
+        try:
+            observations = source.detect(self._reference_image)
+        except Exception as exc:  # noqa: BLE001 - inference failures vary by backend
+            self.tool_panel.set_obb_status(f"自检失败：{exc}", False)
+            messagebox.showerror("自检失败", f"在参考图上推理时出错：\n{exc}")
+            return
+
+        # Populated after the self-check so the dropdown can flag classes the
+        # reference image does not contain: offering them without comment leads a
+        # user to pick a class that can never match and wonder why nothing is found.
+        self.tool_panel.set_obb_class_names(
+            source.class_names, present={o.class_id for o in observations})
+
+        if not observations:
+            self.tool_panel.set_obb_status("自检未检出任何目标", False)
+            messagebox.showwarning(
+                "自检未检出目标",
+                "该模型在参考图上没有检出任何目标，无法建立定位基准。\n\n"
+                "请确认参考图与模型适用的场景一致，或降低置信度阈值后重试。",
+            )
+            return
+
+        # Default the anchor to the class of the highest-scoring detection: it is
+        # the most likely thing the user means, and it is what the displayed
+        # preview shows.  The user can change it afterwards.
+        best = observations[0]
+        summary = self._summarise_detections(observations)
+        if self.tool_panel.get_anchor_class_id() is None:
+            self.tool_panel.set_anchor_class_id(best.class_id)
+        anchor = self.tool_panel.get_anchor_class_id()
+
+        anchor_count = sum(1 for o in observations if o.class_id == anchor)
+        self.tool_panel.set_obb_status(
+            f"自检通过：检出 {len(observations)} 个目标（{summary}）；"
+            f"锚点类 {anchor} 有 {anchor_count} 个",
+            True,
+        )
+
+        strategy = ObbAlignment()
+        self._workflow = MultiTargetWorkflow()
+        self._workflow._alignment = strategy
+        try:
+            strategy.teach(
+                self._reference_image,
+                source=source,
+                anchor_class_id=anchor,
+                min_score=self.tool_panel.get_obb_settings()["conf"],
+            )
+        except ValueError as exc:
+            self.tool_panel.set_obb_status(f"建模失败：{exc}", False)
+            messagebox.showerror("建模失败", str(exc))
+            return
+
+        # Show the chosen anchor box and let the user change the pick.
+        self._obb_observations = observations
+        self._show_obb_preview(best)
+        self.tool_panel.set_template_created(True)
+        self.tool_panel.set_detector_ready(True)
+        self._status_text.set(
+            f"OBB 模型已载入：锚点类 {anchor}，检出 {len(observations)} 个目标")
+
+    @staticmethod
+    def _summarise_detections(observations) -> str:
+        """Count detections per class name, most frequent first."""
+        counts: Dict[str, int] = {}
+        for obs in observations:
+            name = obs.class_name or str(obs.class_id)
+            counts[name] = counts.get(name, 0) + 1
+        ordered = sorted(counts.items(), key=lambda kv: -kv[1])
+        return ", ".join(f"{name}×{count}" for name, count in ordered[:4])
+
+    def _show_obb_preview(self, observation) -> None:
+        """Draw the selected anchor box so the user can confirm or change it.
+
+        Runs with ``_restoring_project`` set for the same reason project loading
+        does: ``confirm_roi()`` fires the *interactive* "user confirmed the ROI"
+        callback, which for a detector mode is refused by the template guard and
+        pops a warning about template search.  Nothing is being taught here — the
+        box is only being shown — so the callback must not run.
+        """
+        if observation is None or observation.corners is None:
+            return
+        self._restoring_project = True
+        try:
+            self._ref_canvas.clear_control_points()
+            self._ref_canvas.set_roi(
+                observation.center, observation.size, observation.angle_deg)
+            self._ref_canvas.confirm_roi()
+        finally:
+            self._restoring_project = False
+        self._status_text.set(
+            f"锚点框：中心 ({observation.row:.0f}, {observation.col:.0f})，"
+            f"角度 {observation.angle_deg:.1f}°，分数 "
+            f"{'n/a' if observation.score is None else f'{observation.score:.3f}'}")
+
+    def _on_obb_settings_changed(self):
+        """React to an anchor-class change by re-teaching against that class."""
+        if self.tool_panel.get_alignment_mode() != "obb":
+            return
+        observations = getattr(self, "_obb_observations", None)
+        if not observations:
+            return
+        anchor = self.tool_panel.get_anchor_class_id()
+        matching = [o for o in observations if o.class_id == anchor]
+        if not matching:
+            self.tool_panel.set_obb_status(
+                f"锚点类 {anchor} 在参考图上没有检出", False)
+            return
+        best = matching[0]
+        strategy = self._workflow._alignment
+        try:
+            strategy.teach(
+                self._reference_image,
+                source=strategy.source,
+                anchor_class_id=anchor,
+                min_score=self.tool_panel.get_obb_settings()["conf"],
+            )
+        except ValueError as exc:
+            self.tool_panel.set_obb_status(f"建模失败：{exc}", False)
+            return
+        self._show_obb_preview(best)
+        self.tool_panel.set_obb_status(
+            f"锚点类 {anchor}：{len(matching)} 个检出，已选中分数最高的一个", True)
+
+    def _sync_detector_state(self) -> None:
+        """Reflect whether a detector is attached, for the current mode.
+
+        Called when the mode changes: an OBB project that has just been loaded has
+        geometry but no detector (it is never persisted), so execution must stay
+        blocked until one is chosen rather than silently returning no targets.
+        """
+        if self.tool_panel.get_alignment_mode() != "obb":
+            self.tool_panel.set_detector_ready(True)
+            return
+        strategy = self._workflow._alignment if self._workflow else None
+        attached = getattr(strategy, "source", None) is not None
+        self.tool_panel.set_detector_ready(attached)
+        # Report the unattached case even with no workflow at all: switching to OBB
+        # before loading anything is exactly when the user needs to be told what
+        # the next step is, and it is when an enabled Execute would be most
+        # misleading (it would report zero targets as though the part were absent).
+        if not attached:
+            self.tool_panel.set_obb_status(
+                "模型未载入：请选择模型文件并点击「载入模型并自检」", False)
 
     def _parse_pyramid_decimate(self) -> int:
         """Parse the pyramid decimation level from the tool panel combobox."""
@@ -902,9 +1136,19 @@ class MeasureApp:
     # ------------------------------------------------------------------
 
     def _create_template(self):
-        """Create template from current ROI."""
+        """Teach the current alignment strategy.
+
+        Dispatches on the alignment mode: a detector needs a model and no ROI,
+        while template modes need the ROI the user drew.  Keeping both behind one
+        button matches how the user thinks about it ("set up the locator"), and the
+        button's label changes with the mode to say which it will do.
+        """
         if self._reference_image is None:
             messagebox.showwarning("提示", "请先加载参考图")
+            return
+
+        if self.tool_panel.get_alignment_mode() == "obb":
+            self._load_obb_model()
             return
 
         roi = self._ref_canvas.roi_center
@@ -1198,15 +1442,6 @@ class MeasureApp:
     def _on_overlap_changed(self, value: float):
         if self._workflow:
             self._workflow.overlap = value
-
-    def _on_alignment_mode_changed(self, mode_name: str):
-        """Switch between single-box and multi-point alignment modes."""
-        if mode_name == "多点仿射":
-            self._ref_canvas.set_mode(CanvasMode.DRAW_CONTROL_POINTS)
-            self._status_text.set("对齐模式: 多点仿射 — 点击放置 ≥3 个控制点")
-        else:
-            self._ref_canvas.set_mode(CanvasMode.DRAW_ROI)
-            self._status_text.set("对齐模式: 旋转框 — 画旋转矩形")
 
     def _on_control_points_confirmed(self, points: list):
         """Handle multi-point control point confirmation (double-click)."""

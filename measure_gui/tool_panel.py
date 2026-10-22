@@ -54,12 +54,14 @@ class ToolPanel(ttk.Frame):
     _ALIGNMENT_LABELS = {
         "旋转框": "single_box",
         "多点仿射": "multi_point",
+        "OBB 模型": "obb",
         "固定区域": "fixed_roi",
         "仅定位": "none",
     }
-    # Modes the user may select from the combobox.  The rest are display-only
-    # until their teaching flow exists (see the class docstring).
-    _SELECTABLE_ALIGNMENT_LABELS = ("旋转框", "多点仿射")
+    # Modes the user may select from the combobox.  fixed_roi/none remain
+    # display-only: they can arrive from a loaded asset, but no teaching flow
+    # exists for them yet.
+    _SELECTABLE_ALIGNMENT_LABELS = ("旋转框", "多点仿射", "OBB 模型")
     _KEY_TO_LABEL = {key: lab for lab, key in _ALIGNMENT_LABELS.items()}
     #: Public alias so other GUI modules can render a mode's display name without
     #: duplicating the table (an internal key shown to a user is a bug).
@@ -84,6 +86,8 @@ class ToolPanel(ttk.Frame):
         self.on_tool_edit: Optional[Callable] = None
         self.on_tool_delete: Optional[Callable] = None
         self.on_alignment_mode_changed: Optional[Callable] = None
+        self.on_browse_obb_model: Optional[Callable] = None
+        self.on_obb_settings_changed: Optional[Callable] = None
         self.on_export_csv: Optional[Callable] = None
         self.on_debug_save_changed: Optional[Callable[[bool], None]] = None
         self.on_tool_visibility_changed: Optional[Callable] = None  # (label, visible) -> None
@@ -155,21 +159,29 @@ class ToolPanel(ttk.Frame):
         # at any time (including from a load path that runs before mainloop).
         self._alignment_combo: Optional[ttk.Combobox] = None
         self._using_external_alignment_mode = False
+        #: Class index -> label, filled once a detector is loaded.
+        self._obb_class_names: Dict[int, str] = {}
+        #: True once a detector is attached; gates execution in obb mode.
+        self._detector_ready = False
         self._alignment_combo = ttk.Combobox(
             tmpl_frame, textvariable=self._alignment_var,
             values=self._selectable_alignment_labels(),
             state="readonly", width=18,
         )
         self._alignment_combo.pack(fill=tk.X, **pad)
-        self._alignment_combo.bind("<<ComboboxSelected>>",
-                           lambda e: self._fire(self.on_alignment_mode_changed,
-                                               self._alignment_var.get()))
+        self._alignment_combo.bind(
+            "<<ComboboxSelected>>", lambda e: self._on_alignment_selected())
 
+        # Template-only widgets live in their own frame so switching to a
+        # detector-backed mode can hide them as a group.  Tracking a dozen
+        # widgets by hand would rot the moment one is added.
+        self._template_form = ttk.Frame(tmpl_frame)
+        self._template_form.pack(fill=tk.X)
         # Preprocessor
-        ttk.Label(tmpl_frame, text="预处理").pack(anchor=tk.W, **pad)
+        ttk.Label(self._template_form, text="预处理").pack(anchor=tk.W, **pad)
         self._preproc_var = tk.StringVar(value="raw")
         preproc_combo = ttk.Combobox(
-            tmpl_frame, textvariable=self._preproc_var,
+            self._template_form, textvariable=self._preproc_var,
             values=["raw", "canny", "sobel", "clahe", "threshold"],
             state="readonly", width=18,
         )
@@ -179,23 +191,23 @@ class ToolPanel(ttk.Frame):
                                               self._preproc_var.get()))
 
         # Match score threshold
-        ttk.Label(tmpl_frame, text="匹配分数阈值").pack(anchor=tk.W, **pad)
+        ttk.Label(self._template_form, text="匹配分数阈值").pack(anchor=tk.W, **pad)
         self._score_var = tk.DoubleVar(value=0.5)
         score_scale = ttk.Scale(
-            tmpl_frame, from_=0.1, to=1.0, variable=self._score_var,
+            self._template_form, from_=0.1, to=1.0, variable=self._score_var,
             orient=tk.HORIZONTAL,
             command=lambda v: self._fire(self.on_score_threshold_changed,
                                         float(v)),
         )
         score_scale.pack(fill=tk.X, **pad)
-        score_label = ttk.Label(tmpl_frame, textvariable=self._score_var)
+        score_label = ttk.Label(self._template_form, textvariable=self._score_var)
         score_label.pack(anchor=tk.E, **pad)
 
         # Angle range
-        ttk.Label(tmpl_frame, text="角度搜索范围").pack(anchor=tk.W, **pad)
+        ttk.Label(self._template_form, text="角度搜索范围").pack(anchor=tk.W, **pad)
         self._angle_var = tk.StringVar(value="±30°")
         angle_combo = ttk.Combobox(
-            tmpl_frame, textvariable=self._angle_var,
+            self._template_form, textvariable=self._angle_var,
             values=["±15°", "±30°", "±45°", "±60°", "±90°", "±180°"],
             state="readonly", width=18,
         )
@@ -205,10 +217,10 @@ class ToolPanel(ttk.Frame):
                                             self._angle_var.get()))
 
         # Angle step
-        ttk.Label(tmpl_frame, text="角度搜索步长").pack(anchor=tk.W, **pad)
+        ttk.Label(self._template_form, text="角度搜索步长").pack(anchor=tk.W, **pad)
         self._angle_step_var = tk.DoubleVar(value=1.0)
         angle_step_combo = ttk.Combobox(
-            tmpl_frame, textvariable=self._angle_step_var,
+            self._template_form, textvariable=self._angle_step_var,
             values=[0.5, 1.0, 2.0, 5.0],
             state="readonly", width=18,
         )
@@ -216,10 +228,10 @@ class ToolPanel(ttk.Frame):
 
 
         # Max matches
-        ttk.Label(tmpl_frame, text="最大匹配数 (0=无限)").pack(anchor=tk.W, **pad)
+        ttk.Label(self._template_form, text="最大匹配数 (0=无限)").pack(anchor=tk.W, **pad)
         self._max_matches_var = tk.IntVar(value=0)
         max_spin = ttk.Spinbox(
-            tmpl_frame, textvariable=self._max_matches_var,
+            self._template_form, textvariable=self._max_matches_var,
             from_=0, to=100, increment=1, width=5,
         )
         max_spin.pack(anchor=tk.W, **pad)
@@ -228,16 +240,16 @@ class ToolPanel(ttk.Frame):
                                          self._max_matches_var.get()))
 
         # Overlap (NMS)
-        ttk.Label(tmpl_frame, text="最大重叠比例 (NMS)").pack(anchor=tk.W, **pad)
+        ttk.Label(self._template_form, text="最大重叠比例 (NMS)").pack(anchor=tk.W, **pad)
         self._overlap_var = tk.DoubleVar(value=0.3)
         overlap_scale = ttk.Scale(
-            tmpl_frame, from_=0.0, to=1.0, variable=self._overlap_var,
+            self._template_form, from_=0.0, to=1.0, variable=self._overlap_var,
             orient=tk.HORIZONTAL,
             command=lambda v: self._fire(self.on_overlap_changed,
                                         float(v)),
         )
         overlap_scale.pack(fill=tk.X, **pad)
-        self._overlap_label = ttk.Label(tmpl_frame, text="30%")
+        self._overlap_label = ttk.Label(self._template_form, text="30%")
         self._overlap_label.pack(anchor=tk.E, **pad)
         # Update label as slider moves
         def _update_overlap_label(*args):
@@ -246,10 +258,10 @@ class ToolPanel(ttk.Frame):
         self._overlap_var.trace_add("write", _update_overlap_label)
 
         # Pyramid downsampling
-        ttk.Label(tmpl_frame, text="金字塔降采样").pack(anchor=tk.W, **pad)
+        ttk.Label(self._template_form, text="金字塔降采样").pack(anchor=tk.W, **pad)
         self._pyramid_var = tk.StringVar(value="4x (推荐)")
         pyramid_combo = ttk.Combobox(
-            tmpl_frame, textvariable=self._pyramid_var,
+            self._template_form, textvariable=self._pyramid_var,
             values=["禁用", "2x", "4x (推荐)", "8x"],
             state="readonly", width=18,
         )
@@ -266,6 +278,58 @@ class ToolPanel(ttk.Frame):
             command=lambda: self._fire(self.on_create_template),
         )
         self._create_btn.pack(fill=tk.X, pady=5)
+
+        # --- Detector-backed (OBB) settings ---
+        #
+        # Shown instead of the template widgets above when the alignment mode is
+        # "obb".  A detector needs no ROI and none of the six search parameters —
+        # those would silently do nothing, so they are hidden rather than disabled.
+        self._obb_form = ttk.Frame(tmpl_frame)
+
+        ttk.Label(self._obb_form, text="模型文件").pack(anchor=tk.W, **pad)
+        model_row = ttk.Frame(self._obb_form)
+        model_row.pack(fill=tk.X, **pad)
+        self._obb_model_var = tk.StringVar(value="")
+        ttk.Entry(model_row, textvariable=self._obb_model_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(model_row, text="浏览", width=6,
+                   command=lambda: self._fire(self.on_browse_obb_model)).pack(
+            side=tk.LEFT, padx=(4, 0))
+
+        ttk.Label(self._obb_form, text="锚点类别").pack(anchor=tk.W, **pad)
+        self._obb_class_var = tk.StringVar(value="")
+        self._obb_class_combo = ttk.Combobox(
+            self._obb_form, textvariable=self._obb_class_var,
+            values=[], state="readonly", width=18,
+        )
+        self._obb_class_combo.pack(fill=tk.X, **pad)
+        self._obb_class_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda e: self._fire(self.on_obb_settings_changed))
+
+        ttk.Label(self._obb_form, text="置信度阈值").pack(anchor=tk.W, **pad)
+        self._obb_conf_var = tk.DoubleVar(value=0.5)
+        ttk.Scale(self._obb_form, from_=0.0, to=1.0, variable=self._obb_conf_var,
+                  orient=tk.HORIZONTAL).pack(fill=tk.X, **pad)
+        self._obb_conf_label = ttk.Label(self._obb_form, text="0.50")
+        self._obb_conf_label.pack(anchor=tk.W)
+
+        ttk.Label(self._obb_form, text="推理尺寸").pack(anchor=tk.W, **pad)
+        self._obb_imgsz_var = tk.StringVar(value="1024")
+        ttk.Combobox(self._obb_form, textvariable=self._obb_imgsz_var,
+                     values=["640", "1024", "1280", "1536"],
+                     state="readonly", width=18).pack(fill=tk.X, **pad)
+
+        # Model identity, so a swapped or retrained weight is visible rather than
+        # silently producing different boxes.
+        self._obb_digest_label = ttk.Label(
+            self._obb_form, text="权重指纹: (未载入)", foreground="gray")
+        self._obb_digest_label.pack(anchor=tk.W, **pad)
+
+        self._obb_status_label = ttk.Label(
+            self._obb_form, text="", foreground="gray", wraplength=200,
+            justify=tk.LEFT)
+        self._obb_status_label.pack(anchor=tk.W, **pad)
 
         # --- Measurement tool list ---
         tool_frame = ttk.LabelFrame(f, text="测量工具", padding=5)
@@ -362,9 +426,17 @@ class ToolPanel(ttk.Frame):
         self._template_created = created
         if created:
             self._roi_label.config(foreground="lime")
-            self._exec_btn.config(state=tk.NORMAL)
-        else:
-            self._exec_btn.config(state=tk.DISABLED)
+        # Execution needs BOTH a taught model and, in detector modes, an attached
+        # detector.  A detector is not persisted with the asset, so a reloaded OBB
+        # project is taught yet unrunnable; enabling here would override that and
+        # report zero targets instead of "no model attached".
+        self._refresh_exec_state()
+
+    def _refresh_exec_state(self) -> None:
+        """Single decision point for whether Execute is available."""
+        ready = self._template_created and (
+            self._detector_ready or self.get_alignment_mode() != "obb")
+        self._exec_btn.config(state=tk.NORMAL if ready else tk.DISABLED)
 
     def add_tool_to_list(self, label: str, obj_type: str):
         """Add a measurement tool to the list display (visible by default)."""
@@ -493,6 +565,116 @@ class ToolPanel(ttk.Frame):
         widens the list.
         """
         self._alignment_var.set(self._KEY_TO_LABEL.get(mode, mode))
+
+    def set_alignment_form(self, mode: Optional[str] = None) -> None:
+        """Show the settings that belong to ``mode``.
+
+        The widget set is a function of the alignment mode, so the swap happens in
+        one place instead of at every call site that changes the mode.  Detector
+        modes hide the template widgets rather than disabling them: six search
+        parameters that silently do nothing are worse than six that are absent.
+        """
+        if mode is None:
+            mode = self.get_alignment_mode()
+        is_detector = mode == "obb"
+
+        if is_detector:
+            self._template_form.pack_forget()
+            self._obb_form.pack(fill=tk.X)
+        else:
+            self._obb_form.pack_forget()
+            self._template_form.pack(fill=tk.X)
+
+        # The button means different things per mode, so its label must follow.
+        self._create_btn.config(
+            text="▶ 载入模型并自检" if is_detector else "▶ 创建/更新模板")
+        # A detector needs no ROI; saying otherwise would invite a pointless step.
+        self._roi_label.pack_forget() if is_detector else self._roi_label.pack(
+            anchor=tk.W, padx=4, pady=2)
+
+    # -- detector settings ----------------------------------------------------
+
+    def get_obb_settings(self) -> Dict[str, Any]:
+        """Current detector settings, as passed to the adapter."""
+        return {
+            "model_path": self._obb_model_var.get().strip(),
+            "conf": float(self._obb_conf_var.get()),
+            "imgsz": int(self._obb_imgsz_var.get()),
+        }
+
+    def set_obb_class_names(self, names: Dict[int, str],
+                            present: Optional[set] = None) -> None:
+        """Populate the anchor-class choices from a loaded model.
+
+        Index and label are both shown because selection is by index; a user
+        matching a label alone would pick the wrong class when two share a name.
+
+        Args:
+            names: Class index to label, from the model.
+            present: Class indices actually detected on the reference image.
+                Those absent are still listed (the model knows them and another
+                reference image may contain them) but annotated, so choosing one
+                is an informed decision rather than a silent dead end.
+        """
+        self._obb_class_names = dict(names)
+        entries = []
+        for idx, label in sorted(names.items()):
+            suffix = "" if present is None or idx in present else "  (参考图未检出)"
+            entries.append(f"{idx}: {label}{suffix}")
+        self._obb_class_combo.configure(values=entries)
+        if self._obb_class_var.get() not in entries:
+            self._obb_class_var.set("")
+
+    def get_anchor_class_label(self) -> str:
+        """The combobox text without its annotation, for messages."""
+        return self._obb_class_var.get().split("  (")[0]
+
+    def get_anchor_class_id(self) -> Optional[int]:
+        """Selected anchor class index, or None when nothing is chosen."""
+        text = self.get_anchor_class_label()
+        if not text or ":" not in text:
+            return None
+        try:
+            return int(text.split(":", 1)[0])
+        except ValueError:
+            return None
+
+    def set_anchor_class_id(self, class_id: Optional[int]) -> None:
+        """Select an anchor class by index."""
+        if class_id is None:
+            self._obb_class_var.set("")
+            return
+        label = getattr(self, "_obb_class_names", {}).get(class_id)
+        self._obb_class_var.set(
+            f"{class_id}: {label}" if label is not None else str(class_id))
+
+    def set_obb_model(self, model_path: str, digest: Optional[str] = None) -> None:
+        """Record the loaded model path and display a short digest."""
+        self._obb_model_var.set(model_path)
+        self._obb_digest_label.config(
+            text=(f"权重指纹: {digest[:12]}…" if digest else "权重指纹: (未载入)"),
+            foreground="gray")
+
+    def set_obb_status(self, text: str, ok: Optional[bool] = None) -> None:
+        """Show the model self-check result (detections found, or why not)."""
+        colour = {True: "green", False: "red", None: "gray"}[ok]
+        self._obb_status_label.config(text=text, foreground=colour)
+
+    def set_detector_ready(self, ready: bool) -> None:
+        """Gate execution on a detector actually being loaded.
+
+        A detector is not persisted with the model asset, so a reloaded OBB
+        project starts with no detector.  Leaving Execute enabled would return
+        zero targets and read as "no part on this image" rather than "no model
+        attached" — a costly misdiagnosis on a production line.
+        """
+        self._detector_ready = ready
+        self._refresh_exec_state()
+
+    def _on_alignment_selected(self) -> None:
+        """React to a user picking a mode: swap the form, then notify."""
+        self.set_alignment_form()
+        self._fire(self.on_alignment_mode_changed, self._alignment_var.get())
 
     @classmethod
     def _selectable_alignment_labels(cls) -> Tuple[str, ...]:
