@@ -31,7 +31,12 @@ from typing import Any, Dict, List, Optional
 import cv2
 import numpy as np
 
-from measure.alignment import MultiPointAlignment, ObbAlignment, SingleBoxAlignment
+from measure.alignment import (
+    MultiPointAlignment,
+    ObbAlignment,
+    SingleBoxAlignment,
+    _crop_angle,
+)
 from .calibration_dialog import CalibrationDialog
 from .image_canvas import CanvasMode, ImageCanvas
 from measure.multi_target_workflow import MultiTargetWorkflow, TargetResult
@@ -825,13 +830,19 @@ class MeasureApp:
             (center_row, center_col), (height, width), angle_deg,
         )
 
-        # Live preview: update template view
+        # Live preview: update template view.
+        #
+        # Must use the same angle convention as the engine, hence _crop_angle():
+        # crop_and_straighten rotates opposite to the box-angle convention, and
+        # previewing with the raw angle showed a tilted patch while the engine
+        # measured a straightened one — the discrepancy a user would report as
+        # "the crop is wrong".
         if self._reference_image is not None:
             patch, _ = crop_and_straighten(
                 self._reference_image,
                 (center_row, center_col),
                 (height, width),
-                angle_deg,
+                _crop_angle(angle_deg),
             )
             self.template_view.load_template(patch)
 
@@ -1024,6 +1035,7 @@ class MeasureApp:
         # Show the chosen anchor box and let the user change the pick.
         self._obb_observations = observations
         self._show_obb_preview(best)
+        self._refresh_obb_template_view(best)
         self.tool_panel.set_template_created(True)
         self.tool_panel.set_detector_ready(True)
         index = self.tool_panel.get_anchor_index()
@@ -1096,12 +1108,36 @@ class MeasureApp:
             return
 
         self._show_obb_preview(chosen)
+        # Refresh the template view too: the anchor box defines the patch frame the
+        # tools live in, so showing the previous box's patch after the frame moved
+        # would misrepresent where a tool actually measures.
+        self._refresh_obb_template_view(chosen)
         index = self.tool_panel.get_anchor_index()
         self.tool_panel.set_obb_status(
             f"锚点已换为 {chosen.class_name or chosen.class_id}_{index}："
             f"中心 ({chosen.row:.0f}, {chosen.col:.0f})，"
             f"角度 {chosen.angle_deg:.1f}°",
             True)
+
+    def _refresh_obb_template_view(self, observation) -> None:
+        """Show the anchor box's straightened patch in the template view.
+
+        Tools are defined in patch coordinates, so the template view must show the
+        frame those coordinates refer to.  Without this the view keeps whatever the
+        ROI preview last drew, which for a detector mode is a different box.
+        """
+        if observation is None or self._reference_image is None:
+            return
+        strategy = self._workflow._alignment if self._workflow else None
+        if strategy is None or getattr(strategy, "source", None) is None:
+            return
+        try:
+            patch = strategy.align(
+                self._reference_image, observation.row, observation.col, 0.0
+            ).patch
+        except Exception:  # noqa: BLE001 - preview must never break the load
+            return
+        self.template_view.load_template(patch)
 
     def _sync_detector_state(self) -> None:
         """Reflect whether a detector is attached, for the current mode.

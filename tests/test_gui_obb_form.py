@@ -541,6 +541,158 @@ class TestRealModelThroughGui:
         assert ObbAlignment._resolve_anchor(obs, None) is obs[0]
 
 
+    def test_template_view_matches_what_the_engine_measures(self, tmp_path, monkeypatch):
+        """The displayed patch must be the frame tools are defined in.
+
+        Regression guard for a real report: the template view showed a tilted crop
+        while the engine measured a straightened one, because the preview called
+        crop_and_straighten with the raw box angle while the engine negated it.  A
+        user reads that as "the crop is wrong", and it is — the two paths must agree.
+        """
+        import cv2
+        import tkinter.messagebox as mb
+        from measure_gui.app import MeasureApp
+        from measure_gui.project_manager import ProjectManager
+
+        monkeypatch.setattr(mb, "showwarning", lambda *a, **k: None)
+        monkeypatch.setattr(mb, "showerror", lambda *a, **k: None)
+        monkeypatch.setattr(mb, "showinfo", lambda *a, **k: None)
+        monkeypatch.setattr(ProjectManager, "RECENT_FILE",
+                            str(tmp_path / "recent.json"))
+
+        root = _tk.Tk()
+        root.withdraw()
+        app = MeasureApp(root)
+        try:
+            app._reference_image = cv2.imread(str(_SAMPLE), cv2.IMREAD_GRAYSCALE)
+            app._ref_canvas.load_image(app._reference_image)
+            app._workflow = None
+            app.tool_panel._alignment_var.set("OBB 模型")
+            app.tool_panel._on_alignment_selected()
+            app.tool_panel.set_obb_model(str(_WEIGHTS))
+            app.tool_panel._obb_conf_var.set(0.5)
+            app.tool_panel._obb_imgsz_var.set("1024")
+            app._load_obb_model()
+
+            strategy = app._workflow._alignment
+            anchor = strategy.anchor_observation
+            shown = app.template_view._template_image
+            engine_patch = strategy.align(
+                app._reference_image, anchor.row, anchor.col, 0.0).patch
+
+            assert shown.shape == engine_patch.shape, (
+                f"template view {shown.shape} != engine patch {engine_patch.shape}")
+            assert np.allclose(shown.astype(float), engine_patch.astype(float),
+                               atol=1.0), "template view shows a different patch"
+
+            # And the displayed patch must actually be straightened: the part's
+            # long axis should be near-horizontal, not tilted by the box angle.
+            bright = shown > shown.max() * 0.6
+            ys, xs = np.nonzero(bright)
+            assert len(ys) > 20
+            pts = np.stack([xs, ys], 1).astype(float)
+            pts -= pts.mean(0)
+            _, vectors = np.linalg.eigh(np.cov(pts.T))
+            major = vectors[:, np.argmax(_)]
+            residual = np.degrees(np.arctan2(major[1], major[0]))
+            if residual > 90:
+                residual -= 180
+            if residual < -90:
+                residual += 180
+            assert abs(residual) < 10.0, (
+                f"patch still tilted by {residual:.1f} degrees")
+        finally:
+            root.destroy()
+
+    def test_roi_preview_uses_the_engine_angle_convention(self, tmp_path, monkeypatch):
+        """The live preview must crop exactly as the engine will.
+
+        Tested by driving the preview handler directly rather than the whole load
+        flow: a rebuilt workflow elsewhere overwrites the template view, which
+        masked this regression when it was first guarded the indirect way.
+
+        The bug it pins: crop_and_straighten rotates opposite to the box-angle
+        convention, so previewing with the raw angle drew a tilted patch while the
+        engine measured a straightened one.
+        """
+        import cv2
+        import tkinter.messagebox as mb
+        from measure.alignment import _crop_angle
+        from measure.rectify import crop_and_straighten
+        from measure_gui.app import MeasureApp
+        from measure_gui.project_manager import ProjectManager
+
+        monkeypatch.setattr(mb, "showwarning", lambda *a, **k: None)
+        monkeypatch.setattr(mb, "showerror", lambda *a, **k: None)
+        monkeypatch.setattr(mb, "showinfo", lambda *a, **k: None)
+        monkeypatch.setattr(ProjectManager, "RECENT_FILE",
+                            str(tmp_path / "recent.json"))
+
+        root = _tk.Tk()
+        root.withdraw()
+        app = MeasureApp(root)
+        try:
+            image = cv2.imread(str(_SAMPLE), cv2.IMREAD_GRAYSCALE)
+            app._reference_image = image
+            app._ref_canvas.load_image(image)
+
+            geometry = (658.0, 1765.6, 34.0, 109.0, -22.55)
+            app._on_roi_changed(*geometry)
+            drawn = app.template_view._template_image
+
+            correct = crop_and_straighten(
+                image, geometry[:2], geometry[2:4], _crop_angle(geometry[4]))[0]
+            assert np.allclose(drawn.astype(float), correct.astype(float), atol=1.0), \
+                "preview patch differs from what the engine would crop"
+        finally:
+            root.destroy()
+
+    def test_anchor_switch_updates_the_template_view(self, tmp_path, monkeypatch):
+        """A moved patch frame must be reflected in the view."""
+        import cv2
+        import tkinter.messagebox as mb
+        from measure_gui.app import MeasureApp
+        from measure_gui.project_manager import ProjectManager
+
+        monkeypatch.setattr(mb, "showwarning", lambda *a, **k: None)
+        monkeypatch.setattr(mb, "showerror", lambda *a, **k: None)
+        monkeypatch.setattr(mb, "showinfo", lambda *a, **k: None)
+        monkeypatch.setattr(ProjectManager, "RECENT_FILE",
+                            str(tmp_path / "recent.json"))
+
+        root = _tk.Tk()
+        root.withdraw()
+        app = MeasureApp(root)
+        try:
+            app._reference_image = cv2.imread(str(_SAMPLE), cv2.IMREAD_GRAYSCALE)
+            app._ref_canvas.load_image(app._reference_image)
+            app._workflow = None
+            app.tool_panel._alignment_var.set("OBB 模型")
+            app.tool_panel._on_alignment_selected()
+            app.tool_panel.set_obb_model(str(_WEIGHTS))
+            app.tool_panel._obb_conf_var.set(0.5)
+            app.tool_panel._obb_imgsz_var.set("1024")
+            app._load_obb_model()
+
+            first_shape = app.template_view._template_image.shape
+            # Pick a box with a different extent so the patch must change size.
+            dets = app.tool_panel._obb_detections[:20]
+            target = max(dets, key=lambda o: abs(o.width - dets[0].width))
+            index = app.tool_panel._obb_detections.index(target)
+            app.tool_panel.set_anchor_index(index)
+            app._on_obb_settings_changed()
+
+            refreshed = app.template_view._template_image
+            anchor = app._workflow._alignment.anchor_observation
+            expected = app._workflow._alignment.align(
+                app._reference_image, anchor.row, anchor.col, 0.0).patch
+            assert refreshed.shape == expected.shape
+            assert np.allclose(refreshed.astype(float), expected.astype(float),
+                               atol=1.0)
+        finally:
+            root.destroy()
+
+
 class TestGuiModuleStaysImportableWithoutMl:
     def test_no_top_level_ml_imports_in_gui(self):
         """The GUI must import in an environment without torch/ultralytics.
