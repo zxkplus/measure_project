@@ -270,7 +270,10 @@ class ProjectManager:
                     alignment_mode = (ProjectManager._alignment_mode(model)
                                       or roi.get("alignment_mode")
                                       or "single_box")
-                    app.tool_panel.set_alignment_mode(alignment_mode)
+                    # A loaded asset may carry a mode with no teaching flow yet
+                    # (fixed_roi/none); display it truthfully instead of letting
+                    # the readonly combobox show an unrelated option.
+                    app.tool_panel.show_external_alignment_mode(alignment_mode)
         
                     # Restore control points if multi-point
                     if alignment_mode == "multi_point":

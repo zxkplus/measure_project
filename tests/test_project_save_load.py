@@ -105,9 +105,20 @@ class _RecordingToolPanel:
     def get_alignment_mode(self):
         return "multi_point" if self._alignment_var.get() == "多点仿射" else "single_box"
 
+    # Mirrors ToolPanel's label table so the stub cannot encode the old bug
+    # (coercing every unknown mode to 旋转框, which made the display disagree
+    # with the stored mode).
+    _LABELS = {"single_box": "旋转框", "multi_point": "多点仿射",
+               "fixed_roi": "固定区域", "none": "仅定位"}
+
     def set_alignment_mode(self, mode):
-        self._alignment_var.set("多点仿射" if mode == "multi_point" else "旋转框")
+        self._alignment_var.set(self._LABELS.get(mode, mode))
         self.calls.append(("set_alignment_mode", mode))
+
+    def show_external_alignment_mode(self, mode):
+        """Display a mode with no interactive teaching flow yet."""
+        self._alignment_var.set(self._LABELS.get(mode, mode))
+        self.calls.append(("show_external_alignment_mode", mode))
 
     def set_template_created(self, flag):
         self.calls.append(("set_template_created", bool(flag)))

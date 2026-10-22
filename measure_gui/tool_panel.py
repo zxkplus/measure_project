@@ -42,13 +42,28 @@ class ToolPanel(ttk.Frame):
     """
 
     # Combobox label <-> alignment mode key.  Single source of truth so the two
-    # directions can never drift apart, and so modes that exist in the engine but
-    # are not offered here (``none``, ``fixed_roi``) round-trip by identity
-    # instead of being silently rewritten to ``single_box``.
+    # directions cannot drift apart.  Every engine mode must appear here: a mode
+    # missing from this table used to be written into the combobox as its raw
+    # English key, which then failed to map back (``get_alignment_mode()``
+    # returned ``single_box`` while the display read ``fixed_roi``).
+    #
+    # ``none`` and ``fixed_roi`` are shown even though no widget change follows
+    # yet: they can already arrive from a loaded model or the API, and showing a
+    # wrong/blank mode is worse than showing a correct one that cannot be picked
+    # interactively.
     _ALIGNMENT_LABELS = {
         "旋转框": "single_box",
         "多点仿射": "multi_point",
+        "固定区域": "fixed_roi",
+        "仅定位": "none",
     }
+    # Modes the user may select from the combobox.  The rest are display-only
+    # until their teaching flow exists (see the class docstring).
+    _SELECTABLE_ALIGNMENT_LABELS = ("旋转框", "多点仿射")
+    _KEY_TO_LABEL = {key: lab for lab, key in _ALIGNMENT_LABELS.items()}
+    #: Public alias so other GUI modules can render a mode's display name without
+    #: duplicating the table (an internal key shown to a user is a bug).
+    ALIGNMENT_MODE_LABELS = _KEY_TO_LABEL
 
     def __init__(self, parent: tk.Widget, **kwargs):
         super().__init__(parent, **kwargs)
@@ -136,13 +151,17 @@ class ToolPanel(ttk.Frame):
         # Alignment mode
         ttk.Label(tmpl_frame, text="对齐方式").pack(anchor=tk.W, **pad)
         self._alignment_var = tk.StringVar(value="旋转框")
-        alignment_combo = ttk.Combobox(
+        # Declared before the widget exists so the mode helpers are safe to call
+        # at any time (including from a load path that runs before mainloop).
+        self._alignment_combo: Optional[ttk.Combobox] = None
+        self._using_external_alignment_mode = False
+        self._alignment_combo = ttk.Combobox(
             tmpl_frame, textvariable=self._alignment_var,
-            values=list(self._ALIGNMENT_LABELS),
+            values=self._selectable_alignment_labels(),
             state="readonly", width=18,
         )
-        alignment_combo.pack(fill=tk.X, **pad)
-        alignment_combo.bind("<<ComboboxSelected>>",
+        self._alignment_combo.pack(fill=tk.X, **pad)
+        self._alignment_combo.bind("<<ComboboxSelected>>",
                            lambda e: self._fire(self.on_alignment_mode_changed,
                                                self._alignment_var.get()))
 
@@ -464,14 +483,45 @@ class ToolPanel(ttk.Frame):
     def set_alignment_mode(self, mode: str):
         """Select an alignment mode by key, e.g. ``'multi_point'``.
 
-        Modes with no combobox entry keep their raw key instead of being coerced
-        to ``旋转框``: relabelling ``fixed_roi`` as a template search would show
-        the user one thing while the saved model meant another.  Those modes are
-        currently reachable only through a taught model or the API.
+        An unknown key is displayed verbatim rather than coerced, so the label
+        never claims one strategy while the workflow holds another.
+
+        The combobox is ``readonly``, so a value outside its ``values`` list
+        cannot normally be shown.  Callers that need to display a not-yet-
+        selectable mode (``fixed_roi``/``none`` arriving from a loaded asset) go
+        through :meth:`show_external_alignment_mode` instead, which temporarily
+        widens the list.
         """
-        label = next((lab for lab, key in self._ALIGNMENT_LABELS.items()
-                      if key == mode), mode)
+        self._alignment_var.set(self._KEY_TO_LABEL.get(mode, mode))
+
+    @classmethod
+    def _selectable_alignment_labels(cls) -> Tuple[str, ...]:
+        return tuple(cls._SELECTABLE_ALIGNMENT_LABELS)
+
+    def show_external_alignment_mode(self, mode: str) -> None:
+        """Display a mode that is not user-selectable in this combobox.
+
+        Used when a loaded model carries ``fixed_roi``/``none``: the mode is real
+        and must be visible, but no teaching flow exists for it yet, so it is
+        added to the list only for as long as it is the active value.
+        """
+        label = self._KEY_TO_LABEL.get(mode, mode)
+        combo = self._alignment_combo
+        if combo is not None:
+            values = list(self._selectable_alignment_labels())
+            if label not in values:
+                values.append(label)
+            combo.configure(values=values)
         self._alignment_var.set(label)
+        self._using_external_alignment_mode = label not in set(
+            self._selectable_alignment_labels())
+
+    def _reset_alignment_choices(self) -> None:
+        """Restore the combobox to its user-selectable options."""
+        if self._alignment_combo is not None:
+            self._alignment_combo.configure(
+                values=self._selectable_alignment_labels())
+        self._using_external_alignment_mode = False
 
     @property
     def debug_save_enabled(self) -> bool:

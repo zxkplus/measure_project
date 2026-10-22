@@ -318,8 +318,53 @@ class TestGuiLoadPath:
         try:
             ProjectManager.load_project(proj, app)
             assert calls == [], "load rebuilt the template from combobox state"
-            # ...but a genuine user confirmation must still teach.
+
+            # A genuine user confirmation must still teach — but only for modes
+            # that search.  The loaded asset is fixed_roi, where an interactive
+            # confirm is *also* declined (by the mode guard in
+            # _create_template_from_roi), so drive this on a template mode.
+            app.tool_panel.set_alignment_mode("single_box")
+            app._workflow.alignment = SingleBoxAlignment()
             app._on_roi_confirmed(100.0, 150.0, 120.0, 120.0, 0.0)
             assert calls, "interactive confirm was suppressed permanently"
+        finally:
+            root.destroy()
+
+
+@gui_only
+class TestAlignmentModeRoundTrip:
+    """The combobox label and the mode key must never disagree.
+
+    A mode missing from ToolPanel._ALIGNMENT_LABELS used to be written into the
+    readonly combobox as its raw English key and then failed to map back, so the
+    panel displayed ``fixed_roi`` while get_alignment_mode() reported
+    ``single_box`` — a wrong value, not merely an ugly one.
+    """
+
+    @pytest.mark.parametrize("mode", ["single_box", "multi_point",
+                                      "fixed_roi", "none"])
+    def test_every_mode_round_trips(self, mode):
+        from measure_gui.tool_panel import ToolPanel
+        root = _tk.Tk()
+        root.withdraw()
+        try:
+            panel = ToolPanel(root)
+            panel.set_alignment_mode(mode)
+            assert panel.get_alignment_mode() == mode
+            # The displayed text must be a human label, never the internal key.
+            assert panel._alignment_var.get() != mode
+        finally:
+            root.destroy()
+
+    def test_external_mode_is_selectable_only_while_active(self):
+        from measure_gui.tool_panel import ToolPanel
+        root = _tk.Tk()
+        root.withdraw()
+        try:
+            panel = ToolPanel(root)
+            assert "固定区域" not in panel._alignment_combo.cget("values")
+            panel.show_external_alignment_mode("fixed_roi")
+            assert panel.get_alignment_mode() == "fixed_roi"
+            assert "固定区域" in panel._alignment_combo.cget("values")
         finally:
             root.destroy()

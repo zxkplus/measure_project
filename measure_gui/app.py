@@ -959,7 +959,27 @@ class MeasureApp:
         preproc_name = self.tool_panel._preproc_var.get()
         preprocessor = preproc_map.get(preproc_name, RawPreprocessor())
 
-        # Set alignment strategy based on mode
+        # Set alignment strategy based on mode.
+        #
+        # This path builds a template search, so it may only run for modes that
+        # actually search.  A loaded ``fixed_roi``/``none`` model would otherwise
+        # be silently upgraded into template matching by any stray click on
+        # "create template", discarding the strategy the asset specified.  Those
+        # modes teach through teach_without_search() instead, reached by loading
+        # such a model (no interactive teaching flow exists for them yet).
+        current_mode = self._workflow._alignment.mode_name
+        if current_mode not in ("single_box", "multi_point"):
+            # Say what the user sees in the combobox, not the internal key: the
+            # label table is the single source of truth for these names.
+            shown = self.tool_panel.ALIGNMENT_MODE_LABELS.get(
+                current_mode, current_mode)
+            messagebox.showwarning(
+                "提示",
+                f"当前对齐方式为「{shown}」，不做模板搜索。\n"
+                f"如需改为模板匹配，请先将对齐方式改为「旋转框」后重新创建。",
+            )
+            return
+
         use_multi_point = (
             control_points is not None and len(control_points) >= 3
         )
