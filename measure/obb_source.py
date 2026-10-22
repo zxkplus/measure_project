@@ -31,6 +31,19 @@ import numpy as np
 #: a rectangle.  Detectors emit float boxes, so exact equality is unrealistic.
 _RECTANGLE_TOLERANCE_PX = 1e-3
 
+#: Tolerated ``|cos|`` between adjacent edges.
+#:
+#: Sized from the precision of the input rather than picked by feel.  Detectors
+#: hand over float32 tensors (~7 significant digits), so a perfectly square box
+#: still shows a residual: measured over 166 real detections from a YOLO-OBB
+#: model the median was 1.2e-6 and the maximum 4.5e-6, i.e. 57% of genuine boxes
+#: exceed 1e-6.  A threshold at that magnitude rejects real detections at random.
+#:
+#: 1e-3 corresponds to about 0.06 degrees of corner error — far looser than any
+#: real detector noise, yet still tight enough to catch a genuinely skewed
+#: quadrilateral (the test that guards this uses a 60-degree corner).
+_RECTANGLE_ORTHOGONALITY_TOLERANCE = 1e-3
+
 
 @dataclass(frozen=True)
 class ObbObservation:
@@ -133,7 +146,7 @@ class ObbObservation:
             )
         # And the two edge directions must be perpendicular.
         cos_angle = float(np.dot(e0, e1)) / (len0 * len1)
-        if abs(cos_angle) > 1e-6:
+        if abs(cos_angle) > _RECTANGLE_ORTHOGONALITY_TOLERANCE:
             raise ValueError(
                 f"corners do not form a rectangle; edges meet at "
                 f"{math.degrees(math.acos(max(-1.0, min(1.0, cos_angle)))):.3f}° "

@@ -97,6 +97,29 @@ class TestFromCornersRejectsBadInput:
         with pytest.raises(ValueError, match="instead of 90"):
             ObbObservation.from_corners(pts)
 
+    def test_accepts_float32_rounding_from_a_real_detector(self):
+        """Real detector output is float32 and never exactly orthogonal.
+
+        Measured over 166 detections from a YOLO-OBB model: median |cos| 1.2e-6,
+        maximum 4.5e-6, so 57% of genuine boxes exceed 1e-6.  An earlier threshold
+        of 1e-6 rejected real detections at random — only a real model exposed it.
+        """
+        # A box 20 tall and 40 wide, centred at the origin, with corners displaced
+        # by ~1e-4 px — the same order of |cos| residual real float32 output shows.
+        # Length runs along the column axis, so the canonical angle is 0.
+        base = np.array([[-10.0, -20.0], [-10.0, 20.0], [10.0, 20.0], [10.0, -20.0]])
+        jitter = np.array([[-1.0, 1.0], [1.0, 0.0], [-1.0, -1.0], [1.0, -1.0]]) * 1e-4
+        obs = ObbObservation.from_corners(base + jitter)
+        assert obs.angle_deg == pytest.approx(0.0, abs=0.05)
+        # size is (height, width) — rows first.
+        assert obs.size == pytest.approx((20.0, 40.0), abs=0.01)
+
+    def test_still_rejects_a_visibly_skewed_box(self):
+        """Loosening to float32 tolerance must not accept a real skew."""
+        pts = np.array([[0, 0], [10, 0], [10, 4], [0, 10]], float)
+        with pytest.raises(ValueError, match="do not form a rectangle"):
+            ObbObservation.from_corners(pts)
+
     def test_degenerate_box(self):
         with pytest.raises(ValueError, match="degenerate"):
             ObbObservation.from_corners(np.zeros((4, 2)))
