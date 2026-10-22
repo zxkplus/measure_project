@@ -154,7 +154,8 @@ class ResultPanel(ttk.Frame):
             self._target_tree.insert(
                 "", tk.END, iid=str(t.id),
                 values=(
-                    t.id, f"{t.score:.4f}", f"{t.rotation_deg:.1f}",
+                    t.id, ("n/a" if t.score is None else f"{t.score:.4f}"),
+                    f"{t.rotation_deg:.1f}",
                     f"({t.center_row:.1f}, {t.center_col:.1f})", status_str,
                 ),
                 tags=("valid" if t.valid else "invalid",),

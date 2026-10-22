@@ -127,7 +127,9 @@ class TestNoneAlignment:
                            sigma=1.0, threshold=30.0)
         target = wf.measure(make_image())[0]
         assert target.valid
-        assert target.score == pytest.approx(1.0)
+        # No matcher ran, so there is no correlation score to report.  It used
+        # to be a fabricated 1.0, which made every image look perfectly located.
+        assert target.score is None
         assert target.rotation_deg == pytest.approx(0.0)
         # Coordinates are image coordinates — no rectification happened.
         assert target.center_row == pytest.approx(100.0)

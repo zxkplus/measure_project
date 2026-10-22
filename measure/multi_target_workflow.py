@@ -108,10 +108,25 @@ class TargetResult:
     :func:`_map_result_to_original` (coordinates already mapped back to the
     inspection image); this is why the values are dicts rather than
     ``GeometricResult`` instances.
+
+    ``valid`` means "this target's output can be trusted", defined as:
+
+      * no tools defined  -> decided by the locator alone (a match above the
+        score threshold).  This is a supported configuration, not a degenerate
+        one: for a pure localisation task the pose *is* the deliverable.
+      * tools defined     -> locator matched AND every tool produced a valid
+        result.
+
+    A model with no tools therefore reports ``valid=True`` with an empty
+    ``measurements`` — do not read that emptiness as failure; check
+    :attr:`is_localization_only` if you need to distinguish the cases.
     """
 
     id: int
-    score: float
+    #: Correlation score from stage 1, or ``None`` when nothing was searched
+    #: (the ``none`` / ``fixed_roi`` alignment modes).  Callers comparing this
+    #: against a threshold must handle None explicitly — ``None < t`` raises.
+    score: Optional[float]
     rotation_deg: float
     scale: float
     center_row: float
@@ -120,7 +135,30 @@ class TargetResult:
     measurements: Dict[str, Any] = field(default_factory=dict)
     meta: Dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def pose(self) -> Dict[str, float]:
+        """Stage-1 localisation result as one dict.
+
+        These five values are produced by the locator alone — they exist even
+        when the model defines no measurement tools, which is the whole output
+        of a pure localisation task.  Exposed as a view over the existing fields
+        (never copied) so the two cannot drift apart.
+        """
+        return {
+            "center_row": self.center_row,
+            "center_col": self.center_col,
+            "angle_deg": self.rotation_deg,
+            "scale": self.scale,
+            "score": self.score,
+        }
+
+    @property
+    def is_localization_only(self) -> bool:
+        """True when the model defined no tools, so ``pose`` is the entire result."""
+        return not self.measurements
+
     def to_dict(self) -> Dict[str, Any]:
+        # Existing keys are load-bearing for shipped callers; only ever append.
         return {
             "id": self.id,
             "score": self.score,
@@ -134,16 +172,32 @@ class TargetResult:
                 for label, r in self.measurements.items()
             },
             "meta": self.meta,
+            "pose": self.pose,
+            "is_localization_only": self.is_localization_only,
         }
 
     def summary_text(self) -> str:
         """Single-line summary for target list display."""
+        # ``score`` is None for search-free models; a bare format spec would
+        # raise TypeError deep inside the GUI's result rendering.
+        score_txt = "n/a" if self.score is None else f"{self.score:.3f}"
         return (
-            f"[Target #{self.id}] score={self.score:.3f}, "
+            f"[Target #{self.id}] score={score_txt}, "
             f"rot={self.rotation_deg:.1f}°, "
             f"center=({self.center_row:.1f}, {self.center_col:.1f}), "
             f"{'✓' if self.valid else '✗'}"
         )
+
+
+def _fmt_score(score: Optional[float], digits: int = 3) -> str:
+    """Render a stage-1 score, or ``"n/a"`` when nothing was searched.
+
+    Search-free alignment modes leave ``TargetResult.score`` as None; every
+    display path formats it, so the guard lives here instead of at each site.
+    """
+    if score is None:
+        return "n/a"
+    return f"{float(score):.{digits}f}"
 
 
 def _result_to_dict(result) -> Dict[str, Any]:
@@ -499,6 +553,19 @@ class MultiTargetWorkflow:
         return self._alignment._reference_image
 
     @property
+    def is_taught(self) -> bool:
+        """Whether a model has been taught and can be saved / executed.
+
+        Deliberately *not* "has a template": the search-free alignment modes
+        (``none``, ``fixed_roi``) are fully usable without one, so callers that
+        gate on ``template_point`` wrongly reject them.  The real requirement is
+        a reference image — without it nothing can be reconstructed — which is
+        exactly what :meth:`save` and :meth:`_manifest` check internally.  Use
+        this instead of poking private attributes from the UI or API layers.
+        """
+        return self._alignment._reference_image is not None
+
+    @property
     def box_center(self) -> Tuple[float, float]:
         return self._alignment.box_center
 
@@ -611,7 +678,7 @@ class MultiTargetWorkflow:
 
             # Label
             label_text = (
-                f"T#{target.id} s={target.score:.2f} "
+                f"T#{target.id} s={_fmt_score(target.score)} "
                 f"r={target.rotation_deg:.1f}° "
                 f"{'OK' if target.valid else 'FAIL'}"
             )
@@ -1264,10 +1331,16 @@ class MultiTargetWorkflow:
                     "No template defined and no ROI taught. Call teach_template() "
                     "first, or use an alignment mode that stores a fixed ROI."
                 )
+            # Score is None, not 1.0. Nothing was searched, so there is no
+            # correlation value to report; claiming a perfect match made every
+            # image look located (a blank frame scored exactly like the
+            # reference) and let any downstream threshold pass silently.
+            # None is honest *and* JSON-safe, unlike NaN which breaks
+            # json.dumps(allow_nan=False) on every API response.
             matches = [{
                 "matched_row": centre_row,
                 "matched_col": centre_col,
-                "match_score": 1.0,
+                "match_score": None,
                 "best_rotation_deg": 0.0,
                 "best_scale": 1.0,
                 "valid": True,
@@ -1553,12 +1626,17 @@ class MultiTargetWorkflow:
             scale=scale,
             center_row=matched_row,
             center_col=matched_col,
+            # With no tools defined `all_valid` stays at its True initial value,
+            # which is the intended reading (see TargetResult.valid): validity is
+            # then decided purely by the locator.  Anchored here because an
+            # unrelated change to that initialiser would silently invert it.
             valid=valid_match and all_valid,
             measurements=measurements,
             meta={
                 "match_score": match_score,
                 "patch_shape": patch.shape,
                 "M_inv": M_inv,
+                "localization_only": not self._measurement_defs,
             },
         )
 
@@ -1626,7 +1704,8 @@ class MultiTargetWorkflow:
                 cv2.polylines(vis, [pts_xy], True, color, thickness=2)
 
                 # Label the target
-                label_text = f"T#{target.id} s={target.score:.2f} r={target.rotation_deg:.1f}"
+                label_text = (f"T#{target.id} s={_fmt_score(target.score)} "
+                        f"r={target.rotation_deg:.1f}")
                 cv2.putText(
                     vis,
                     label_text,
@@ -2112,7 +2191,7 @@ class MultiTargetWorkflow:
         for target in self._results:
             lines.append(
                 f"[Target #{target.id}] "
-                f"score={target.score:.4f}, "
+                f"score={_fmt_score(target.score)}, "
                 f"rotation={target.rotation_deg:.2f}°, "
                 f"center=({target.center_row:.1f}, {target.center_col:.1f}), "
                 f"status={'✓ 有效' if target.valid else '✗ 无效'}"

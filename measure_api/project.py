@@ -1310,7 +1310,11 @@ class MeasureProject:
         for tr in raw_results:
             targets.append({
                 "target_id": int(getattr(tr, "id", 0)),
-                "score": float(getattr(tr, "score", 0)),
+                # None for search-free models (none/fixed_roi): nothing was
+                # correlated. Kept as null rather than coerced to 0.0, which
+                # would read as "matched with zero confidence".
+                "score": (lambda _s: None if _s is None else float(_s))(
+                    getattr(tr, "score", None)),
                 "row": float(getattr(tr, "center_row", getattr(tr, "row", 0))),
                 "col": float(getattr(tr, "center_col", getattr(tr, "col", 0))),
                 "rotation_deg": float(getattr(tr, "rotation_deg", 0)),
