@@ -29,44 +29,51 @@ formats encode different assumptions about who owns the image files.
 
 ---
 
-## 1. 🔴 Confirmed defect affecting both generations
+## 1. ⚠️ Not a defect: `measure_pairs()` hard-codes two filters on purpose
 
-### `Halcon1DMeasure.measure_pairs()` silently ignores its `transition` parameter
-
-`measure/measure1D.py` calls the inner detector with both filter arguments hard-coded:
+`measure/measure1D.py` calls the inner detector with both filter arguments fixed:
 
 ```python
 self.measure_pos(img, sigma, threshold, "all", "all", False, debug)
 #                                          ↑transition  ↑select
 ```
 
-Signature is `measure_pos(img, sigma, threshold='30', transition='all', select='all', ...)`.
-So `measure_pairs(..., transition=...)` accepts the argument and then discards it.
+**This looks like a bug and is not one.** It reads as an oversight often enough to be
+worth recording here, because the reasoning lives only in commit history.
 
-**Why it looks like it works:** pairing happens downstream, so results still differ per
-`transition` value. Measured on an 8-band alternating image where `measure_pos` correctly
-returns all=7 / positive=4 / negative=3 edges:
+- `transition="all"` is required. `measure_pos` would otherwise return only same-signed
+  peaks, while the pairing loop needs an adjacent *opposite*-sign pair (`amp1>0 and
+  amp2<0`, or the reverse). Handing it a single-polarity list makes every pair impossible,
+  so `'positive'`/`'negative'` would silently return nothing. That was the original bug;
+  fixed deliberately in `7649fb4`.
+- `select="all"` is required for the same reason one level up: `first`/`last` must choose
+  between whole edge **pairs**, which the select block further down does. Filtering to one
+  edge beforehand leaves no pair to select.
+
+The caller's polarity and selection are honoured — just applied to complete pairs rather
+than to individual edges. Verified on an 8-band alternating image (7 edges: all=7,
+positive=4, negative=3):
 
 ```
-select=all  transition=positive -> centers=(14.5, 34.5, 54.5)
-select=all  transition=negative -> centers=(24.5, 44.5, 64.5)
-select=all  transition=all      -> centers=(14.5, 34.5, 54.5)   ← identical to positive
+transition=all      select=all   -> centers=(14.5, 34.5, 54.5)
+transition=positive select=all   -> centers=(14.5, 34.5, 54.5)   # positive-sign pairs
+transition=negative select=all   -> centers=(24.5, 44.5, 64.5)   # opposite boundaries
+transition=all      select=first -> centers=(14.5)
+transition=all      select=last  -> centers=(54.5)
 ```
 
-`all` must be a superset of `positive`. It is not, because no polarity filtering occurred.
-**Any case where positive and negative transitions are unequal produces wrong pair counts.**
+Consequently **v2's `/api/v2/measurements/edge-pairs` behaves correctly**: it forwards
+`polarity` and `selection`, and both take effect in the pairing stage. So does v1/GUI's
+`EdgePairObject`. Nothing here needs fixing.
 
-Who is affected:
+Guarded by `tests/test_1d_measure.py::test_measure_pairs_polarity_and_select_are_pair_level`
+plus a negative control that asserts same-signed peaks genuinely cannot be paired — if that
+invariant ever changes, the hard-coding becomes reconsiderable and the test says so.
 
-- **v2**: `POST /api/v2/measurements/edge-pairs` exposes `polarity: Literal['positive',
-  'negative', 'all']` to callers and passes it straight through
-  (`measure_api/v2/families/measurements.py:263`). Any non-`all` request does not behave
-  as documented.
-- **v1 / GUI**: `EdgePairObject` forwards `self.transition` (`measure_workflow.py:1161`),
-  so it is equally broken. Currently latent — all 8 shipped models use `transition=all`.
-
-Suggested fix: pass both parameters through. Add a regression test asserting that
-`transition="all"` returns at least as many pairs as `"positive"` and `"negative"` combined.
+> A previous revision of this document called the above "a confirmed defect affecting both
+> generations" and recommended forwarding the parameters. That recommendation was wrong and
+> would have re-introduced the bug `7649fb4` fixed. Retained here as a note because the code
+> still invites the same misreading.
 
 ---
 

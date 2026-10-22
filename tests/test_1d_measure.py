@@ -427,3 +427,67 @@ class TestHalcon1DMeasure:
             import traceback
             traceback.print_exc()
             return False
+    def test_measure_pairs_polarity_and_select_are_pair_level(self):
+        """Pins the deliberate hard-coding in measure_pairs().
+
+        measure_pairs() calls measure_pos with transition="all" and select="all"
+        regardless of its own arguments, then applies polarity and first/last
+        itself on complete edge pairs.  Forwarding either argument to
+        measure_pos breaks the function: a single-polarity peak list can never
+        satisfy the opposite-sign pairing rule, and select="first" would leave
+        one edge and therefore no pair at all.  This guard exists because that
+        line reads like an oversight (see 7649fb4).
+        """
+        img = np.zeros((80, 40), dtype=np.uint8)
+        for i, v in enumerate([30, 200, 30, 200, 30, 200, 30, 200]):
+            img[i * 10:(i + 1) * 10, :] = v
+        probe = Halcon1DMeasure(row=40, col=20, angle=np.pi / 2,
+                                length1=38, length2=4)
+
+        # Every polarity must still find pairs — none may collapse to empty.
+        for transition in ("all", "positive", "negative"):
+            out = probe.measure_pairs(img, sigma=1.0, threshold=20.0,
+                                      transition=transition, select="all")
+            centers = out[6]
+            assert len(centers) > 0, f"{transition} returned no pairs"
+
+        # positive and negative select opposite boundaries of each band pair.
+        pos = probe.measure_pairs(img, sigma=1.0, threshold=20.0,
+                                  transition="positive", select="all")[6]
+        neg = probe.measure_pairs(img, sigma=1.0, threshold=20.0,
+                                  transition="negative", select="all")[6]
+        assert pos != neg, "polarity is not being applied at all"
+
+        # select works on pairs: first/last differ and both are non-empty.
+        first = probe.measure_pairs(img, sigma=1.0, threshold=20.0,
+                                    transition="all", select="first")[6]
+        last = probe.measure_pairs(img, sigma=1.0, threshold=20.0,
+                                   transition="all", select="last")[6]
+        every = probe.measure_pairs(img, sigma=1.0, threshold=20.0,
+                                    transition="all", select="all")[6]
+        assert len(first) == 1 and len(last) == 1
+        assert len(every) > 1
+        assert first[0] < last[0]
+
+    def test_measure_pairs_transition_matches_forwarded_would_break(self):
+        """Negative control: prove forwarding transition really does break it.
+
+        Encodes why the hard-code is required, so a future refactor cannot
+        re-introduce the bug while believing it is a fix.
+        """
+        img = np.zeros((80, 40), dtype=np.uint8)
+        for i, v in enumerate([30, 200, 30, 200, 30, 200, 30, 200]):
+            img[i * 10:(i + 1) * 10, :] = v
+        probe = Halcon1DMeasure(row=40, col=20, angle=np.pi / 2,
+                                length1=38, length2=4)
+
+        # Same filtering the pairing loop performs, applied to a pre-filtered
+        # (single-polarity) peak list — the shape measure_pos would return if
+        # transition were forwarded.
+        edges, _, amps, _ = probe.measure_pos(img, sigma=1.0, threshold=20.0,
+                                              transition="positive", select="all")
+        assert len(edges) > 1
+        paired = any(amps[i] > 0 and amps[i + 1] < 0
+                     for i in range(len(amps) - 1))
+        assert not paired, ("assumption changed: same-signed peaks can no longer "
+                            "be described as 'impossible to pair'")

@@ -29,7 +29,8 @@ Do not mix the two generations — they also write different on-disk formats.
 **Before touching shared code, porting a model, or calling the other generation, read
 [v1-v2-divergence.md](references/v1-v2-divergence.md).** It records where the two
 implementations currently disagree (dependency type rules, template-search defaults,
-frame/unit tracking), one confirmed defect in shared edge-pair code that affects both,
+frame/unit tracking), a deliberate-looking-like-a-bug convention in shared
+edge-pair code,
 which side owns each difference, and what is still undecided.
 
 ## Overview

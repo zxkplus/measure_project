@@ -291,7 +291,19 @@ class Halcon1DMeasure:
             (intra_distance): 边对内距离
             (inter_distance): 边对之间距离
         """
-        # 获取所有边缘
+        # Both filter arguments are hard-coded to "all" ON PURPOSE — do not
+        # "fix" this by forwarding the caller's transition / select.
+        #
+        # transition: measure_pos would then return only same-signed peaks, but
+        # the pairing loop below needs an adjacent opposite-sign pair (amp1>0
+        # and amp2<0, or the reverse).  Given a single-polarity list every pair
+        # becomes impossible, so 'positive'/'negative' would silently return
+        # nothing.  That was the original bug; fixed in 7649fb4.  The requested
+        # polarity is applied instead by that loop, on complete pairs.
+        #
+        # select: first/last must choose between whole edge *pairs*, which the
+        # select block further down does; filtering individual edges here would
+        # leave at most one edge and thus no pair at all.
         row_edges, col_edges, amplitudes, _ = \
             self.measure_pos(img, sigma, threshold, "all", "all", False, debug)
         
