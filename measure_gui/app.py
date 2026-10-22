@@ -982,11 +982,9 @@ class MeasureApp:
             messagebox.showerror("自检失败", f"在参考图上推理时出错：\n{exc}")
             return
 
-        # Populated after the self-check so the dropdown can flag classes the
-        # reference image does not contain: offering them without comment leads a
-        # user to pick a class that can never match and wonder why nothing is found.
-        self.tool_panel.set_obb_class_names(
-            source.class_names, present={o.class_id for o in observations})
+        # Every detection becomes a selectable anchor, best first, so the user can
+        # point at the actual part rather than a class that may have 166 members.
+        self.tool_panel.set_obb_detections(observations)
 
         if not observations:
             self.tool_panel.set_obb_status("自检未检出任何目标", False)
@@ -997,19 +995,13 @@ class MeasureApp:
             )
             return
 
-        # Default the anchor to the class of the highest-scoring detection: it is
-        # the most likely thing the user means, and it is what the displayed
-        # preview shows.  The user can change it afterwards.
-        best = observations[0]
+        # The list is ordered by confidence and the first entry is preselected, so
+        # the default is the highest-scoring detection.
+        best = self.tool_panel.get_anchor_observation() or observations[0]
         summary = self._summarise_detections(observations)
-        if self.tool_panel.get_anchor_class_id() is None:
-            self.tool_panel.set_anchor_class_id(best.class_id)
-        anchor = self.tool_panel.get_anchor_class_id()
-
-        anchor_count = sum(1 for o in observations if o.class_id == anchor)
         self.tool_panel.set_obb_status(
             f"自检通过：检出 {len(observations)} 个目标（{summary}）；"
-            f"锚点类 {anchor} 有 {anchor_count} 个",
+            f"锚点已选 {best.class_name or best.class_id}_{self.tool_panel.get_anchor_index()}",
             True,
         )
 
@@ -1020,7 +1012,8 @@ class MeasureApp:
             strategy.teach(
                 self._reference_image,
                 source=source,
-                anchor_class_id=anchor,
+                anchor_class_id=best.class_id,
+                anchor_observation=best,
                 min_score=self.tool_panel.get_obb_settings()["conf"],
             )
         except ValueError as exc:
@@ -1033,8 +1026,10 @@ class MeasureApp:
         self._show_obb_preview(best)
         self.tool_panel.set_template_created(True)
         self.tool_panel.set_detector_ready(True)
+        index = self.tool_panel.get_anchor_index()
         self._status_text.set(
-            f"OBB 模型已载入：锚点类 {anchor}，检出 {len(observations)} 个目标")
+            f"OBB 模型已载入：锚点 {best.class_name or best.class_id}_{index}，"
+            f"检出 {len(observations)} 个目标")
 
     @staticmethod
     def _summarise_detections(observations) -> str:
@@ -1071,33 +1066,42 @@ class MeasureApp:
             f"{'n/a' if observation.score is None else f'{observation.score:.3f}'}")
 
     def _on_obb_settings_changed(self):
-        """React to an anchor-class change by re-teaching against that class."""
+        """Re-teach against the anchor box the user selected.
+
+        The anchor is a specific detection, not a class: with 166 ships on one
+        image, "the ship class" does not say which ship defines the patch frame and
+        the taught pose.  Changing the pick therefore rebuilds the model.
+        """
         if self.tool_panel.get_alignment_mode() != "obb":
             return
-        observations = getattr(self, "_obb_observations", None)
-        if not observations:
+        if self._workflow is None or not self.tool_panel._obb_detections:
             return
-        anchor = self.tool_panel.get_anchor_class_id()
-        matching = [o for o in observations if o.class_id == anchor]
-        if not matching:
-            self.tool_panel.set_obb_status(
-                f"锚点类 {anchor} 在参考图上没有检出", False)
+
+        chosen = self.tool_panel.get_anchor_observation()
+        if chosen is None:
+            self.tool_panel.set_obb_status("未选择锚点框", False)
             return
-        best = matching[0]
+
         strategy = self._workflow._alignment
         try:
             strategy.teach(
                 self._reference_image,
                 source=strategy.source,
-                anchor_class_id=anchor,
+                anchor_class_id=chosen.class_id,
+                anchor_observation=chosen,
                 min_score=self.tool_panel.get_obb_settings()["conf"],
             )
         except ValueError as exc:
             self.tool_panel.set_obb_status(f"建模失败：{exc}", False)
             return
-        self._show_obb_preview(best)
+
+        self._show_obb_preview(chosen)
+        index = self.tool_panel.get_anchor_index()
         self.tool_panel.set_obb_status(
-            f"锚点类 {anchor}：{len(matching)} 个检出，已选中分数最高的一个", True)
+            f"锚点已换为 {chosen.class_name or chosen.class_id}_{index}："
+            f"中心 ({chosen.row:.0f}, {chosen.col:.0f})，"
+            f"角度 {chosen.angle_deg:.1f}°",
+            True)
 
     def _sync_detector_state(self) -> None:
         """Reflect whether a detector is attached, for the current mode.

@@ -163,7 +163,7 @@ class AlignmentStrategy:
         template_size = int(max(size))
         self._template_size = template_size
         self._template_image, _ = crop_and_straighten(
-            reference_image, center, size, angle_deg
+            reference_image, center, size, _crop_angle(angle_deg)
         )
 
         self._template_point = TemplatePoint(
@@ -248,6 +248,37 @@ class AlignmentStrategy:
         with the full set of parameters.
         """
         raise NotImplementedError
+
+
+def _crop_angle(box_angle_deg: float, rotation_deg: float = 0.0) -> float:
+    """Convert a box orientation into the angle ``crop_and_straighten`` expects.
+
+    The two conventions are negatives of each other, which is easy to miss because
+    everything still "works" when the box is axis-aligned:
+
+    * ``compute_rotated_box_corners`` (and every box angle in the manifest) is in
+      ``(row, col)`` with positive meaning *visually* counter-clockwise, i.e. the
+      long edge tilting upwards on screen.
+    * ``crop_and_straighten``'s matrix acts on ``(x, y) = (col, row)`` in the
+      usual maths sense, so feeding it the box angle rotates the patch the wrong
+      way.
+
+    Passing the un-negated angle leaves the part tilted inside its patch and pads
+    the rest with background: measured on a 50x120 box, a 20 degree input gave a
+    0.65 fill with ``+angle`` versus 1.00 with ``-angle``.  Detected angles came
+    out systematically wrong by roughly twice the box angle.
+
+    Kept as a function rather than a sign at each call site so the reasoning lives
+    in one place and a new call site cannot silently pick the wrong convention.
+
+    Args:
+        box_angle_deg: Box orientation as stored (visually CCW positive).
+        rotation_deg: Target rotation relative to the taught box.
+
+    Returns:
+        The angle to hand to :func:`measure.rectify.crop_and_straighten`.
+    """
+    return -(float(box_angle_deg) - float(rotation_deg))
 
 
 # =============================================================================
@@ -351,7 +382,7 @@ class FixedRoiAlignment(AlignmentStrategy):
         # The straightened reference ROI doubles as the patch frame of record.
         self._template_image, _ = crop_and_straighten(
             self._reference_image, self._box_center, self._box_size,
-            self._box_angle_deg,
+            _crop_angle(self._box_angle_deg),
         )
         self._template_size = int(max(self._box_size))
 
@@ -373,7 +404,7 @@ class FixedRoiAlignment(AlignmentStrategy):
             matched_row, matched_col = self._box_center
         if rotation_deg is None:
             rotation_deg = 0.0
-        target_angle = self._box_angle_deg - rotation_deg
+        target_angle = _crop_angle(self._box_angle_deg, rotation_deg)
         patch, M_inv_3x3 = crop_and_straighten(
             inspection_image,
             (matched_row, matched_col),
@@ -409,7 +440,7 @@ class SingleBoxAlignment(AlignmentStrategy):
         rotation_deg: float,
         box_size: Optional[Tuple[float, float]] = None,
     ) -> AlignResult:
-        target_angle = self._box_angle_deg - rotation_deg
+        target_angle = _crop_angle(self._box_angle_deg, rotation_deg)
         patch, M_inv_3x3 = crop_and_straighten(
             inspection_image,
             (matched_row, matched_col),
@@ -625,7 +656,7 @@ class MultiPointAlignment(AlignmentStrategy):
         match successfully.
         """
         # Stage 1: rigid crop (same as SingleBoxAlignment)
-        target_angle = self._box_angle_deg - rotation_deg
+        target_angle = _crop_angle(self._box_angle_deg, rotation_deg)
         rigid_patch, M_rigid_3x3 = crop_and_straighten(
             inspection_image,
             (matched_row, matched_col),
@@ -783,6 +814,7 @@ class ObbAlignment(AlignmentStrategy):
         super().__init__()
         self._source: Optional[Any] = None          # ObbSource; kept untyped to
         self._anchor_cls: Optional[int] = None      # avoid importing its module here
+        self._anchor_observation: Optional[Any] = None
         self._model_ref: Dict[str, Any] = {}
         self._nominal_size: Optional[Tuple[float, float]] = None
         self._min_score: Optional[float] = None
@@ -818,6 +850,7 @@ class ObbAlignment(AlignmentStrategy):
         *,
         source: Any = None,
         anchor_class_id: Optional[int] = None,
+        anchor_observation: Optional[Any] = None,
         nominal_size: Optional[Tuple[float, float]] = None,
         min_score: Optional[float] = None,
         max_targets: int = 0,
@@ -837,9 +870,14 @@ class ObbAlignment(AlignmentStrategy):
             source: An ``ObbSource``.  Stored as given, so the engine never needs
                 to import a detector implementation.
             anchor_class_id: Keep only this detector class.  ``None`` keeps all.
+            anchor_observation: A specific detection to use as the teaching
+                reference.  A class alone is ambiguous when the image holds many
+                instances of it — 166 ships on one sample — and the anchor decides
+                both the patch frame and the recorded pose, so a caller that let
+                the user point at a box must be able to pin that box.  When None
+                the highest-scoring detection is used.
             nominal_size: ``(height, width)`` for the patch frame.  When omitted
-                it is taken from the highest-scoring anchor detection on the
-                reference image, which is what the user sees when they teach.
+                it is taken from the anchor detection.
             min_score: Drop detections below this confidence.
             max_targets: Cap the number of instances; ``0`` means no cap.
             model_ref: Model identity to record (path, sha256, thresholds).
@@ -860,6 +898,7 @@ class ObbAlignment(AlignmentStrategy):
         self._reference_image = image.copy()
         self._source = source
         self._anchor_cls = anchor_class_id
+        self._anchor_observation = anchor_observation
         self._min_score = min_score
         self._max_targets = int(max_targets)
         self._model_ref = dict(model_ref or {})
@@ -880,6 +919,11 @@ class ObbAlignment(AlignmentStrategy):
                   "class/score filters."
             )
 
+        # The anchor box: an explicitly chosen detection when given, otherwise the
+        # highest-scoring one.  This fixes the patch frame and the recorded pose, so
+        # it must be the box the user pointed at, not merely a class.
+        primary = self._resolve_anchor(observations, anchor_observation)
+
         if nominal_size is not None:
             height, width = float(nominal_size[0]), float(nominal_size[1])
             if height <= 0 or width <= 0:
@@ -888,16 +932,41 @@ class ObbAlignment(AlignmentStrategy):
                 )
             self._nominal_size = (height, width)
         else:
-            primary = observations[0]
             self._nominal_size = (float(primary.height), float(primary.width))
 
         # Record the reference box centre so visualisation and the search-free
         # code paths have a meaningful box, and so the GUI can draw the frame.
-        primary = observations[0]
         self._box_center = (float(primary.row), float(primary.col))
         self._box_size = self._nominal_size
         self._box_angle_deg = float(primary.angle_deg)
         self._template_size = int(max(self._nominal_size))
+
+    @staticmethod
+    def _resolve_anchor(observations, requested):
+        """Pick the teaching anchor, honouring an explicit request.
+
+        The requested observation must be one of the current detections.  Matching
+        by identity would be fragile — detections are re-produced on every teach —
+        so the comparison is geometric, to within a pixel.  A mismatch is an error
+        rather than a silent fallback: quietly anchoring on a different box would
+        change the patch frame the tools were taught against.
+        """
+        if requested is None:
+            return observations[0]
+        for candidate in observations:
+            if (abs(candidate.row - requested.row) < 1.0
+                    and abs(candidate.col - requested.col) < 1.0):
+                return candidate
+        raise ValueError(
+            f"anchor_observation at ({requested.row:.1f}, {requested.col:.1f}) is "
+            f"not among the {len(observations)} detections on this image; it may "
+            f"have been filtered out by the class or score settings."
+        )
+
+    @property
+    def anchor_observation(self):
+        """The detection that fixed the patch frame, if one was recorded."""
+        return self._anchor_observation
 
     # -- inspection -----------------------------------------------------------
 
@@ -952,7 +1021,7 @@ class ObbAlignment(AlignmentStrategy):
             raise RuntimeError(
                 "ObbAlignment has no nominal patch size. Call teach() first."
             )
-        target_angle = self._box_angle_deg - rotation_deg
+        target_angle = _crop_angle(self._box_angle_deg, rotation_deg)
         patch, M_inv_3x3 = crop_and_straighten(
             inspection_image,
             (matched_row, matched_col),

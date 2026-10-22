@@ -154,16 +154,83 @@ class TestObbSettings:
         root.withdraw()
         return root, ToolPanel(root)
 
-    def test_class_names_populate_and_select(self):
+    def test_detections_are_listed_best_first(self):
+        """The anchor list is detections, not classes.
+
+        With many instances of one class, a class-level choice cannot say which
+        box fixes the patch frame; listing boxes lets the user point at the part.
+        """
+        from measure.obb_source import ObbObservation
         root, panel = self.make()
         try:
-            panel.set_obb_class_names({0: "plane", 1: "ship", 7: "harbor"})
-            assert panel.get_anchor_class_id() is None
-            panel.set_anchor_class_id(1)
-            assert panel.get_anchor_class_id() == 1
-            # Index and label are both shown: selection is by index, and two
-            # classes could share a label.
-            assert "1: ship" in panel._obb_class_combo.cget("values")
+            obs = [
+                ObbObservation(row=10, col=20, width=100, height=30,
+                               angle_deg=0.0, class_id=1, score=0.5,
+                               class_name="ship"),
+                ObbObservation(row=30, col=40, width=90, height=28,
+                               angle_deg=5.0, class_id=1, score=0.9,
+                               class_name="ship"),
+            ]
+            # The caller is expected to pass them already sorted (the selector
+            # sorts); feed best-first as the adapter/selector would.
+            panel.set_obb_detections(obs)
+            values = list(panel._obb_anchor_combo.cget("values"))
+            assert len(values) == 2
+            assert values[0].startswith("ship_0")
+            # Highest confidence is preselected, so the common case needs no clicks.
+            assert panel.get_anchor_index() == 0
+            assert panel.get_anchor_observation().score == pytest.approx(0.5)
+        finally:
+            root.destroy()
+
+    def test_anchor_name_is_class_and_index(self):
+        from measure.obb_source import ObbObservation
+        root, panel = self.make()
+        try:
+            panel.set_obb_detections([
+                ObbObservation(row=1, col=2, width=10, height=5, angle_deg=0.0,
+                               class_id=7, score=0.75, class_name="harbor")])
+            assert panel._obb_anchor_var.get().startswith("harbor_0")
+            assert panel.get_anchor_index() == 0
+            assert panel.get_anchor_class_id() == 7
+            assert panel.get_anchor_class_label() == "harbor"
+        finally:
+            root.destroy()
+
+    def test_selecting_by_index_round_trips(self):
+        from measure.obb_source import ObbObservation
+        root, panel = self.make()
+        try:
+            obs = [ObbObservation(row=i, col=i, width=10, height=5, angle_deg=0.0,
+                                  class_id=1, score=1.0 - i / 10, class_name="ship")
+                   for i in range(5)]
+            panel.set_obb_detections(obs)
+            for index in (0, 2, 4):
+                panel.set_anchor_index(index)
+                assert panel.get_anchor_index() == index
+                assert panel.get_anchor_observation().row == index
+        finally:
+            root.destroy()
+
+    def test_out_of_range_index_yields_no_anchor(self):
+        from measure.obb_source import ObbObservation
+        root, panel = self.make()
+        try:
+            panel.set_obb_detections([
+                ObbObservation(row=1, col=2, width=10, height=5, angle_deg=0.0,
+                               class_id=1, score=0.9, class_name="ship")])
+            panel.set_anchor_index(99)
+            assert panel.get_anchor_index() is None
+            assert panel.get_anchor_observation() is None
+        finally:
+            root.destroy()
+
+    def test_empty_detections_leave_nothing_selected(self):
+        root, panel = self.make()
+        try:
+            panel.set_obb_detections([])
+            assert panel._obb_anchor_var.get() == ""
+            assert panel.get_anchor_observation() is None
         finally:
             root.destroy()
 
@@ -399,50 +466,12 @@ class TestRealModelThroughGui:
         finally:
             root.destroy()
 
-    def test_changing_anchor_class_reteaches(self, tmp_path, monkeypatch):
-        import cv2
-        import tkinter.messagebox as mb
-        from measure_gui.app import MeasureApp
-        from measure_gui.project_manager import ProjectManager
+    def test_switching_anchor_box_changes_the_patch_frame(self, tmp_path, monkeypatch):
+        """Picking a different box must re-teach against THAT box.
 
-        monkeypatch.setattr(mb, "showwarning", lambda *a, **k: None)
-        monkeypatch.setattr(mb, "showerror", lambda *a, **k: None)
-        monkeypatch.setattr(mb, "showinfo", lambda *a, **k: None)
-        monkeypatch.setattr(ProjectManager, "RECENT_FILE",
-                            str(tmp_path / "recent.json"))
-
-        root = _tk.Tk()
-        root.withdraw()
-        app = MeasureApp(root)
-        try:
-            app._reference_image = cv2.imread(str(_SAMPLE), cv2.IMREAD_GRAYSCALE)
-            app._ref_canvas.load_image(app._reference_image)
-            app._workflow = None
-            app.tool_panel._alignment_var.set("OBB 模型")
-            app.tool_panel._on_alignment_selected()
-            app.tool_panel.set_obb_model(str(_WEIGHTS))
-            app.tool_panel._obb_conf_var.set(0.5)
-            app.tool_panel._obb_imgsz_var.set("1024")
-            app._load_obb_model()
-
-            original = app._workflow._alignment.anchor_class_id
-            # Pick a class that is actually present on this image; switching to
-            # one that is not is exercised separately below.
-            present = {o.class_id for o in app._obb_observations}
-            other = next(k for k in present if k != original)
-            app.tool_panel.set_anchor_class_id(other)
-            app._on_obb_settings_changed()
-
-            assert app._workflow._alignment.anchor_class_id == other
-            assert "锚点类" in app.tool_panel._obb_status_label.cget("text")
-        finally:
-            root.destroy()
-
-    def test_selecting_an_absent_class_says_so(self, tmp_path, monkeypatch):
-        """Choosing a class the image lacks must explain itself, not go quiet.
-
-        The model knows classes the reference image may not contain; silently
-        accepting one would leave the user with a model that matches nothing.
+        The anchor decides the patch frame and the recorded pose, so if switching
+        merely relabelled the selection without re-teaching, tools would silently
+        keep measuring in the previous box's coordinates.
         """
         import cv2
         import tkinter.messagebox as mb
@@ -469,55 +498,47 @@ class TestRealModelThroughGui:
             app.tool_panel._obb_imgsz_var.set("1024")
             app._load_obb_model()
 
-            present = {o.class_id for o in app._obb_observations}
-            absent = next(k for k in app._workflow._alignment.source.class_names
-                          if k not in present)
-            app.tool_panel.set_anchor_class_id(absent)
+            first = app._workflow._alignment.anchor_observation
+            first_size = app._workflow._alignment.nominal_size
+
+            # Choose a box with a visibly different size so the frame must change.
+            target = max(app.tool_panel._obb_detections[:20],
+                         key=lambda o: abs(o.width - first.width))
+            index = app.tool_panel._obb_detections.index(target)
+            app.tool_panel.set_anchor_index(index)
             app._on_obb_settings_changed()
 
-            status = app.tool_panel._obb_status_label.cget("text")
-            assert "没有检出" in status, status
-            # The taught model must not silently adopt a class it cannot match.
-            assert app._workflow._alignment.anchor_class_id != absent
+            after = app._workflow._alignment.anchor_observation
+            assert abs(after.row - target.row) < 1.0
+            assert abs(after.col - target.col) < 1.0
+            assert after is not first or index == 0
+            # The frame follows the anchor.
+            assert app._workflow._alignment.nominal_size != first_size
         finally:
             root.destroy()
 
-    def test_absent_classes_are_annotated_in_the_dropdown(self, tmp_path, monkeypatch):
-        import cv2
-        import tkinter.messagebox as mb
-        from measure_gui.app import MeasureApp
-        from measure_gui.project_manager import ProjectManager
+    def test_anchor_must_be_one_of_the_current_detections(self):
+        """Rejecting an unknown anchor beats silently anchoring elsewhere."""
+        import numpy as np
+        from measure.alignment import ObbAlignment
+        from measure.obb_source import ObbObservation
 
-        monkeypatch.setattr(mb, "showwarning", lambda *a, **k: None)
-        monkeypatch.setattr(mb, "showerror", lambda *a, **k: None)
-        monkeypatch.setattr(mb, "showinfo", lambda *a, **k: None)
-        monkeypatch.setattr(ProjectManager, "RECENT_FILE",
-                            str(tmp_path / "recent.json"))
+        present = [ObbObservation(row=10, col=20, width=50, height=20,
+                                  angle_deg=0.0, class_id=1, score=0.9)]
+        stranger = ObbObservation(row=999, col=999, width=50, height=20,
+                                  angle_deg=0.0, class_id=1, score=0.9)
+        with pytest.raises(ValueError, match="not among"):
+            ObbAlignment._resolve_anchor(present, stranger)
+        # And a matching one is accepted.
+        assert ObbAlignment._resolve_anchor(present, present[0]) is present[0]
 
-        root = _tk.Tk()
-        root.withdraw()
-        app = MeasureApp(root)
-        try:
-            app._reference_image = cv2.imread(str(_SAMPLE), cv2.IMREAD_GRAYSCALE)
-            app._ref_canvas.load_image(app._reference_image)
-            app._workflow = None
-            app.tool_panel._alignment_var.set("OBB 模型")
-            app.tool_panel._on_alignment_selected()
-            app.tool_panel.set_obb_model(str(_WEIGHTS))
-            app.tool_panel._obb_conf_var.set(0.5)
-            app.tool_panel._obb_imgsz_var.set("1024")
-            app._load_obb_model()
+    def test_no_request_defaults_to_the_best(self):
+        from measure.alignment import ObbAlignment
+        from measure.obb_source import ObbObservation
 
-            values = list(app.tool_panel._obb_class_combo.cget("values"))
-            assert any("参考图未检出" in v for v in values), values
-            assert any("参考图未检出" not in v for v in values), values
-            # The annotation must not break index parsing.
-            present = {o.class_id for o in app._obb_observations}
-            chosen = next(k for k in present)
-            app.tool_panel.set_anchor_class_id(chosen)
-            assert app.tool_panel.get_anchor_class_id() == chosen
-        finally:
-            root.destroy()
+        obs = [ObbObservation(row=1, col=1, width=10, height=5, angle_deg=0.0,
+                              class_id=1, score=0.9)]
+        assert ObbAlignment._resolve_anchor(obs, None) is obs[0]
 
 
 class TestGuiModuleStaysImportableWithoutMl:

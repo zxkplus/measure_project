@@ -159,8 +159,10 @@ class ToolPanel(ttk.Frame):
         # at any time (including from a load path that runs before mainloop).
         self._alignment_combo: Optional[ttk.Combobox] = None
         self._using_external_alignment_mode = False
-        #: Class index -> label, filled once a detector is loaded.
-        self._obb_class_names: Dict[int, str] = {}
+        #: Detections on the reference image, best first; the anchor is one of
+        #: these boxes rather than a class, which is unambiguous when the image
+        #: holds many instances of the same class.
+        self._obb_detections: List[Any] = []
         #: True once a detector is attached; gates execution in obb mode.
         self._detector_ready = False
         self._alignment_combo = ttk.Combobox(
@@ -296,14 +298,15 @@ class ToolPanel(ttk.Frame):
                    command=lambda: self._fire(self.on_browse_obb_model)).pack(
             side=tk.LEFT, padx=(4, 0))
 
-        ttk.Label(self._obb_form, text="锚点类别").pack(anchor=tk.W, **pad)
-        self._obb_class_var = tk.StringVar(value="")
-        self._obb_class_combo = ttk.Combobox(
-            self._obb_form, textvariable=self._obb_class_var,
+        ttk.Label(self._obb_form, text="锚点框 (按置信度排序)").pack(
+            anchor=tk.W, **pad)
+        self._obb_anchor_var = tk.StringVar(value="")
+        self._obb_anchor_combo = ttk.Combobox(
+            self._obb_form, textvariable=self._obb_anchor_var,
             values=[], state="readonly", width=18,
         )
-        self._obb_class_combo.pack(fill=tk.X, **pad)
-        self._obb_class_combo.bind(
+        self._obb_anchor_combo.pack(fill=tk.X, **pad)
+        self._obb_anchor_combo.bind(
             "<<ComboboxSelected>>",
             lambda e: self._fire(self.on_obb_settings_changed))
 
@@ -602,51 +605,70 @@ class ToolPanel(ttk.Frame):
             "imgsz": int(self._obb_imgsz_var.get()),
         }
 
-    def set_obb_class_names(self, names: Dict[int, str],
-                            present: Optional[set] = None) -> None:
-        """Populate the anchor-class choices from a loaded model.
+    def set_obb_detections(self, observations) -> None:
+        """List every detection as a selectable anchor, best first.
 
-        Index and label are both shown because selection is by index; a user
-        matching a label alone would pick the wrong class when two share a name.
+        The unit of choice is a *box*, not a class.  A class alone is ambiguous
+        when the reference image holds many instances of it — on a 169-detection
+        sample, choosing "ship" says nothing about which ship sets the patch frame
+        and the anchor pose.  Listing detections lets the user point at the actual
+        part.
 
-        Args:
-            names: Class index to label, from the model.
-            present: Class indices actually detected on the reference image.
-                Those absent are still listed (the model knows them and another
-                reference image may contain them) but annotated, so choosing one
-                is an informed decision rather than a silent dead end.
+        Entries are named ``类别_编号`` and ordered by descending confidence, which
+        is also the default selection, so the common case needs no interaction.
         """
-        self._obb_class_names = dict(names)
+        self._obb_detections = list(observations)
         entries = []
-        for idx, label in sorted(names.items()):
-            suffix = "" if present is None or idx in present else "  (参考图未检出)"
-            entries.append(f"{idx}: {label}{suffix}")
-        self._obb_class_combo.configure(values=entries)
-        if self._obb_class_var.get() not in entries:
-            self._obb_class_var.set("")
+        for index, obs in enumerate(self._obb_detections):
+            name = obs.class_name or str(obs.class_id)
+            score = "n/a" if obs.score is None else f"{obs.score:.3f}"
+            entries.append(f"{name}_{index}  ({score})")
+        self._obb_anchor_combo.configure(values=entries)
+        if entries:
+            self._obb_anchor_var.set(entries[0])
+        else:
+            self._obb_anchor_var.set("")
 
-    def get_anchor_class_label(self) -> str:
-        """The combobox text without its annotation, for messages."""
-        return self._obb_class_var.get().split("  (")[0]
-
-    def get_anchor_class_id(self) -> Optional[int]:
-        """Selected anchor class index, or None when nothing is chosen."""
-        text = self.get_anchor_class_label()
-        if not text or ":" not in text:
+    def get_anchor_index(self) -> Optional[int]:
+        """Index into the detection list, or None when nothing is selected."""
+        text = self._obb_anchor_var.get()
+        if "_" not in text:
             return None
         try:
-            return int(text.split(":", 1)[0])
-        except ValueError:
+            return int(text.rsplit("_", 1)[1].split()[0])
+        except (ValueError, IndexError):
             return None
 
-    def set_anchor_class_id(self, class_id: Optional[int]) -> None:
-        """Select an anchor class by index."""
-        if class_id is None:
-            self._obb_class_var.set("")
+    def get_anchor_observation(self):
+        """The selected detection, or None."""
+        index = self.get_anchor_index()
+        detections = getattr(self, "_obb_detections", [])
+        if index is None or not (0 <= index < len(detections)):
+            return None
+        return detections[index]
+
+    def set_anchor_index(self, index: Optional[int]) -> None:
+        """Select a detection by index."""
+        detections = getattr(self, "_obb_detections", [])
+        if index is None or not (0 <= index < len(detections)):
+            self._obb_anchor_var.set("")
             return
-        label = getattr(self, "_obb_class_names", {}).get(class_id)
-        self._obb_class_var.set(
-            f"{class_id}: {label}" if label is not None else str(class_id))
+        obs = detections[index]
+        name = obs.class_name or str(obs.class_id)
+        score = "n/a" if obs.score is None else f"{obs.score:.3f}"
+        self._obb_anchor_var.set(f"{name}_{index}  ({score})")
+
+    def get_anchor_class_id(self) -> Optional[int]:
+        """Class of the selected detection, for messages and diagnostics."""
+        obs = self.get_anchor_observation()
+        return None if obs is None else obs.class_id
+
+    def get_anchor_class_label(self) -> str:
+        """Readable name of the selected detection."""
+        obs = self.get_anchor_observation()
+        if obs is None:
+            return ""
+        return obs.class_name or str(obs.class_id)
 
     def set_obb_model(self, model_path: str, digest: Optional[str] = None) -> None:
         """Record the loaded model path and display a short digest."""
