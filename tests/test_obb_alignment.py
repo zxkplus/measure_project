@@ -8,6 +8,7 @@ back to inspection-image coordinates.
 
 from __future__ import annotations
 
+import json
 import math
 
 import numpy as np
@@ -419,3 +420,119 @@ class TestExistingModesUnaffected:
         results = wf.measure(image)
         assert results
         assert not hasattr(wf._alignment, "detect")
+
+# ---------------------------------------------------------------------------
+# Manifest persistence (contract 3.1)
+# ---------------------------------------------------------------------------
+
+
+class TestManifestPersistence:
+    """A detector-backed model must survive save/load without losing its frame."""
+
+    def build(self, tmp_path):
+        image = make_image()
+        wf = MultiTargetWorkflow()
+        strategy = ObbAlignment()
+        wf._alignment = strategy
+        strategy.teach(
+            image,
+            source=FakeObbSource([obs_at(140, 270, BOX_H, BOX_W, 12.0)]),
+            anchor_class_id=0, min_score=0.3, max_targets=2,
+            model_ref={"path": "obb.pt", "sha256": "deadbeef"})
+        wf.add_measurement("EdgePair", "pair_1", row=70.0, col=100.0,
+                           angle=math.pi / 2, length1=60.0, length2=6.0,
+                           sigma=1.0, threshold=30.0)
+        directory = tmp_path / "obb_model"
+        wf.save(str(directory))
+        return wf, image, directory
+
+    def test_contract_version_is_3_1(self, tmp_path):
+        from measure.multi_target_workflow import MANIFEST_CONTRACT_VERSION
+        _, _, directory = self.build(tmp_path)
+        manifest = json.loads((directory / "manifest.json").read_text())
+        assert manifest["contract_version"] == MANIFEST_CONTRACT_VERSION == "3.1"
+
+    def test_no_template_cache_is_written(self, tmp_path):
+        """A detector model has no template, so the derived npz must be absent."""
+        _, _, directory = self.build(tmp_path)
+        assert not (directory / "workflow.npz").exists()
+
+    def test_matching_block_is_empty_not_defaults(self, tmp_path):
+        """Storing search defaults would look like real tuning that never ran."""
+        _, _, directory = self.build(tmp_path)
+        manifest = json.loads((directory / "manifest.json").read_text())
+        assert manifest["matching"] == {}
+        assert manifest["alignment"]["preprocessor"] is None
+
+    def test_model_identity_is_recorded(self, tmp_path):
+        _, _, directory = self.build(tmp_path)
+        manifest = json.loads((directory / "manifest.json").read_text())
+        roi = manifest["alignment"]["roi_state"]
+        assert roi["model_ref"] == {"path": "obb.pt", "sha256": "deadbeef"}
+        assert roi["anchor_class_id"] == 0
+        assert roi["max_targets"] == 2
+
+    def test_reload_restores_the_strategy_and_frame(self, tmp_path):
+        _, _, directory = self.build(tmp_path)
+        reloaded = MultiTargetWorkflow.load(str(directory))
+        assert isinstance(reloaded.alignment, ObbAlignment)
+        assert reloaded.alignment.nominal_size == pytest.approx((BOX_H, BOX_W))
+        assert reloaded.alignment.anchor_class_id == 0
+        assert reloaded.alignment.model_ref["sha256"] == "deadbeef"
+        assert [d["label"] for d in reloaded.measurement_defs] == ["pair_1"]
+
+    def test_detector_is_not_persisted(self, tmp_path):
+        """Re-injection is the contract; a model file must not need torch."""
+        _, _, directory = self.build(tmp_path)
+        reloaded = MultiTargetWorkflow.load(str(directory))
+        assert reloaded.alignment.source is None
+
+    def test_reload_does_not_re_derive_the_nominal_size(self, tmp_path):
+        """The frame must come from the asset, not from today's detection.
+
+        Otherwise a reload against a differently-sized part would silently change
+        the coordinate system every tool was taught in.
+        """
+        _, _, directory = self.build(tmp_path)
+        reloaded = MultiTargetWorkflow.load(str(directory))
+        original = reloaded.alignment.nominal_size
+
+        # A detector now reporting a very different box must not move the frame.
+        reloaded.alignment._source = FakeObbSource(
+            [obs_at(140, 270, 300.0, 400.0, 0.0)])
+        assert reloaded.alignment.nominal_size == pytest.approx(original)
+
+    def test_measuring_works_after_reinjecting_a_detector(self, tmp_path):
+        _, image, directory = self.build(tmp_path)
+        reloaded = MultiTargetWorkflow.load(str(directory))
+        reloaded.alignment._source = FakeObbSource(
+            [obs_at(140, 270, BOX_H, BOX_W, 12.0)])
+        results = reloaded.measure(image)
+        assert len(results) == 1
+        assert results[0].valid, results[0].measurements
+
+
+class TestContractCompatibility:
+    def test_3_0_assets_still_load(self):
+        """Contract 3.1 only added fields, so older assets must keep working."""
+        from measure.multi_target_workflow import (
+            COMPATIBLE_MANIFEST_CONTRACT_VERSIONS)
+        assert "3.0" in COMPATIBLE_MANIFEST_CONTRACT_VERSIONS
+        assert "3.1" in COMPATIBLE_MANIFEST_CONTRACT_VERSIONS
+
+    def test_unknown_future_version_is_rejected(self, tmp_path):
+        from measure.multi_target_workflow import MultiTargetWorkflow
+        image = make_image()
+        wf = MultiTargetWorkflow()
+        wf.teach_template(image, center=(140.0, 270.0), size=(BOX_H, BOX_W),
+                          angle_deg=0.0, max_matches=1)
+        directory = tmp_path / "future"
+        wf.save(str(directory))
+
+        manifest_path = directory / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["contract_version"] = "9.9"
+        manifest_path.write_text(json.dumps(manifest))
+
+        with pytest.raises(ValueError, match="Unsupported manifest contract_version"):
+            MultiTargetWorkflow.load(str(directory))

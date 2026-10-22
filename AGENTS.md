@@ -20,6 +20,7 @@
 │   ├── multi_target_workflow.py # THE multi-target engine (only implementation)
 │   ├── object_specs.py         # Single registry for all 10 object types
 │   ├── alignment.py            # AlignmentStrategy: pluggable ROI locators
+│   ├── obb_source.py           # OBB detection primitives (no ML dependency)
 │   ├── rectify.py              # Pure geometry: crop_and_straighten, affine maps
 │   └── result_format.py        # Result formatting shared by GUI and API layers
 ├── run_gui.py                  # GUI entry point
@@ -53,8 +54,11 @@ anything that crosses the two, read
 [`measure_api/measure-api/references/v1-v2-divergence.md`](measure_api/measure-api/references/v1-v2-divergence.md)
 — where they disagree, known shared defects, and undecided ownership questions.
 
-Model assets taught by the GUI use manifest contract 3.0 (`manifest.json` + `reference.npy`
-+ derived `workflow.npz`); legacy single-file `.npz` models upgrade automatically on open.
+Model assets taught by the GUI use manifest contract 3.1 (`manifest.json` + `reference.npy`
++ derived `workflow.npz`); legacy single-file `.npz` models upgrade automatically on open,
+and 3.0 assets load unchanged. Detector-based localisation (`alignment.mode == "obb"`) writes
+no template cache and records the detector's identity in `roi_state.model_ref`; the detector
+itself is injected at run time, so `measure/` never imports torch.
 
 The `measure/` package consolidates all measurement-related code into a single, portable module. It includes:
 - **Core utilities**: constants, signal processing, coordinate transforms, visualization

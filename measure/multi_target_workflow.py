@@ -74,6 +74,7 @@ from measure.alignment import (
     AlignResult,
     FixedRoiAlignment,
     NoneAlignment,
+    ObbAlignment,
     SingleBoxAlignment,
     MultiPointAlignment,
     strategy_from_roi_state,
@@ -438,7 +439,18 @@ def _build_profile_image(
 MANIFEST_FILENAME = "manifest.json"
 REFERENCE_FILENAME = "reference.npy"
 DERIVED_FILENAME = "workflow.npz"
-MANIFEST_CONTRACT_VERSION = "3.0"
+MANIFEST_CONTRACT_VERSION = "3.1"
+
+#: Contracts a current reader can still open.  Kept as an explicit list rather
+#: than a numeric comparison: a version is only compatible if someone has decided
+#: it is, and silently accepting an arbitrary older number is how a reader ends up
+#: guessing at fields it does not understand.
+#:
+#: 3.0 -> 3.1 added detector-based localisation (``alignment.mode == "obb"``,
+#: carrying ``model_ref`` and ``nominal_size`` inside ``roi_state``).  Nothing was
+#: removed or reinterpreted, so 3.0 assets load unchanged and keep their template
+#: or fixed-ROI behaviour.
+COMPATIBLE_MANIFEST_CONTRACT_VERSIONS = ("3.0", "3.1")
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -1070,6 +1082,25 @@ class MultiTargetWorkflow:
             size=tuple(alignment["box_size"]),
             angle_deg=float(alignment["box_angle_deg"]),
         )
+
+    def _teach_obb(
+        self,
+        reference_image: np.ndarray,
+        alignment: Dict[str, Any],
+    ) -> None:
+        """Restore a detector-backed model from its manifest ``alignment`` block.
+
+        The strategy was already rebuilt by ``strategy_from_roi_state``, so this
+        only re-establishes the reference image and the shared caches.  Detection
+        is deliberately *not* re-run: it would need a live detector (an injected
+        capability, absent at load time) and would re-derive a nominal patch size
+        from whatever the model happened to report today instead of honouring the
+        frame the tools were taught in.
+        """
+        stored = self._alignment
+        stored._reference_image = np.asarray(reference_image).copy()
+        stored._template_image = stored._reference_image
+        self._after_teach()
 
     def _after_teach(self) -> None:
         """Refresh the workflow-level caches shared by every teach path."""
@@ -1997,10 +2028,10 @@ class MultiTargetWorkflow:
 
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         contract = manifest.get("contract_version")
-        if contract != MANIFEST_CONTRACT_VERSION:
+        if contract not in COMPATIBLE_MANIFEST_CONTRACT_VERSIONS:
             raise ValueError(
                 f"Unsupported manifest contract_version: {contract!r}. "
-                f"Expected {MANIFEST_CONTRACT_VERSION!r}."
+                f"Supported: {', '.join(COMPATIBLE_MANIFEST_CONTRACT_VERSIONS)}."
             )
 
         reference_path = model_dir / manifest["reference_image"]["file"]
@@ -2034,6 +2065,14 @@ class MultiTargetWorkflow:
         # rebuild exactly the matcher these modes exist to avoid.
         if isinstance(strategy, (NoneAlignment, FixedRoiAlignment)):
             wf._teach_without_search(reference, alignment)
+        elif isinstance(strategy, ObbAlignment):
+            # A detector-backed asset must NOT be routed through teach_template():
+            # `matching` is empty for these, so rebuilding a template search would
+            # raise on the missing keys — or worse, silently produce a model that
+            # searches where it was taught to detect.  Reattach the stored
+            # geometry only; the detector itself is an injected capability and is
+            # supplied by the caller after load (see ObbAlignment.teach).
+            wf._teach_obb(reference, alignment)
         else:
             wf.teach_template(
                 reference,
