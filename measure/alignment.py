@@ -50,6 +50,7 @@ from measure.measure_template import (
     _deserialize_preprocessor,
 )
 
+from measure.obb_source import ObbObservation, select_observations
 from measure.rectify import crop_and_straighten
 
 
@@ -201,8 +202,22 @@ class AlignmentStrategy:
         matched_row: float,
         matched_col: float,
         rotation_deg: float,
+        box_size: Optional[Tuple[float, float]] = None,
     ) -> AlignResult:
         """Align and crop the target from the inspection image.
+
+        Args:
+            inspection_image: Image being inspected.
+            matched_row: Row of the detected target centre.
+            matched_col: Column of the detected target centre.
+            rotation_deg: Target rotation relative to the taught reference.
+            box_size: ``(height, width)`` to crop, overriding the strategy's own
+                geometry.  Strategies whose targets vary in size per instance —
+                notably OBB detection, where every box is measured — need this;
+                template-based modes leave it None and use the taught box.
+
+        Returns:
+            The straightened patch and its coordinate mapping.
 
         Subclasses must implement this.
         """
@@ -278,6 +293,7 @@ class NoneAlignment(AlignmentStrategy):
         matched_row: float,
         matched_col: float,
         rotation_deg: float,
+        box_size: Optional[Tuple[float, float]] = None,
     ) -> AlignResult:
         """Return the full image with an identity mapping.
 
@@ -345,6 +361,7 @@ class FixedRoiAlignment(AlignmentStrategy):
         matched_row: float,
         matched_col: float,
         rotation_deg: float,
+        box_size: Optional[Tuple[float, float]] = None,
     ) -> AlignResult:
         """Crop the fixed ROI.
 
@@ -390,6 +407,7 @@ class SingleBoxAlignment(AlignmentStrategy):
         matched_row: float,
         matched_col: float,
         rotation_deg: float,
+        box_size: Optional[Tuple[float, float]] = None,
     ) -> AlignResult:
         target_angle = self._box_angle_deg - rotation_deg
         patch, M_inv_3x3 = crop_and_straighten(
@@ -599,6 +617,7 @@ class MultiPointAlignment(AlignmentStrategy):
         matched_row: float,
         matched_col: float,
         rotation_deg: float,
+        box_size: Optional[Tuple[float, float]] = None,
     ) -> AlignResult:
         """Align using coarse parent match + control-point affine refinement.
 
@@ -730,12 +749,277 @@ def _compose_affine_2x3(
 
 
 # =============================================================================
+# ObbAlignment — stage 1 by learned oriented-box detection
+# =============================================================================
+
+
+class ObbAlignment(AlignmentStrategy):
+    """Locate targets with an OBB detector instead of a template search.
+
+    Where template matching sweeps a discrete angle grid over a taught patch, a
+    detector reports a box per instance: continuous orientation, no ROI to draw,
+    no search cost.  The measurement stage is untouched — each detected box is
+    cropped and straightened by the same :func:`crop_and_straighten` used
+    everywhere else, so tools, composed objects and coordinate mapping behave
+    identically.
+
+    Patch size is fixed, not per-instance
+    ------------------------------------
+    Detection boxes vary in size, but a measurement tool's parameters are defined
+    once, in patch coordinates — ``FitCircle(radius=320)`` means nothing unless
+    the patch has a stable scale.  So the model records a *nominal* box size at
+    teaching time and every instance is resampled into it.  The alternative
+    (cropping each instance at its own detected size) would quietly change what
+    every tool measures whenever the detector boxes the part slightly differently.
+
+    The nominal size is derived from the detection on the reference image unless
+    the caller supplies one, and it is stored in the manifest so a reloaded model
+    reproduces the same patch frame.
+    """
+
+    mode_name = "obb"
+
+    def __init__(self):
+        super().__init__()
+        self._source: Optional[Any] = None          # ObbSource; kept untyped to
+        self._anchor_cls: Optional[int] = None      # avoid importing its module here
+        self._model_ref: Dict[str, Any] = {}
+        self._nominal_size: Optional[Tuple[float, float]] = None
+        self._min_score: Optional[float] = None
+        self._max_targets: int = 0
+
+    # -- properties -----------------------------------------------------------
+
+    @property
+    def source(self) -> Optional[Any]:
+        """The injected detector, if any."""
+        return self._source
+
+    @property
+    def nominal_size(self) -> Optional[Tuple[float, float]]:
+        """``(height, width)`` every instance is resampled into."""
+        return self._nominal_size
+
+    @property
+    def model_ref(self) -> Dict[str, Any]:
+        """Identity of the model behind this strategy (path, digest, thresholds)."""
+        return dict(self._model_ref)
+
+    @property
+    def anchor_class_id(self) -> Optional[int]:
+        """Class index treated as the part to locate."""
+        return self._anchor_cls
+
+    # -- teaching -------------------------------------------------------------
+
+    def teach(
+        self,
+        reference_image: np.ndarray,
+        *,
+        source: Any = None,
+        anchor_class_id: Optional[int] = None,
+        nominal_size: Optional[Tuple[float, float]] = None,
+        min_score: Optional[float] = None,
+        max_targets: int = 0,
+        model_ref: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Attach a detector and fix the patch frame.
+
+        Deliberately narrow compared with the template-based ``teach``: there is
+        no ROI to draw and no matching parameters to tune, so accepting that
+        signature here would mean silently ignoring most of it.  A caller that
+        passes the wrong thing gets a TypeError rather than a model that looks
+        configured but is not.
+
+        Args:
+            reference_image: Teaching image; also the detection that derives the
+                nominal box size when one is not supplied.
+            source: An ``ObbSource``.  Stored as given, so the engine never needs
+                to import a detector implementation.
+            anchor_class_id: Keep only this detector class.  ``None`` keeps all.
+            nominal_size: ``(height, width)`` for the patch frame.  When omitted
+                it is taken from the highest-scoring anchor detection on the
+                reference image, which is what the user sees when they teach.
+            min_score: Drop detections below this confidence.
+            max_targets: Cap the number of instances; ``0`` means no cap.
+            model_ref: Model identity to record (path, sha256, thresholds).
+
+        Raises:
+            ValueError: If no source is given, the reference image is unusable, or
+                the anchor class cannot be detected on it.
+        """
+        if source is None:
+            raise ValueError(
+                "ObbAlignment.teach() requires a detection source; pass the "
+                "ObbSource that will localise targets at inspection time."
+            )
+        if reference_image is None:
+            raise ValueError("ObbAlignment.teach() requires a reference image")
+
+        image = np.asarray(reference_image)
+        self._reference_image = image.copy()
+        self._source = source
+        self._anchor_cls = anchor_class_id
+        self._min_score = min_score
+        self._max_targets = int(max_targets)
+        self._model_ref = dict(model_ref or {})
+        # No template: this mode exists precisely to avoid building one.
+        self._template_point = None
+        self._template_image = image
+
+        # Teach-time detection.  Failing here is better than shipping a model
+        # that will report nothing at inspection time for reasons the user cannot
+        # see; the anchor is required to be findable on its own reference image.
+        observations = self._select(self._source.detect(image))
+        if not observations:
+            raise ValueError(
+                "The detector found no target on the reference image"
+                + (f" for class {anchor_class_id}" if anchor_class_id is not None
+                   else "")
+                + ". Teach against an image that contains the part, or widen the "
+                  "class/score filters."
+            )
+
+        if nominal_size is not None:
+            height, width = float(nominal_size[0]), float(nominal_size[1])
+            if height <= 0 or width <= 0:
+                raise ValueError(
+                    f"nominal_size must be positive (height, width), got {nominal_size}"
+                )
+            self._nominal_size = (height, width)
+        else:
+            primary = observations[0]
+            self._nominal_size = (float(primary.height), float(primary.width))
+
+        # Record the reference box centre so visualisation and the search-free
+        # code paths have a meaningful box, and so the GUI can draw the frame.
+        primary = observations[0]
+        self._box_center = (float(primary.row), float(primary.col))
+        self._box_size = self._nominal_size
+        self._box_angle_deg = float(primary.angle_deg)
+        self._template_size = int(max(self._nominal_size))
+
+    # -- inspection -----------------------------------------------------------
+
+    def detect(self, inspection_image: np.ndarray) -> List[Dict[str, Any]]:
+        """Localise targets, returning match dicts in the engine's usual shape.
+
+        Returning the same keys as the template matcher keeps
+        ``_measure_one_target`` on a single path.  ``box_size`` is included
+        because unlike a template, each instance carries its own extent and the
+        crop needs it.
+        """
+        if self._source is None:
+            raise RuntimeError(
+                "ObbAlignment has no detection source. Call teach() first."
+            )
+        observations = self._select(self._source.detect(inspection_image))
+        matches: List[Dict[str, Any]] = []
+        for obs in observations:
+            matches.append({
+                "matched_row": float(obs.row),
+                "matched_col": float(obs.col),
+                # Detector confidence, not an NCC score; None stays None so a
+                # source without scores is not mistaken for a perfect match.
+                "match_score": obs.score,
+                # The engine subtracts this from box_angle_deg, so pass the
+                # detected orientation as a delta from the taught one.
+                "best_rotation_deg": float(obs.angle_deg - self._box_angle_deg),
+                "best_scale": 1.0,
+                "valid": True,
+                "box_size": obs.size,
+                "corners": None if obs.corners is None else obs.corners.tolist(),
+                "class_id": obs.class_id,
+            })
+        return matches
+
+    def align(
+        self,
+        inspection_image: np.ndarray,
+        matched_row: float,
+        matched_col: float,
+        rotation_deg: float,
+        box_size: Optional[Tuple[float, float]] = None,
+    ) -> AlignResult:
+        """Crop the detected box into the fixed nominal patch frame.
+
+        ``box_size`` (the instance's own extent) is accepted but deliberately not
+        used for the output shape: the patch frame is the model's, not the
+        instance's, so tools defined at teaching time keep their meaning.  It is
+        taken as an argument so the signature stays uniform across strategies.
+        """
+        if self._nominal_size is None:
+            raise RuntimeError(
+                "ObbAlignment has no nominal patch size. Call teach() first."
+            )
+        target_angle = self._box_angle_deg - rotation_deg
+        patch, M_inv_3x3 = crop_and_straighten(
+            inspection_image,
+            (matched_row, matched_col),
+            self._nominal_size,
+            target_angle,
+        )
+        return AlignResult(patch=patch, M_inv=M_inv_3x3[:2, :])
+
+    # -- helpers --------------------------------------------------------------
+
+    def _select(self, observations: Sequence[Any]) -> List[Any]:
+        """Apply the stored selection policy (class, score, cap)."""
+        return select_observations(
+            observations,
+            class_id=self._anchor_cls,
+            min_score=self._min_score,
+            max_targets=self._max_targets,
+        )
+
+    # -- serialization --------------------------------------------------------
+
+    def get_roi_state(self) -> Dict[str, Any]:
+        """Serialise the geometry the manifest needs to rebuild this strategy."""
+        return {
+            "alignment_mode": self.mode_name,
+            "box_center": list(self._box_center),
+            "box_size": list(self._box_size),
+            "box_angle_deg": self._box_angle_deg,
+            "anchor_class_id": self._anchor_cls,
+            "nominal_size": (None if self._nominal_size is None
+                             else list(self._nominal_size)),
+            "min_score": self._min_score,
+            "max_targets": self._max_targets,
+            "model_ref": dict(self._model_ref),
+        }
+
+    @classmethod
+    def from_roi_state(cls, data: Dict[str, Any], **kwargs) -> "ObbAlignment":
+        """Rebuild the stored geometry; the source is re-attached by the loader.
+
+        The detector itself is never serialised: it is an injected capability, so
+        a caller must supply it again (which is what keeps torch out of the model
+        asset and lets the same model run against a different backend).
+        """
+        strategy = cls()
+        nominal = data.get("nominal_size")
+        strategy._nominal_size = None if nominal is None else tuple(nominal)
+        strategy._anchor_cls = data.get("anchor_class_id")
+        strategy._min_score = data.get("min_score")
+        strategy._max_targets = int(data.get("max_targets", 0) or 0)
+        strategy._model_ref = dict(data.get("model_ref") or {})
+        strategy._box_center = tuple(data.get("box_center", (0.0, 0.0)))
+        strategy._box_size = tuple(data.get("box_size", (0.0, 0.0)))
+        strategy._box_angle_deg = float(data.get("box_angle_deg", 0.0))
+        if strategy._nominal_size is not None:
+            strategy._template_size = int(max(strategy._nominal_size))
+        return strategy
+
+
+# =============================================================================
 # Registry — maps mode_name → AlignmentStrategy subclass
 # =============================================================================
 
 _ALIGNMENT_STRATEGY_REGISTRY: Dict[str, type] = {
     "none": NoneAlignment,
     "fixed_roi": FixedRoiAlignment,
+    "obb": ObbAlignment,
     "single_box": SingleBoxAlignment,
     "multi_point": MultiPointAlignment,
 }

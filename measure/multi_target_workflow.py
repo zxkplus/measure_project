@@ -1323,7 +1323,19 @@ class MultiTargetWorkflow:
         # branching.  The score is 1.0 because there was nothing to score.
         t0 = time.perf_counter()
         self._timer_match = t0
-        if self._alignment.template_point is None:
+        if hasattr(self._alignment, "detect"):
+            # Detector-backed stage 1 (OBB).  `detect()` returns the same match
+            # dicts the template matcher produces, so everything downstream —
+            # per-target measurement, coordinate mapping, debug capture — stays
+            # on one path.  It also carries `box_size`, because unlike a template
+            # each instance has its own extent.
+            if self._debug_dir and self._alignment.template_image is not None:
+                self._debug_save("reference.png", self._alignment.template_image)
+            matches = self._alignment.detect(inspection_image)
+            if not matches:
+                logger.info("ObbAlignment detected no targets")
+                return []
+        elif self._alignment.template_point is None:
             centre_row, centre_col = self._alignment.box_center
             height, width = self._alignment.box_size
             if height <= 0 or width <= 0:
@@ -1397,6 +1409,9 @@ class MultiTargetWorkflow:
         rotation_deg = match.get("best_rotation_deg", 0.0)
         scale = match.get("best_scale", 1.0)
         valid_match = match.get("valid", True)
+        # Detector-based locators report an extent per instance; template
+        # matches do not and fall back to the strategy's taught box.
+        box_size = match.get("box_size")
 
         if not valid_match:
             # Even for invalid matches, store the absolute rotation for correct
@@ -1416,7 +1431,8 @@ class MultiTargetWorkflow:
         # Delegate alignment to the strategy (handles both rigid and
         # affine-refined alignment modes transparently).
         align_result = self._alignment.align(
-            inspection_image, matched_row, matched_col, rotation_deg
+            inspection_image, matched_row, matched_col, rotation_deg,
+            box_size=box_size,
         )
         patch = align_result.patch
         M_inv = align_result.M_inv  # 2x3 affine matrix

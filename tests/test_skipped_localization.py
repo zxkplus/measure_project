@@ -69,9 +69,15 @@ def taught(mode_cls, center=ROI_CENTER, size=ROI_SIZE, angle_deg=0.0):
 
 
 class TestRegistry:
-    def test_new_modes_are_registered(self):
+    def test_every_mode_is_registered(self):
+        """The registry is the single dispatch table, so all modes must be in it.
+
+        Kept as an exact set rather than a subset check: a mode silently dropped
+        from the table would only surface when someone loaded an asset that used
+        it, which is exactly the failure this guards.
+        """
         assert set(_ALIGNMENT_STRATEGY_REGISTRY) == {
-            "none", "fixed_roi", "single_box", "multi_point",
+            "none", "fixed_roi", "obb", "single_box", "multi_point",
         }
 
     @pytest.mark.parametrize("mode,cls", [
