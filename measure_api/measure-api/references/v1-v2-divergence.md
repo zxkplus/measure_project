@@ -316,3 +316,101 @@ Consequences for any implementation:
   obb/yolo/ultralytics under `measure_api/v2/`, and no torch/onnx in `pyproject.toml` or
   `requirements.lock`). Whichever side adds it introduces ML dependencies to that layer, so
   the injection rule above is load-bearing.
+
+## 9. 🔴 Known limitation: `rotation_deg` is unreliable for large ROIs
+
+**Read this before using `rotation_deg` as a measurement.** It applies to v1, the GUI and
+the engine alike — v2's template search is a separate implementation and is not covered by
+these numbers.
+
+### The defect
+
+`TemplatePoint._enumerate_angles_scales()` (`measure/measure_template.py`) discards any
+rotated template variant whose bounding box exceeds the image size:
+
+```python
+warped = self._rotate_scale_template(angle, scale)
+...
+wh, ww = warped.shape
+if wh > H or ww > W:
+    continue          # silent: no log, no counter, no flag in the result
+```
+
+Rotating a rectangle grows its axis-aligned bounds, so a ROI that already fills much of the
+frame loses **every** non-zero angle candidate. Only `angle=0` survives, `best_rotation_deg`
+is therefore always 0, and `TargetResult.rotation_deg` collapses toward the taught box angle
+regardless of how the part is actually oriented.
+
+Measured on the shipped models (reference image rotated by a known amount, then measured):
+
+| model | max error | mean | verdict |
+|---|---|---|---|
+测试 | **26.9°** | 18.3 | search window effectively dead |
+瓶身垂直偏差 | 12.0° | 6.4 | reports ~0.000 at every true angle |
+瓶口圆度测量 | 11.9° | 6.2 | same |
+测试2 | 11.5° | 6.0 | same |
+瓶颈直径圆度测量 | 11.1° | 5.3 | same |
+瓶全高 / 瓶身直径测量 | 8.0° | 5.0 | reports exactly 0.000 |
+测试3 | 1.0° | 0.6 | OK — its ROI is small relative to the frame |
+
+The pattern is size-driven, not content-driven: seven of eight models are affected, and the
+one clean case has a small ROI. Concretely for 瓶身直径测量 (ROI 2488×6048 in a 3648×5472
+image): `angle=0` → 3648×5138 kept, `angle=5` → 4082×5438 **dropped**, `angle=15` → 4854×5908
+**dropped**.
+
+### Why it hides
+
+- **Self-matching cannot detect it.** Feeding the reference image back gives a true delta of
+  0°, which sits exactly on a grid point; measured error was only 0.006° across all 30
+  targets. Any regression test must rotate the image.
+- The match still *succeeds* — score falls off (1.000 → 0.529) but stays above most
+  thresholds, so nothing looks wrong downstream.
+- `_refine_1d_subpixel()` runs and appears to refine, but with a single surviving candidate
+  there is no parabola to fit.
+
+A secondary issue exists in the multi-target path: `_refine_1d_subpixel()` builds its
+parabola from `max(score)` over **all peaks at that angle**, not the peak under evaluation,
+so per-match angles get pulled toward a global average (~2° effect). Fixing that alone does
+not address the 12–27° errors above.
+
+### Consequences for current work
+
+- Do not present `rotation_deg` as an orientation measurement for large-ROI models.
+- A pure-localisation task built on template matching inherits this: position is fine, angle
+  is not. Search-free modes (`none`, `fixed_roi`) report `score=None` and angle 0 honestly
+  rather than fabricating confidence — see §10.
+- OBB-based localisation would sidestep the quantised sweep entirely (model output is
+  continuous), which raises the value of landing it.
+
+Not fixed as of this writing: decided to ship the pose plumbing first. Preferred repair is
+to crop/pad instead of discarding oversized rotated templates, with a warning plus a
+`meta.angle_search_degraded` flag when candidates are dropped.
+
+## 10. Stage 1 can now be skipped (engine modes `none` and `fixed_roi`)
+
+The engine gained two alignment modes that run no template search, mirroring v2's
+`Localization.fixed_roi`:
+
+| mode | patch | mapping | score |
+|---|---|---|---|
+`none` | the inspection image itself | identity | `None` |
+`fixed_roi` | taught ROI cropped and deskewed | affine from `crop_and_straighten` | `None` |
+
+Contract notes for callers:
+
+- **`TargetResult.score` is `Optional[float]`.** Search-free modes report `None`, meaning
+  "nothing was correlated" — not zero confidence and not perfect confidence. It serialises
+  to JSON `null`; `NaN` was rejected because `json.dumps(allow_nan=False)` raises, which
+  would break every API response. Any code formatting or thresholding `score` must handle
+  `None` explicitly (`None < t` raises in Python 3).
+- **Skipping stage 1 removes detection, not measurement.** With no locator the model returns
+  its stored ROI centre for *any* image, including a blank one. If the task needs to know
+  whether the part is present, keep a locator (template or OBB); these modes only drop the
+  search step.
+- **`measurements` may legitimately be empty.** A model with no tools is a supported
+  configuration for position-and-angle tasks; `TargetResult.is_localization_only` states it
+  explicitly instead of leaving callers to infer it from an empty dict. See
+  `TargetResult.valid`'s docstring for how validity is decided in that case.
+- **Use `MultiTargetWorkflow.is_taught` to gate save/execute**, never
+  `workflow._alignment.template_point is None` — the latter wrongly rejects both new modes
+  and was the cause of three GUI refusals.
