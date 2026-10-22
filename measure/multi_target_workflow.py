@@ -121,6 +121,15 @@ class TargetResult:
     A model with no tools therefore reports ``valid=True`` with an empty
     ``measurements`` — do not read that emptiness as failure; check
     :attr:`is_localization_only` if you need to distinguish the cases.
+
+    ``rotation_deg`` is the target's **absolute orientation**, in degrees, in the
+    same sense as :func:`measure.rectify.compute_rotated_box_corners` (visually
+    counter-clockwise positive).  It is not a delta from the taught/reference
+    orientation, so drawing a box around the target needs no further sign change.
+    Both stage-1 kinds are normalised to this at the point they are consumed:
+    a template match reports how far it was rotated from the taught patch, and a
+    detector reports the box orientation outright, so the conversion differs but
+    the value the caller receives does not.
     """
 
     id: int
@@ -1420,6 +1429,27 @@ class MultiTargetWorkflow:
 
         return self._results
 
+    def _absolute_rotation(self, reported_rotation: float) -> float:
+        """Convert a locator's reported rotation into an absolute orientation.
+
+        ``box_angle_deg`` is the orientation of the taught/reference box, and the
+        two stage-1 kinds report differently:
+
+        * template matching returns the rotation *applied* to the taught template
+          (verified: rotating the image by +10 degrees yields +9.79), so the
+          absolute orientation is ``box_angle - reported``.
+        * a detector reports the instance's own orientation via ``detect()``, which
+          already converted it into the same "rotation from the anchor" form, so
+          the same expression applies.
+
+        Keeping this in one place matters because getting it wrong is silent: the
+        anchor instance itself still comes out right (its reported rotation is
+        zero), and only instances away from the anchor drift — by twice their
+        angular offset, which is how a 166-target sample showed a 5.8 degree error
+        on the worst box while looking fine on the first.
+        """
+        return float(self._alignment.box_angle_deg) - float(reported_rotation)
+
     def _measure_one_target(
         self,
         inspection_image: np.ndarray,
@@ -1447,7 +1477,7 @@ class MultiTargetWorkflow:
         if not valid_match:
             # Even for invalid matches, store the absolute rotation for correct
             # box drawing in debug visualizations.
-            absolute_rotation = self._alignment.box_angle_deg - rotation_deg
+            absolute_rotation = self._absolute_rotation(rotation_deg)
             return TargetResult(
                 id=index + 1,
                 score=match_score,
@@ -1669,7 +1699,7 @@ class MultiTargetWorkflow:
         return TargetResult(
             id=index + 1,
             score=match_score,
-            rotation_deg=self._alignment.box_angle_deg - rotation_deg,
+            rotation_deg=self._absolute_rotation(rotation_deg),
             scale=scale,
             center_row=matched_row,
             center_col=matched_col,
@@ -2299,13 +2329,19 @@ def _compute_target_box_corners(
     target: TargetResult,
     size: Tuple[float, float],
 ) -> np.ndarray:
-    """Compute the 4 corners of a target's rotated box in image coordinates."""
+    """Compute the 4 corners of a target's rotated box in image coordinates.
+
+    No sign correction here: ``TargetResult.rotation_deg`` is already an absolute
+    orientation in ``compute_rotated_box_corners``' own convention.  The negation
+    that used to live here assumed a delta-from-reference value and mirrored the
+    box — measured 41.9 px of corner error on a real detection.
+    """
     from measure.rectify import compute_rotated_box_corners
 
     return compute_rotated_box_corners(
         (target.center_row, target.center_col),
         size,
-        -target.rotation_deg,
+        target.rotation_deg,
     )
 
 

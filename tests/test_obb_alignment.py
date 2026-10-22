@@ -159,17 +159,28 @@ class TestDetect:
             assert key in m, f"missing {key}"
         assert m["box_size"] == pytest.approx((BOX_H, BOX_W))
 
-    def test_rotation_is_a_delta_from_the_taught_angle(self):
-        """The engine subtracts it from the taught angle, so it must be relative."""
+    def test_rotation_yields_the_absolute_angle_downstream(self):
+        """What matters is the value the engine derives, not the intermediate sign.
+
+        The engine computes ``box_angle_deg - best_rotation_deg`` to obtain the
+        target's absolute orientation (a convention shared with template matching).
+        An earlier version reported ``instance - anchor``, which made the engine
+        produce ``2*anchor - instance``: the anchor instance itself still looked
+        right, and instances away from it drifted by twice their angular offset —
+        up to 5.8 degrees on a 166-target sample.
+        """
         strategy = ObbAlignment()
         strategy.teach(make_image(),
                        source=FakeObbSource([obs_at(140, 270, BOX_H, BOX_W, 10.0)]))
-        assert strategy.detect(make_image())[0]["best_rotation_deg"] == \
-            pytest.approx(0.0)
+        # Instance identical to the anchor: engine gives back the anchor angle.
+        match = strategy.detect(make_image())[0]
+        assert strategy._box_angle_deg - match["best_rotation_deg"] == \
+            pytest.approx(10.0)
 
         strategy._source = FakeObbSource([obs_at(140, 270, BOX_H, BOX_W, 25.0)])
-        assert strategy.detect(make_image())[0]["best_rotation_deg"] == \
-            pytest.approx(15.0)
+        match = strategy.detect(make_image())[0]
+        assert strategy._box_angle_deg - match["best_rotation_deg"] == \
+            pytest.approx(25.0)
 
     def test_detector_without_scores_is_not_a_perfect_match(self):
         strategy = ObbAlignment()
@@ -200,6 +211,47 @@ class TestDetect:
 # ---------------------------------------------------------------------------
 # The fixed patch frame — the decision this design rests on
 # ---------------------------------------------------------------------------
+
+
+class TestRotationMatchesTheDetector:
+    """The reported orientation must equal what the detector measured.
+
+    Asserted against the detector's own angle rather than against an internal
+    formula, because the original bug was self-consistent: every instance was
+    offset by ``2*anchor - instance``, which the anchor instance itself satisfied
+    exactly.  Comparing two internal expressions would have agreed with the bug.
+    """
+
+    def test_every_instance_reports_its_detected_angle(self):
+        image = make_image()
+        angles = [0.0, 20.0, -35.0, 12.0]
+        observations = [obs_at(140, 270, BOX_H, BOX_W, a) for a in angles]
+        wf = MultiTargetWorkflow()
+        strategy = ObbAlignment()
+        wf._alignment = strategy
+        strategy.teach(image, source=FakeObbSource(observations),
+                       anchor_observation=observations[0])
+
+        results = wf.measure(image)
+        assert len(results) == len(angles)
+        for obs, target in zip(observations, results):
+            assert target.rotation_deg == pytest.approx(obs.angle_deg, abs=1e-6)
+
+    def test_anchor_instance_is_not_a_special_case(self):
+        """The anchor trivially satisfies the old formula, so test away from it."""
+        image = make_image()
+        anchor = obs_at(140, 270, BOX_H, BOX_W, -22.56)
+        far = obs_at(300, 500, BOX_H, BOX_W, -40.0)
+        wf = MultiTargetWorkflow()
+        strategy = ObbAlignment()
+        wf._alignment = strategy
+        strategy.teach(image, source=FakeObbSource([anchor, far]),
+                       anchor_observation=anchor)
+
+        results = wf.measure(image)
+        # 2*anchor - instance would give -5.12 here instead of -40.0.
+        assert results[1].rotation_deg == pytest.approx(-40.0, abs=1e-6)
+        assert results[0].rotation_deg == pytest.approx(-22.56, abs=1e-6)
 
 
 class TestFixedPatchFrame:

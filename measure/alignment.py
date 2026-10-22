@@ -991,9 +991,30 @@ class ObbAlignment(AlignmentStrategy):
                 # Detector confidence, not an NCC score; None stays None so a
                 # source without scores is not mistaken for a perfect match.
                 "match_score": obs.score,
-                # The engine subtracts this from box_angle_deg, so pass the
-                # detected orientation as a delta from the taught one.
-                "best_rotation_deg": float(obs.angle_deg - self._box_angle_deg),
+                # The engine computes `box_angle_deg - best_rotation_deg` to get
+                # the target's absolute orientation, a convention inherited from
+                # template matching where this value is the rotation *applied* to
+                # the taught template (verified: a +10 degree rotation of the image
+                # yields +9.79 here).  Feeding an already-relative delta therefore
+                # double-counted the anchor: with an anchor at -22.56 and a box at
+                # -24.92 the result came out -20.21 instead of -24.92, and the error
+                # grew with distance from the anchor (0 for the anchor itself, which
+                # is why self-matching looked correct).
+                #
+                # The engine turns this into an absolute orientation via
+                # `box_angle_deg - reported`, so what it needs is the *rotation
+                # applied to the anchor frame*: anchor angle minus instance angle
+                # would double-count, and instance minus anchor left the result
+                # un-negated (2*anchor - instance).
+                #
+                # For a detector the instance's absolute angle is already known, so
+                # the applied rotation is simply `obs.angle_deg - anchor_angle` with
+                # the sign that makes `anchor - applied` reproduce it — namely
+                # `anchor - obs.angle`.  (Template matching yields the applied
+                # rotation directly and needs no such flip; both converge on the
+                # same absolute value downstream, which is what TargetResult
+                # documents.)
+                "best_rotation_deg": float(self._box_angle_deg - obs.angle_deg),
                 "best_scale": 1.0,
                 "valid": True,
                 "box_size": obs.size,
