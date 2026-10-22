@@ -189,8 +189,9 @@ class ProjectManager:
     def load_project(project_dir: str, app: MeasureApp) -> None:
         """Load a complete project from a directory.
 
-        1. Loads the model asset (manifest.json + workflow.npz) — this owns the
-           ROI geometry, matching parameters and alignment mode
+        1. Loads the model asset (manifest.json, plus its derived template cache
+           when there is one) — this owns the ROI geometry, matching parameters
+           and alignment mode
         2. Reads project.json for purely GUI state (views, layout, tool order)
         3. Restores all GUI state (ROI, tools, canvas views, layout)
         4. Updates recent projects list
@@ -211,134 +212,156 @@ class ProjectManager:
                 f"当前支持最高 v{MANIFEST_VERSION}。请升级软件。"
             )
 
-        # Load workflow
-        if not os.path.exists(workflow_path):
-            raise FileNotFoundError(f"工作流文件不存在: {workflow_path}")
-
+        # Load workflow.  ``workflow.npz`` must NOT be required here: it is a
+        # derived template cache, and search-free alignment modes (``none``,
+        # ``fixed_roi``) legitimately have no template to cache — such a project
+        # saves only manifest.json + reference.npy.  Requiring the file made the
+        # GUI reject assets the engine can load perfectly, contradicting
+        # MultiTargetWorkflow.load()'s own "never required" contract.
+        # _load_workflow() decides what is actually needed (manifest vs legacy
+        # single-file npz) and raises with an accurate message if neither exists.
         app._workflow = ProjectManager._load_workflow(project_dir, workflow_path)
-        app._current_project_dir = project_dir
-        app._current_project_path = None
-        app._created_at = manifest.get("created_at")
-
-        # The model asset is the single source of truth for measurement config.
-        model = ProjectManager._read_model_manifest(project_dir)
-        view = manifest.get("view") or {}
-
-        # Restore reference image
-        ref_img = app._workflow.reference_image
-        if ref_img is not None:
-            app._reference_image = ref_img
-            app._ref_canvas.load_image(ref_img)
-
-            roi = ProjectManager._roi_from_model(model) or manifest.get("roi", {})
-            if roi:
-                app._ref_canvas.set_roi(
-                    (roi["center_row"], roi["center_col"]),
-                    (roi["height"], roi["width"]),
-                    roi["angle_deg"],
-                )
-                # 'confirmed' is GUI interaction state, never model state: it
-                # comes from project.json ("view" now, "roi" in older files).
-                confirmed = view.get("roi_confirmed",
-                                     manifest.get("roi", {}).get("confirmed", False))
-                if confirmed:
-                    app._ref_canvas.confirm_roi()
-
-                alignment_mode = (ProjectManager._alignment_mode(model)
-                                  or roi.get("alignment_mode")
-                                  or "single_box")
-                app.tool_panel.set_alignment_mode(alignment_mode)
-
-                # Restore control points if multi-point
-                if alignment_mode == "multi_point":
-                    cps = (ProjectManager._control_points(model)
-                           or roi.get("control_points") or [])
-                    if cps:
-                        points = [(cp["row"], cp["col"]) for cp in cps]
-                        app._ref_canvas.set_control_points(points)
-
-            # Restore ref canvas view state
-            ref_state = view.get("ref_canvas_state") or manifest.get(
-                "ref_canvas_state", {})
-            if ref_state:
-                app._ref_canvas.set_view_state(ref_state)
-
-        # Restore template image + tools in template view
-        tmpl = app._workflow.template_image
-        if tmpl is not None:
-            app.template_view.load_template(tmpl, clear_tools=False)
-            tmpl_state = view.get("template_view") or manifest.get(
-                "template_view", {})
-            if tmpl_state:
-                app.template_view.set_state(tmpl_state)
-
-        # Restore tool panel treeview (order from manifest, data from workflow)
-        tools_from_wf = app._workflow.measurement_defs
-        tool_order = manifest.get("tool_list_order", [])
-        tool_visibility = manifest.get("tool_visibility", {})
-        app.tool_panel.clear_tool_list()
-        if tool_visibility:
-            app.tool_panel._tool_visibility = dict(tool_visibility)
-            app.template_view.set_tool_visibility(tool_visibility)
-        app.tool_panel.restore_tool_list(tools_from_wf, tool_order)
-
-        # Restore matching params in UI widgets — from the model asset, falling
-        # back to a legacy project.json block for older projects.
-        matching = ProjectManager._matching_from_model(model) or manifest.get(
-            "matching", {})
-        if matching:
-            app.tool_panel.set_matching_params(
-                matching["preprocessor_type"],
-                matching["match_score_threshold"],
-                matching["angle_range_half"],
-                matching["max_matches"],
-                overlap=matching["overlap"],
-                angle_step_deg=matching["angle_step_deg"],
-            )
-
-        # Restore inspection image if available
-        insp_img = ProjectManager._resolve_inspection_image(project_dir, manifest)
-        if insp_img is not None:
-            app._inspection_image = insp_img
-            app._insp_canvas.load_image(insp_img)
-            insp_state = view.get("insp_canvas_state") or manifest.get(
-                "insp_canvas_state", {})
-            if insp_state:
-                app._insp_canvas.set_view_state(insp_state)
-
-        # Restore reference/inspection image path tracking
-        app._reference_image_path = manifest.get("reference_image_path")
-        app._inspection_image_path = manifest.get("inspection_image_path")
-
-        # Restore checkerboard calibration (optional; old projects skip this)
-        calibration = manifest.get("calibration")
-        if calibration and calibration.get("scale_mm_per_px"):
-            app._calibration = dict(calibration)
-            app._workflow.physical_scale_mm = float(
-                calibration["scale_mm_per_px"])
-            calib_path = os.path.join(project_dir, CALIB_BOARD_FILENAME)
-            if os.path.exists(calib_path):
-                board = cv2.imread(calib_path)
-                if board is not None:
-                    app._calibration_board_image = board
-            app._update_calibration_status()
-
-        # Restore GUI layout state (geometry, tab, sash positions)
-        gui_state = manifest.get("gui", {})
-        if gui_state:
-            app.restore_gui_state(gui_state)
-
-        # Enable execute button
-        app.tool_panel.set_template_created(True)
-        # _exec_btn removed with toolbar in app.py, state managed by tool_panel
-
-        # Update window title
-        project_name = os.path.basename(project_dir)
-        app.root.title(f"工业视觉测量系统 — {project_name}")
-        app._status_text.set(f"项目已加载: {project_dir}")
-
+        ProjectManager._restore_into_app(project_dir, app, manifest, workflow_path)
         # Update recent projects
-        ProjectManager.add_recent_project(project_dir, project_name)
+        ProjectManager.add_recent_project(
+            project_dir, os.path.basename(project_dir))
+
+
+    @staticmethod
+    def _restore_into_app(project_dir: str, app: MeasureApp,
+                           manifest: Dict[str, Any], workflow_path: str) -> None:
+        """Rebuild all engine and UI state from the loaded project.
+
+        Runs with ``app._restoring_project`` set so that repainting and locking
+        the ROI cannot fire the interactive confirm callback: that callback
+        rebuilds the template from the combobox and would replace the alignment
+        strategy just loaded from the model asset.
+        """
+        app._restoring_project = True
+        try:
+            app._current_project_dir = project_dir
+            app._current_project_path = None
+            app._created_at = manifest.get("created_at")
+        
+            # The model asset is the single source of truth for measurement config.
+            model = ProjectManager._read_model_manifest(project_dir)
+            view = manifest.get("view") or {}
+        
+            # Restore reference image
+            ref_img = app._workflow.reference_image
+            if ref_img is not None:
+                app._reference_image = ref_img
+                app._ref_canvas.load_image(ref_img)
+        
+                roi = ProjectManager._roi_from_model(model) or manifest.get("roi", {})
+                if roi:
+                    app._ref_canvas.set_roi(
+                        (roi["center_row"], roi["center_col"]),
+                        (roi["height"], roi["width"]),
+                        roi["angle_deg"],
+                    )
+                    # 'confirmed' is GUI interaction state, never model state: it
+                    # comes from project.json ("view" now, "roi" in older files).
+                    confirmed = view.get("roi_confirmed",
+                                         manifest.get("roi", {}).get("confirmed", False))
+                    if confirmed:
+                        app._ref_canvas.confirm_roi()
+        
+                    alignment_mode = (ProjectManager._alignment_mode(model)
+                                      or roi.get("alignment_mode")
+                                      or "single_box")
+                    app.tool_panel.set_alignment_mode(alignment_mode)
+        
+                    # Restore control points if multi-point
+                    if alignment_mode == "multi_point":
+                        cps = (ProjectManager._control_points(model)
+                               or roi.get("control_points") or [])
+                        if cps:
+                            points = [(cp["row"], cp["col"]) for cp in cps]
+                            app._ref_canvas.set_control_points(points)
+        
+                # Restore ref canvas view state
+                ref_state = view.get("ref_canvas_state") or manifest.get(
+                    "ref_canvas_state", {})
+                if ref_state:
+                    app._ref_canvas.set_view_state(ref_state)
+        
+            # Restore template image + tools in template view
+            tmpl = app._workflow.template_image
+            if tmpl is not None:
+                app.template_view.load_template(tmpl, clear_tools=False)
+                tmpl_state = view.get("template_view") or manifest.get(
+                    "template_view", {})
+                if tmpl_state:
+                    app.template_view.set_state(tmpl_state)
+        
+            # Restore tool panel treeview (order from manifest, data from workflow)
+            tools_from_wf = app._workflow.measurement_defs
+            tool_order = manifest.get("tool_list_order", [])
+            tool_visibility = manifest.get("tool_visibility", {})
+            app.tool_panel.clear_tool_list()
+            if tool_visibility:
+                app.tool_panel._tool_visibility = dict(tool_visibility)
+                app.template_view.set_tool_visibility(tool_visibility)
+            app.tool_panel.restore_tool_list(tools_from_wf, tool_order)
+        
+            # Restore matching params in UI widgets — from the model asset, falling
+            # back to a legacy project.json block for older projects.
+            matching = ProjectManager._matching_from_model(model) or manifest.get(
+                "matching", {})
+            if matching:
+                app.tool_panel.set_matching_params(
+                    matching["preprocessor_type"],
+                    matching["match_score_threshold"],
+                    matching["angle_range_half"],
+                    matching["max_matches"],
+                    overlap=matching["overlap"],
+                    angle_step_deg=matching["angle_step_deg"],
+                )
+        
+            # Restore inspection image if available
+            insp_img = ProjectManager._resolve_inspection_image(project_dir, manifest)
+            if insp_img is not None:
+                app._inspection_image = insp_img
+                app._insp_canvas.load_image(insp_img)
+                insp_state = view.get("insp_canvas_state") or manifest.get(
+                    "insp_canvas_state", {})
+                if insp_state:
+                    app._insp_canvas.set_view_state(insp_state)
+        
+            # Restore reference/inspection image path tracking
+            app._reference_image_path = manifest.get("reference_image_path")
+            app._inspection_image_path = manifest.get("inspection_image_path")
+        
+            # Restore checkerboard calibration (optional; old projects skip this)
+            calibration = manifest.get("calibration")
+            if calibration and calibration.get("scale_mm_per_px"):
+                app._calibration = dict(calibration)
+                app._workflow.physical_scale_mm = float(
+                    calibration["scale_mm_per_px"])
+                calib_path = os.path.join(project_dir, CALIB_BOARD_FILENAME)
+                if os.path.exists(calib_path):
+                    board = cv2.imread(calib_path)
+                    if board is not None:
+                        app._calibration_board_image = board
+                app._update_calibration_status()
+        
+            # Restore GUI layout state (geometry, tab, sash positions)
+            gui_state = manifest.get("gui", {})
+            if gui_state:
+                app.restore_gui_state(gui_state)
+        
+            # Enable execute button
+            app.tool_panel.set_template_created(True)
+            # _exec_btn removed with toolbar in app.py, state managed by tool_panel
+        
+            # Update window title
+            project_name = os.path.basename(project_dir)
+            app.root.title(f"工业视觉测量系统 — {project_name}")
+            app._status_text.set(f"项目已加载: {project_dir}")
+        
+        finally:
+            app._restoring_project = False
 
     # =====================================================================
     # Model-asset readers (the single source of measurement truth)
