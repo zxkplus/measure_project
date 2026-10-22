@@ -1067,8 +1067,14 @@ class MeasureApp:
         self._restoring_project = True
         try:
             self._ref_canvas.clear_control_points()
+            # Negate: observations carry the engine's angle convention (CCW+, as
+            # compute_rotated_box_corners and every manifest box angle use), while
+            # ImageCanvas stores ROI angles CW+ (its rotate handle derives them from
+            # arctan2 in image coordinates and negates only when drawing).  Passing
+            # the raw value drew a mirrored box — measured 41.9 px of corner error on
+            # a real detection, versus 0.0 when negated.
             self._ref_canvas.set_roi(
-                observation.center, observation.size, observation.angle_deg)
+                observation.center, observation.size, -observation.angle_deg)
             self._ref_canvas.confirm_roi()
         finally:
             self._restoring_project = False

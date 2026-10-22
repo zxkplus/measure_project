@@ -604,6 +604,56 @@ class TestRealModelThroughGui:
         finally:
             root.destroy()
 
+    def test_anchor_box_is_drawn_on_the_detected_corners(self, tmp_path, monkeypatch):
+        """The box on the reference image must coincide with the detection.
+
+        Asserts on corner pixels, not on the angle number: the two sides use
+        opposite conventions (observations are CCW+ like every manifest box angle,
+        ImageCanvas stores CW+ because its rotate handle derives angles from
+        arctan2 in image coordinates), so comparing angles would just re-encode the
+        assumption being tested.  Passing the raw angle drew a mirrored box —
+        41.9 px of corner error on a real detection, 0.0 when negated.
+        """
+        import cv2
+        import tkinter.messagebox as mb
+        from measure.rectify import compute_rotated_box_corners
+        from measure_gui.app import MeasureApp
+        from measure_gui.project_manager import ProjectManager
+
+        monkeypatch.setattr(mb, "showwarning", lambda *a, **k: None)
+        monkeypatch.setattr(mb, "showerror", lambda *a, **k: None)
+        monkeypatch.setattr(mb, "showinfo", lambda *a, **k: None)
+        monkeypatch.setattr(ProjectManager, "RECENT_FILE",
+                            str(tmp_path / "recent.json"))
+
+        root = _tk.Tk()
+        root.withdraw()
+        app = MeasureApp(root)
+        try:
+            image = cv2.imread(str(_SAMPLE), cv2.IMREAD_GRAYSCALE)
+            app._reference_image = image
+            app._ref_canvas.load_image(image)
+            app._workflow = None
+            app.tool_panel._alignment_var.set("OBB 模型")
+            app.tool_panel._on_alignment_selected()
+            app.tool_panel.set_obb_model(str(_WEIGHTS))
+            app.tool_panel._obb_conf_var.set(0.5)
+            app.tool_panel._obb_imgsz_var.set("1024")
+            app._load_obb_model()
+
+            anchor = app._workflow._alignment.anchor_observation
+            canvas = app._ref_canvas
+            # Reproduce what the canvas draws for its stored ROI angle.
+            drawn = compute_rotated_box_corners(
+                canvas.roi_center, canvas.roi_size, -canvas._roi_angle)
+            error = float(np.abs(drawn - anchor.corners).max())
+            assert error < 1.5, (
+                f"drawn box is {error:.1f} px off the detection; "
+                f"canvas angle {canvas._roi_angle:.2f} vs detection "
+                f"{anchor.angle_deg:.2f}")
+        finally:
+            root.destroy()
+
     def test_roi_preview_uses_the_engine_angle_convention(self, tmp_path, monkeypatch):
         """The live preview must crop exactly as the engine will.
 
