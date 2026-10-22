@@ -23,6 +23,8 @@
 │   ├── obb_source.py           # OBB detection primitives (no ML dependency)
 │   ├── rectify.py              # Pure geometry: crop_and_straighten, affine maps
 │   └── result_format.py        # Result formatting shared by GUI and API layers
+├── measure_obb/                # Detector adapters (import ML runtimes; NOT imported by measure/)
+│   └── ultralytics_source.py   # YOLO-OBB adapter implementing measure.obb_source.ObbSource
 ├── run_gui.py                  # GUI entry point
 ├── measure_gui/                # tkinter / OpenCV GUI panels
 │   ├── app.py, template_view.py, image_canvas.py, tool_panel.py,
