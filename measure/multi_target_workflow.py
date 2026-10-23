@@ -126,10 +126,15 @@ class TargetResult:
     same sense as :func:`measure.rectify.compute_rotated_box_corners` (visually
     counter-clockwise positive).  It is not a delta from the taught/reference
     orientation, so drawing a box around the target needs no further sign change.
-    Both stage-1 kinds are normalised to this at the point they are consumed:
-    a template match reports how far it was rotated from the taught patch, and a
-    detector reports the box orientation outright, so the conversion differs but
-    the value the caller receives does not.
+
+    Stage 1 reports a *relative* rotation and the two locator families encode it
+    with opposite signs — a template matcher gives ``absolute - taught``, a
+    detector gives ``taught - absolute`` — so the conversion lives with the
+    strategy (:meth:`AlignmentStrategy.absolute_rotation`) rather than here.
+    Confusing the two is near-invisible: every locator reports zero at the taught
+    pose, so only a rotated part reveals it, and then as twice the deviation in
+    the mirrored direction.  ``tests/test_absolute_rotation.py`` pins this
+    against ground truth.
     """
 
     id: int
@@ -1495,23 +1500,19 @@ class MultiTargetWorkflow:
     def _absolute_rotation(self, reported_rotation: float) -> float:
         """Convert a locator's reported rotation into an absolute orientation.
 
-        ``box_angle_deg`` is the orientation of the taught/reference box, and the
-        two stage-1 kinds report differently:
+        The conversion belongs to the strategy, not to this engine, because the
+        two locator families encode "rotation from the taught pose" with opposite
+        signs (see :meth:`AlignmentStrategy.absolute_rotation`): a template
+        matcher reports ``absolute - taught`` while a detector reports
+        ``taught - absolute``.  One shared expression here therefore had to be
+        wrong for one of them, and it was: template models reported the negated
+        deviation — right at the taught pose, and drifting to *twice* the
+        deviation as soon as the part actually rotated.
 
-        * template matching returns the rotation *applied* to the taught template
-          (verified: rotating the image by +10 degrees yields +9.79), so the
-          absolute orientation is ``box_angle - reported``.
-        * a detector reports the instance's own orientation via ``detect()``, which
-          already converted it into the same "rotation from the anchor" form, so
-          the same expression applies.
-
-        Keeping this in one place matters because getting it wrong is silent: the
-        anchor instance itself still comes out right (its reported rotation is
-        zero), and only instances away from the anchor drift — by twice their
-        angular offset, which is how a 166-target sample showed a 5.8 degree error
-        on the worst box while looking fine on the first.
+        Delegating also keeps future locators honest: a new strategy either
+        inherits the documented convention or overrides it deliberately.
         """
-        return float(self._alignment.box_angle_deg) - float(reported_rotation)
+        return float(self._alignment.absolute_rotation(float(reported_rotation)))
 
     def _measure_one_target(
         self,

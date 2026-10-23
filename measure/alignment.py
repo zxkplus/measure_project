@@ -130,6 +130,31 @@ class AlignmentStrategy:
     def box_angle_deg(self) -> float:
         return self._box_angle_deg
 
+    # -- inspection-time angle conversion -------------------------------------
+
+    def absolute_rotation(self, reported_rotation_deg: float) -> float:
+        """Turn a match's reported rotation into the target's absolute orientation.
+
+        Stage 1 reports a rotation *from the taught pose*, and the two locator
+        families encode that same quantity with opposite signs, so the conversion
+        cannot be one shared expression:
+
+        * template matching (this base implementation) reports ``+delta``, i.e.
+          ``absolute - taught`` — the angle the template was rotated by to match.
+          An image rotated +10 degrees away from the reference therefore reports
+          +10, making ``taught + reported`` the absolute orientation.
+        * :class:`ObbAlignment` reports ``taught - absolute`` instead, because it
+          formats a detector's *absolute* angle into the same field the template
+          matcher uses.  It overrides this method.
+
+        Getting the sign wrong is silent rather than loud: at the taught pose the
+        reported value is zero for every locator, so a self-match or an
+        unrotated inspection image looks perfect and only a rotated part exposes
+        the error — as *twice* the deviation, mirrored.  That signature is what
+        this method exists to prevent.
+        """
+        return float(self._box_angle_deg) + float(reported_rotation_deg)
+
     # -- teaching -------------------------------------------------------------
 
     def teach(
@@ -1000,6 +1025,16 @@ class ObbAlignment(AlignmentStrategy):
             )
         return self._select(self._source.detect(image))
 
+    def absolute_rotation(self, reported_rotation_deg: float) -> float:
+        """Undo the sign flip :meth:`detect` applies to a detector's angle.
+
+        ``detect`` stores ``taught - instance`` so the field keeps the
+        template matcher's "rotation from the taught pose" meaning, hence the
+        inverse here is a subtraction.  Using the base implementation's addition
+        would mirror every instance away from the anchor.
+        """
+        return float(self._box_angle_deg) - float(reported_rotation_deg)
+
     def detect(self, inspection_image: np.ndarray) -> List[Dict[str, Any]]:
         """Localise targets, returning match dicts in the engine's usual shape.
 
@@ -1021,29 +1056,14 @@ class ObbAlignment(AlignmentStrategy):
                 # Detector confidence, not an NCC score; None stays None so a
                 # source without scores is not mistaken for a perfect match.
                 "match_score": obs.score,
-                # The engine computes `box_angle_deg - best_rotation_deg` to get
-                # the target's absolute orientation, a convention inherited from
-                # template matching where this value is the rotation *applied* to
-                # the taught template (verified: a +10 degree rotation of the image
-                # yields +9.79 here).  Feeding an already-relative delta therefore
-                # double-counted the anchor: with an anchor at -22.56 and a box at
-                # -24.92 the result came out -20.21 instead of -24.92, and the error
-                # grew with distance from the anchor (0 for the anchor itself, which
-                # is why self-matching looked correct).
-                #
-                # The engine turns this into an absolute orientation via
-                # `box_angle_deg - reported`, so what it needs is the *rotation
-                # applied to the anchor frame*: anchor angle minus instance angle
-                # would double-count, and instance minus anchor left the result
-                # un-negated (2*anchor - instance).
-                #
-                # For a detector the instance's absolute angle is already known, so
-                # the applied rotation is simply `obs.angle_deg - anchor_angle` with
-                # the sign that makes `anchor - applied` reproduce it — namely
-                # `anchor - obs.angle`.  (Template matching yields the applied
-                # rotation directly and needs no such flip; both converge on the
-                # same absolute value downstream, which is what TargetResult
-                # documents.)
+                # Deliberately the *negated* delta: ``taught - instance``.  The
+                # field is shared with the template matcher, which reports
+                # ``absolute - taught`` (positive), so a detector feeding its
+                # absolute angle straight through would later be decoded with the
+                # wrong sign — that is what produced `2*anchor - instance`, an
+                # error of exactly twice the offset from the anchor and zero for
+                # the anchor itself, which is why self-matching looked correct.
+                # `absolute_rotation()` is the single inverse of this choice.
                 "best_rotation_deg": float(self._box_angle_deg - obs.angle_deg),
                 "best_scale": 1.0,
                 "valid": True,

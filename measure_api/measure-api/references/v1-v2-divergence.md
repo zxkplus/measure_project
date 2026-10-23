@@ -393,6 +393,28 @@ Not fixed as of this writing: decided to ship the pose plumbing first. Preferred
 to crop/pad instead of discarding oversized rotated templates, with a warning plus a
 `meta.angle_search_degraded` flag when candidates are dropped.
 
+### A second, unrelated defect in the same field — fixed
+
+Do not conflate the two. Until recently the engine derived the absolute angle as
+`box_angle - reported` for *every* locator, but the two locator families encode "rotation
+from the taught pose" with opposite signs: a template matcher reports `absolute - taught`
+while `ObbAlignment.detect()` reports `taught - absolute` (it formats a detector's absolute
+angle into the same field). Subtraction was therefore right for OBB and wrong for template
+matching, which reported the negated deviation: exactly correct at the taught pose — the only
+case self-matching and unrotated inspection images exercise — and off by *twice* the
+deviation once the part actually rotated. Measured on a controlled part: 5 degrees of real
+rotation reported as -5 (10 degrees of error), 12 as -10.25 (22 degrees).
+
+The conversion now lives with the strategy (`AlignmentStrategy.absolute_rotation`, overridden
+by `ObbAlignment`), and `tests/test_absolute_rotation.py` checks reported angles against
+ground truth at three taught angles and five rotations each.
+
+Re-measuring the table above after the fix: the numbers are *unchanged* for seven of the
+eight models, which is the expected outcome — their angle search returns 0 for every
+candidate, so both sign conventions collapse to the taught box angle and the residual error
+here is the discarded-candidate defect alone. Where the search does work (测试3) the reported
+angle now follows the part within ~1 degree instead of mirroring it.
+
 ## 10. Stage 1 can now be skipped (engine modes `none` and `fixed_roi`)
 
 The engine gained two alignment modes that run no template search, mirroring v2's
