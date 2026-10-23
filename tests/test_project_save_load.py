@@ -419,13 +419,22 @@ class TestLegacyProjectCompatibility:
 
     def test_missing_model_manifest_reports_actionably(self, tmp_path,
                                                      taught_workflow):
+        """A deleted manifest must not be mistaken for a migratable legacy asset.
+
+        The cache left behind is the *current* format, so running the migration
+        script cannot help — it would "upgrade" an already-modern asset and hide the
+        fact that a file was lost.  The message must send the user to a backup.
+        """
         project_dir, _ = _saved_project(tmp_path, taught_workflow)
         os.remove(os.path.join(project_dir, "manifest.json"))
 
         app = FakeApp()
         with pytest.raises(Exception) as excinfo:
             ProjectManager.load_project(project_dir, app)
-        assert "migrate_models_to_manifest" in str(excinfo.value)
+        message = str(excinfo.value)
+        assert "manifest.json" in message
+        assert "备份" in message
+        assert "migrate_models_to_manifest" not in message
 
 
 # ---------------------------------------------------------------------------
@@ -569,12 +578,21 @@ class TestLegacyProjectUpgrade:
 
     def test_bare_legacy_npz_still_reports_actionably(self, tmp_path,
                                                     taught_workflow):
-        """A lone legacy .npz with no project.json cannot be opened by load_project."""
+        """A lone legacy .npz with no project.json cannot be opened by load_project.
+
+        The message must name the migration path rather than a generic "file
+        missing": a pre-manifest asset is a different situation from a damaged
+        project, and the user's next step differs (run the migration script, not
+        restore a backup).
+        """
         project_dir = str(tmp_path / "bare")
         os.makedirs(project_dir)
         _write_legacy_project(project_dir, taught_workflow, project_json_version=0)
 
-        with pytest.raises(FileNotFoundError, match="项目清单不存在"):
+        # A lone legacy .npz with no state file is a bare model, not a project, so
+        # load_project must refuse rather than silently upgrading it: the user
+        # pointed at an asset when they meant a project.
+        with pytest.raises(FileNotFoundError):
             ProjectManager.load_project(project_dir, FakeApp())
 
     def test_load_workflow_is_idempotent_on_an_already_converted_dir(self, tmp_path,

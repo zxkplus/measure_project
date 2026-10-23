@@ -24,6 +24,11 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import cv2
 import numpy as np
 
+from measure.asset_health import (
+    FORMAT_LEGACY,
+    inspect_asset,
+    message_for,
+)
 from measure.multi_target_workflow import MultiTargetWorkflow
 
 if TYPE_CHECKING:
@@ -32,6 +37,9 @@ if TYPE_CHECKING:
 MANIFEST_FILENAME = "project.json"
 WORKFLOW_FILENAME = "workflow.npz"
 REF_IMAGE_FILENAME = "reference.png"
+#: The v1 API keeps its tool list here.  Read as a fallback so a project saved by
+#: the API can be opened in the GUI (and vice versa for the layout).
+API_CONFIG_FILENAME = "config.json"
 INSP_IMAGE_FILENAME = "inspection.png"
 CALIB_BOARD_FILENAME = "calibration_board.png"
 # Model asset manifest written by MultiTargetWorkflow.save().
@@ -199,11 +207,37 @@ class ProjectManager:
         manifest_path = os.path.join(project_dir, MANIFEST_FILENAME)
         workflow_path = os.path.join(project_dir, WORKFLOW_FILENAME)
 
-        if not os.path.exists(manifest_path):
-            raise FileNotFoundError(f"项目清单不存在: {manifest_path}")
+        # Health first, so a missing file produces one accurate message naming it
+        # instead of a downstream error that reads as something else.  Also decides
+        # whether the per-tool state file is the GUI's own (project.json) or an
+        # API project's (config.json), which the fallback below relies on.
+        health = inspect_asset(project_dir)
+        # A legacy *project* has no manifest by definition — upgrading creates one —
+        # so the manifest requirement must not gate it.  Two conditions, both needed:
+        #
+        # * the archive must genuinely be pre-manifest (``asset_health`` reports
+        #   FORMAT_LEGACY only when ``workflow_meta`` is present, so a modern project
+        #   whose manifest was deleted reports FORMAT_DAMAGED instead and is not
+        #   silently "upgraded");
+        # * a state file must be present.  A lone .npz with neither project.json nor
+        #   config.json is a bare model, not a project: the user aimed at an asset
+        #   when the dialog asked for a project, and converting it silently would
+        #   hide that.
+        has_state_file = any(
+            os.path.isfile(os.path.join(project_dir, name))
+            for name in (MANIFEST_FILENAME, API_CONFIG_FILENAME)
+        )
+        is_legacy_project = health.format == FORMAT_LEGACY and has_state_file
+        if not is_legacy_project and not health.loadable:
+            raise FileNotFoundError(message_for(health))
 
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            manifest = json.load(f)
+        manifest = ProjectManager._read_project_state(project_dir)
+        if manifest is None:
+            # project.json is gone or unreadable.  It holds only view state, so the
+            # model remains fully usable; proceeding with defaults is better than
+            # refusing to open an intact model over a layout file.
+            manifest = {}
+            app._status_text.set("界面状态缺失，已使用默认布局")
 
         version = manifest.get("version", 0)
         if version > MANIFEST_VERSION:
@@ -211,6 +245,12 @@ class ProjectManager:
                 f"项目由更高版本软件保存 (v{version})，"
                 f"当前支持最高 v{MANIFEST_VERSION}。请升级软件。"
             )
+
+        # Reporting a repair is necessary — the user should know the asset was
+        # rewritten on open — so the notice is stashed and re-applied after the
+        # restore below, which otherwise overwrites the status line with its own
+        # "project loaded" message.
+        app._asset_health_notice = "；".join(health.problems)
 
         # Load workflow.  ``workflow.npz`` must NOT be required here: it is a
         # derived template cache, and search-free alignment modes (``none``,
@@ -361,7 +401,11 @@ class ProjectManager:
             # Update window title
             project_name = os.path.basename(project_dir)
             app.root.title(f"工业视觉测量系统 — {project_name}")
-            app._status_text.set(f"项目已加载: {project_dir}")
+            notice = getattr(app, "_asset_health_notice", "")
+            app._status_text.set(
+                f"项目已加载: {project_dir}"
+                + (f"（{notice}）" if notice else "")
+            )
         
         finally:
             app._restoring_project = False
@@ -420,6 +464,31 @@ class ProjectManager:
                 return "workflow_meta" in data
         except (OSError, ValueError):
             return False
+
+    @staticmethod
+    def _read_project_state(project_dir: str) -> Optional[Dict[str, Any]]:
+        """Read this directory's tool state, preferring the GUI's own file.
+
+        A GUI project keeps view state in ``project.json``; an API project keeps
+        its tool list in ``config.json``.  Both are read so either can be opened by
+        the other — the shared model asset already carries the measurement objects,
+        so the fallback only affects layout and ordering, not what is measured.
+
+        Returns:
+            The parsed mapping, or ``None`` when neither file is usable.
+        """
+        for name in (MANIFEST_FILENAME, API_CONFIG_FILENAME):
+            path = os.path.join(project_dir, name)
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(data, dict):
+                return data
+        return None
 
     @staticmethod
     def _read_model_manifest(project_dir: str) -> Dict[str, Any]:

@@ -447,6 +447,10 @@ def _build_profile_image(
 
 MANIFEST_FILENAME = "manifest.json"
 REFERENCE_FILENAME = "reference.npy"
+#: Portable copy of the reference image, written by the GUI so a project can be
+#: moved between machines.  Also the source for rebuilding ``reference.npy`` when
+#: that file is lost, since the pixels are identical.
+_PORTABLE_REFERENCE_FILENAME = "reference.png"
 DERIVED_FILENAME = "workflow.npz"
 MANIFEST_CONTRACT_VERSION = "3.1"
 
@@ -460,6 +464,65 @@ MANIFEST_CONTRACT_VERSION = "3.1"
 #: removed or reinterpreted, so 3.0 assets load unchanged and keep their template
 #: or fixed-ROI behaviour.
 COMPATIBLE_MANIFEST_CONTRACT_VERSIONS = ("3.0", "3.1")
+
+
+def _rebuild_reference_from_png(
+    model_dir: Path, manifest: Dict[str, Any]
+) -> Optional[Path]:
+    """Recreate ``reference.npy`` from the portable PNG copy.
+
+    Returns the rebuilt path, or ``None`` when there is nothing to rebuild from.
+    The rebuild is deliberately strict about shape: a PNG of the wrong size is a
+    different image, and accepting it would silently mis-register every taught
+    tool.  The manifest records the expected shape, so this is checkable.
+
+    The digest stored for the original ``.npy`` cannot be reused — PNG round-tripping
+    is lossless for the pixel values but produces a different file encoding — so the
+    manifest is updated with the digest of what was actually written.  Doing that
+    here, rather than leaving a mismatch behind, keeps the asset self-consistent.
+    """
+    png_path = model_dir / _PORTABLE_REFERENCE_FILENAME
+    if not png_path.is_file():
+        return None
+
+    import cv2
+
+    image = cv2.imread(str(png_path), cv2.IMREAD_UNCHANGED)
+    if image is None:
+        return None
+
+    expected_shape = manifest.get("reference_image", {}).get("shape")
+    if expected_shape is not None:
+        actual_shape = [int(image.shape[0]), int(image.shape[1])]
+        if actual_shape != [int(v) for v in expected_shape]:
+            raise ValueError(
+                f"Cannot rebuild '{REFERENCE_FILENAME}' from "
+                f"'{_PORTABLE_REFERENCE_FILENAME}': shape {actual_shape} does not "
+                f"match the manifest's {list(expected_shape)}. The PNG is a "
+                f"different image, so rebuilding would mis-register every tool."
+            )
+
+    reference_path = model_dir / REFERENCE_FILENAME
+    np.save(str(reference_path), np.ascontiguousarray(image), allow_pickle=False)
+
+    # Keep the recorded digest truthful about what is on disk now.
+    digest = _sha256_file(reference_path)
+    manifest.setdefault("files", {})[REFERENCE_FILENAME] = digest
+    manifest["reference_image"]["sha256"] = digest
+    try:
+        (model_dir / MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError:
+        # Read-only media: the rebuilt array is still usable this session even
+        # though the digest could not be persisted.
+        pass
+
+    logger.warning(
+        "Rebuilt %s from %s (the original was missing).",
+        reference_path, png_path,
+    )
+    return reference_path
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -2066,9 +2129,17 @@ class MultiTargetWorkflow:
 
         reference_path = model_dir / manifest["reference_image"]["file"]
         if not reference_path.is_file():
-            raise ValueError(
-                f"Model asset is incomplete: '{reference_path}' is missing."
-            )
+            # The reference array is reconstructible when the portable PNG copy is
+            # present: the GUI writes reference.png from the same pixels for exactly
+            # this reason.  Rebuild rather than fail, because losing a derived copy
+            # should not invalidate a model whose manifest is intact.
+            reference_path = _rebuild_reference_from_png(model_dir, manifest)
+            if reference_path is None:
+                raise ValueError(
+                    f"Model asset is incomplete: '{reference_path}' is missing and "
+                    f"cannot be rebuilt. Expected {REFERENCE_FILENAME}, and either "
+                    f"it or {_PORTABLE_REFERENCE_FILENAME} is required."
+                )
         expected_sha = manifest["reference_image"].get("sha256")
         actual_sha = _sha256_file(reference_path)
         if expected_sha and actual_sha != expected_sha:

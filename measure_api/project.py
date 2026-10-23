@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from measure.asset_health import FORMAT_UNKNOWN, inspect_asset, message_for
 from measure_api.logger import get_logger
 from measure_api.config import Config
 from measure_api.quality import compute_quality
@@ -1143,11 +1144,16 @@ class MeasureProject:
         """
         os.makedirs(self.project_dir, exist_ok=True)
 
-        # 1. Save workflow (binary data)
-        workflow_path = os.path.join(self.project_dir, "template.npz")
+        # 1. Save the model asset.
+        #
+        # Written as a directory-shaped asset (manifest.json + reference.npy) rather
+        # than a single cache file, so a project saved here and one saved by the GUI
+        # have the same model representation and each can open the other's.  A
+        # `template.npz` is still produced alongside for readers that predate this,
+        # but the manifest is what the engine loads.
         if self._workflow is not None:
             try:
-                self._workflow.save(workflow_path)
+                self._workflow.save(self.project_dir)
             except Exception as e:
                 # Workflow may not have a template yet; that's OK
                 logger.warning("Workflow save skipped: %s", e)
@@ -1177,7 +1183,7 @@ class MeasureProject:
             ref_path = os.path.join(self.project_dir, "reference.png")
             cv2.imwrite(ref_path, self._reference_image)
 
-        saved_files = [config_path, workflow_path]
+        saved_files = [config_path, os.path.join(self.project_dir, "manifest.json")]
         logger.info("Project saved: %s (files: %s)", self.project_dir, saved_files)
         return {"saved_to": self.project_dir, "files": saved_files}
 
@@ -1194,12 +1200,50 @@ class MeasureProject:
             Dict with loaded state summary.
         """
         config_path = os.path.join(self.project_dir, "config.json")
-        workflow_path = os.path.join(self.project_dir, "template.npz")
         ref_path = os.path.join(self.project_dir, "reference.png")
 
-        # Load workflow
-        if os.path.isfile(workflow_path):
-            self._workflow = _MTW.load(workflow_path)
+        # Check the asset before touching it.  The previous version guarded every
+        # read with `if os.path.isfile(...)`, so a project missing its model left
+        # `_workflow` as None and failed later in whatever call happened next —
+        # reporting a symptom rather than "the engine asset is missing".
+        health = inspect_asset(self.project_dir)
+        if not health.loadable:
+            # An empty directory is not a damaged project: a caller may load before
+            # anything was saved, which is how an empty session starts.  Distinguish
+            # that from a real asset that lost files, because only the latter needs
+            # the user's attention.
+            if health.format == FORMAT_UNKNOWN and not os.listdir(self.project_dir):
+                self._workflow = None
+                return {
+                    "num_measurements": 0,
+                    "num_composed": 0,
+                    "phase": self.phase,
+                    "empty": True,
+                }
+            raise FileNotFoundError(message_for(health))
+
+        # The engine writes a directory-shaped asset (manifest.json + reference.npy)
+        # regardless of which cache name is present: the GUI historically used
+        # workflow.npz and this API used template.npz, but both are just derived
+        # caches of the same manifest.  Accepting either lets an API project be
+        # opened here and a GUI project be opened by the API.
+        # Missing optional files are tolerated silently, as agreed: the API reports
+        # via return values and must not fail a request over a derived cache.
+        if health.is_model_asset:
+            for cache_name in ("template.npz", "workflow.npz"):
+                candidate = os.path.join(self.project_dir, cache_name)
+                if os.path.isfile(candidate):
+                    self._workflow = _MTW.load(candidate)
+                    break
+            else:
+                # No cache at all is normal for search-free models; the manifest is
+                # the asset, so load the directory.
+                self._workflow = _MTW.load(self.project_dir)
+        else:
+            # Untrained project: state was saved before anything was taught, so
+            # there is no model to load.  Keeping _workflow None matches the state
+            # the caller was in before saving.
+            self._workflow = None
 
         # Load config
         if os.path.isfile(config_path):
