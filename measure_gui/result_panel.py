@@ -17,6 +17,24 @@ from typing import Any, Callable, Dict, List, Optional
 from measure.multi_target_workflow import TargetResult
 
 
+def _first_number(source: Dict[str, Any], *keys: str,
+                  default: Optional[float] = None) -> Optional[float]:
+    """Return the first of ``keys`` that holds an actual number.
+
+    ``dict.get(key, default)`` only falls back when the key is *absent*.  Result
+    payloads deliberately carry ``value: None`` for kinds whose quantity lives in a
+    differently-named field (an angle stores ``value_deg``), so a plain ``get``
+    returned None and formatting raised TypeError — which silently dropped the row
+    from the results table while the summary text, built from a formatter that
+    checked ``value_deg`` first, displayed it correctly.
+    """
+    for key in keys:
+        value = source.get(key)
+        if value is not None:
+            return value
+    return default
+
+
 def _fmt_len(px: float, scale_mm: Optional[float], decimals: int = 3) -> str:
     """Format a pixel length; append the physical value when calibrated."""
     if scale_mm:
@@ -217,34 +235,18 @@ class ResultPanel(ttk.Frame):
                 rtype = result.get("type", "?")
                 valid = result.get("valid", False)
                 status_str = "✓" if valid else "✗"
-
-                if rtype == "point" and valid:
-                    value_str = f"({result['row']:.2f}, {result['col']:.2f})"
-                    score = result.get("meta", {}).get("match_score")
-                    if score is not None:
-                        value_str += f", {score:.4f}"
-                elif rtype == "line" and valid:
-                    value_str = (
-                        f"({result['start_row']:.1f},{result['start_col']:.1f})"
-                        f"→({result['end_row']:.1f},{result['end_col']:.1f})"
-                    )
-                elif rtype == "circle" and valid:
-                    value_str = (
-                        f"({result['center_row']:.1f},{result['center_col']:.1f}) "
-                        f"r={_fmt_len(result['radius'], self._scale_mm, 2)}"
-                    )
-                elif rtype == "distance" and valid:
-                    value_str = _fmt_len(result.get('value', 0), self._scale_mm)
-                elif rtype == "angle" and valid:
-                    value_str = f"{result.get('value', result.get('value_deg', 0)):.3f}"
-                else:
-                    value_str = "-"
+                try:
+                    value_str = self._format_measurement_value(result, rtype, valid)
+                except Exception as exc:  # noqa: BLE001 - never hide a row
+                    # A row that cannot be formatted must still appear.  Dropping it
+                    # silently is how a whole measurement type went missing from this
+                    # table while the summary text showed it.
+                    value_str = f"格式化失败: {type(exc).__name__}"
             else:
                 rtype = getattr(result, "type", "?")
                 valid = getattr(result, "valid", False)
                 status_str = "✓" if valid else "✗"
                 value_str = str(result) if valid else "-"
-
             error_str = ""
             ellipticity_str = ""
             if isinstance(result, dict):
@@ -262,6 +264,35 @@ class ResultPanel(ttk.Frame):
         # Notify
         if self.on_target_selected:
             self.on_target_selected(target)
+
+    def _format_measurement_value(self, result: Dict[str, Any], rtype: str,
+                                 valid: bool) -> str:
+        """Render one measurement's value for the table.
+
+        Split out so a failure here cannot take the rest of the table with it: the
+        caller wraps this and still inserts the row.  That matters because a single
+        unformattable value used to remove an entire measurement type from the
+        display with no indication anything was missing.
+        """
+        if not valid:
+            return "-"
+        if rtype == "point":
+            score = (result.get("meta") or {}).get("match_score")
+            text = f"({result['row']:.2f}, {result['col']:.2f})"
+            return text if score is None else f"{text}, {score:.4f}"
+        if rtype == "line":
+            return (f"({result['start_row']:.1f},{result['start_col']:.1f})"
+                    f"→({result['end_row']:.1f},{result['end_col']:.1f})")
+        if rtype == "circle":
+            return (f"({result['center_row']:.1f},{result['center_col']:.1f}) "
+                    f"r={_fmt_len(result['radius'], self._scale_mm, 2)}")
+        if rtype == "distance":
+            return _fmt_len(_first_number(result, "value", "value_px", default=0.0),
+                            self._scale_mm)
+        if rtype == "angle":
+            return (f"{_first_number(result, 'value_deg', 'value', default=0.0):.3f}"
+                    f"°")
+        return "-"
 
     def _clear_target_list(self):
         for item in self._target_tree.get_children():
@@ -319,12 +350,20 @@ class ResultPanel(ttk.Frame):
                                     if score is not None:
                                         val += f", {score:.4f}"
                                 elif rtype == "distance":
-                                    val = _fmt_len(result.get('value', 0),
-                                                   self._scale_mm)
+                                    val = _fmt_len(
+                                        _first_number(result, "value", "value_px",
+                                                      default=0.0),
+                                        self._scale_mm)
                                 elif rtype == "circle":
-                                    val = f"r={_fmt_len(result.get('radius', 0), self._scale_mm, 2)}"
+                                    val = ("r=" + _fmt_len(
+                                        _first_number(result, "radius", default=0.0),
+                                        self._scale_mm, 2))
                                 elif rtype == "angle":
-                                    val = f"{result.get('value_deg', 0):.3f}°"
+                                    # Same None-vs-missing trap as the table: read
+                                    # through _first_number so a null ``value``
+                                    # cannot shadow the real ``value_deg``.
+                                    val = (f"{_first_number(result, 'value_deg', 'value', default=0.0):.3f}"
+                                           "°")
                                 else:
                                     val = str(result)
                                 status_v = "✓" if result.get("valid") else "✗"

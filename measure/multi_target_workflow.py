@@ -2496,13 +2496,21 @@ def _map_result_to_original(result, M_inv: np.ndarray):
         }
 
     else:  # AngleResult etc.
-        return {
+        payload = {
             "type": result.type,
             "label": result.label,
             "valid": result.valid,
-            "value": getattr(result, "value", None),
-            "value_deg": getattr(result, "value_deg", None),
         }
+        # Only include a field that exists.  Writing ``"value": None`` for an angle
+        # (which stores its number in ``value_deg``) makes ``dict.get("value",
+        # fallback)`` return None instead of the fallback, because get() only
+        # substitutes when the key is absent — a trap every downstream consumer
+        # walks into.
+        if hasattr(result, "value"):
+            payload["value"] = result.value
+        if hasattr(result, "value_deg"):
+            payload["value_deg"] = result.value_deg
+        return payload
 
 
 def _draw_result_on_image(
