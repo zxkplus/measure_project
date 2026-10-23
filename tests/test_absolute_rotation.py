@@ -15,6 +15,8 @@ error for a 5 degree rotation, an order of magnitude above that noise floor.
 
 from __future__ import annotations
 
+import math
+
 import cv2
 import numpy as np
 import pytest
@@ -139,6 +141,75 @@ class TestObbConventionSurvives:
         detector._box_angle_deg = 10.0
         assert template.absolute_rotation(5.0) == pytest.approx(15.0)
         assert detector.absolute_rotation(5.0) == pytest.approx(5.0)
+
+
+def content_angle(gray: np.ndarray) -> float:
+    """Orientation of the bright part inside a patch, in screen degrees CCW+.
+
+    Canonicalised to (-45, 45]: the bar is symmetric under a half turn, so only
+    its tilt is meaningful.
+    """
+    binary = (gray > 120).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contour = max(contours, key=cv2.contourArea)
+    corners = cv2.boxPoints(cv2.minAreaRect(contour))
+    edges = [(corners[(i + 1) % 4] - corners[i]) for i in range(4)]
+    longest = max(edges, key=lambda e: np.hypot(*e))
+    angle = math.degrees(math.atan2(-longest[1], longest[0]))
+    return (angle + 45.0) % 90.0 - 45.0
+
+
+class TestPatchIsStraightened:
+    """A rotated part must still be cropped upright.
+
+    The failure this pins is worse than a wrong number in a table: the tools run
+    on a tilted patch, so a line taught horizontal is fitted along the part's
+    tilt and a scan line crosses the wrong edges.  Before the fix, a part rotated
+    14 degrees was cropped at 29 degrees — twice the rotation.
+    """
+
+    @pytest.mark.parametrize("truth", [-20.0, -12.0, -5.0, 5.0, 12.0, 20.0])
+    def test_template_patch_has_no_residual_tilt(self, truth):
+        workflow = tau(0.0)
+        image = rotated(truth)
+        match = workflow.alignment.template_point.measure(image)["matches"][0]
+        patch = workflow.alignment.align(
+            image, match["matched_row"], match["matched_col"],
+            match["best_rotation_deg"]).patch
+        assert abs(content_angle(patch)) < TOL_DEG
+
+    def test_obb_patch_has_no_residual_tilt(self):
+        angle = 20.0
+        image = rotated(angle)
+        strategy = ObbAlignment()
+        anchor = ObbObservation.from_corners(
+            compute_rotated_box_corners(CENTER, BOX, 0.0), class_id=0, score=0.9)
+        strategy.teach(
+            base_image(), source=_ScriptedSource([anchor]), anchor_observation=anchor,
+            nominal_size=BOX)
+        # Teach() must see the anchor; detection must see a rotated instance, so
+        # the scripted source is swapped once teaching is done.
+        instance = ObbObservation.from_corners(
+            compute_rotated_box_corners(CENTER, BOX, angle), class_id=0, score=0.9)
+        strategy._source = _ScriptedSource([instance])
+        match = strategy.detect(image)[0]
+        assert match["best_rotation_deg"] == pytest.approx(-angle)
+        patch = strategy.align(
+            image, match["matched_row"], match["matched_col"],
+            match["best_rotation_deg"]).patch
+        assert abs(content_angle(patch)) < TOL_DEG
+
+    def test_crop_angle_is_the_negated_absolute_rotation(self):
+        """The patch frame and the reported pose must be derived from one value."""
+        from measure.alignment import SingleBoxAlignment
+
+        for strategy, reported, expected_absolute in (
+            (SingleBoxAlignment(), 7.0, 7.0),
+            (ObbAlignment(), -7.0, 7.0),
+        ):
+            strategy._box_angle_deg = 0.0
+            assert strategy.absolute_rotation(reported) == pytest.approx(expected_absolute)
+            assert strategy.crop_angle(reported) == pytest.approx(-expected_absolute)
 
 
 class TestSearchFreeModes:

@@ -155,6 +155,28 @@ class AlignmentStrategy:
         """
         return float(self._box_angle_deg) + float(reported_rotation_deg)
 
+    def crop_angle(self, rotation_deg: float) -> float:
+        """Angle to hand to :func:`crop_and_straighten` for this target.
+
+        Derived from :meth:`absolute_rotation` rather than re-derived, so the
+        patch frame and the reported pose cannot disagree: straightening means
+        rotating the crop *back* by the target's absolute orientation, and
+        ``crop_and_straighten`` adds its angle to the content rather than
+        removing it.
+
+        Both halves of that sentence have been got wrong before.  Using the box
+        angle alone left every target tilted by its own rotation; using the
+        *negated* box-delta tilted them by **twice** their rotation, which still
+        looks plausible in a small patch and only shows up as a measurement that
+        follows the part's tilt instead of the taught direction.  Measured on a
+        part rotated 14 degrees: the patch came out at 29 degrees.
+
+        The reason this cannot be one formula at the call sites is the same as
+        for :meth:`absolute_rotation` — the two locator families report the
+        rotation with opposite signs.
+        """
+        return -self.absolute_rotation(float(rotation_deg))
+
     # -- teaching -------------------------------------------------------------
 
     def teach(
@@ -312,14 +334,23 @@ def _crop_angle(box_angle_deg: float, rotation_deg: float = 0.0) -> float:
     have been wrong at one time or another; ``grep -n "set_roi("`` and this
     docstring are the checklist.
 
+    This two-argument form follows the **template** locator's convention, where
+    ``rotation_deg`` is ``absolute - taught``.  It is correct only for a box that
+    is not moving; a locator-aware crop must go through
+    :meth:`AlignmentStrategy.crop_angle`, which derives the angle from the
+    strategy's own :meth:`AlignmentStrategy.absolute_rotation`.  Using this
+    function with a detector's (oppositely signed) delta tilted every patch by
+    twice the target's rotation.
+
     Args:
         box_angle_deg: Box orientation as stored (visually CCW positive).
-        rotation_deg: Target rotation relative to the taught box.
+        rotation_deg: Target rotation relative to the taught box, in the template
+            locator's sign convention.
 
     Returns:
         The angle to hand to :func:`measure.rectify.crop_and_straighten`.
     """
-    return -(float(box_angle_deg) - float(rotation_deg))
+    return -(float(box_angle_deg) + float(rotation_deg))
 
 
 # =============================================================================
@@ -423,7 +454,7 @@ class FixedRoiAlignment(AlignmentStrategy):
         # The straightened reference ROI doubles as the patch frame of record.
         self._template_image, _ = crop_and_straighten(
             self._reference_image, self._box_center, self._box_size,
-            _crop_angle(self._box_angle_deg),
+            self.crop_angle(0.0),
         )
         self._template_size = int(max(self._box_size))
 
@@ -445,7 +476,7 @@ class FixedRoiAlignment(AlignmentStrategy):
             matched_row, matched_col = self._box_center
         if rotation_deg is None:
             rotation_deg = 0.0
-        target_angle = _crop_angle(self._box_angle_deg, rotation_deg)
+        target_angle = self.crop_angle(rotation_deg)
         patch, M_inv_3x3 = crop_and_straighten(
             inspection_image,
             (matched_row, matched_col),
@@ -481,7 +512,7 @@ class SingleBoxAlignment(AlignmentStrategy):
         rotation_deg: float,
         box_size: Optional[Tuple[float, float]] = None,
     ) -> AlignResult:
-        target_angle = _crop_angle(self._box_angle_deg, rotation_deg)
+        target_angle = self.crop_angle(rotation_deg)
         patch, M_inv_3x3 = crop_and_straighten(
             inspection_image,
             (matched_row, matched_col),
@@ -697,7 +728,7 @@ class MultiPointAlignment(AlignmentStrategy):
         match successfully.
         """
         # Stage 1: rigid crop (same as SingleBoxAlignment)
-        target_angle = _crop_angle(self._box_angle_deg, rotation_deg)
+        target_angle = self.crop_angle(rotation_deg)
         rigid_patch, M_rigid_3x3 = crop_and_straighten(
             inspection_image,
             (matched_row, matched_col),
@@ -1092,7 +1123,7 @@ class ObbAlignment(AlignmentStrategy):
             raise RuntimeError(
                 "ObbAlignment has no nominal patch size. Call teach() first."
             )
-        target_angle = _crop_angle(self._box_angle_deg, rotation_deg)
+        target_angle = self.crop_angle(rotation_deg)
         patch, M_inv_3x3 = crop_and_straighten(
             inspection_image,
             (matched_row, matched_col),

@@ -409,6 +409,15 @@ The conversion now lives with the strategy (`AlignmentStrategy.absolute_rotation
 by `ObbAlignment`), and `tests/test_absolute_rotation.py` checks reported angles against
 ground truth at three taught angles and five rotations each.
 
+The same sign confusion had a second, worse consequence: the *cropping* angle was derived
+with the same shared expression (`box_angle - rotation`), so a template model cropped a
+rotated part at **twice** its rotation — a part rotated 14 degrees produced a 29 degree patch.
+Tools then ran on a tilted frame: a line taught horizontal followed the part's tilt, and a
+scan line crossed the wrong edges. It looks subtle because the patch is small and self-similar,
+and because at the taught pose the error vanishes. `AlignmentStrategy.crop_angle` now derives
+the crop angle from `absolute_rotation` (both families), so the patch frame and the reported
+pose cannot disagree; OBB output is unchanged because it already had the inverse sign built in.
+
 Re-measuring the table above after the fix: the numbers are *unchanged* for seven of the
 eight models, which is the expected outcome — their angle search returns 0 for every
 candidate, so both sign conventions collapse to the taught box angle and the residual error
