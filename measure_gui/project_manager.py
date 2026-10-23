@@ -397,6 +397,12 @@ class ProjectManager:
             # Enable execute button
             app.tool_panel.set_template_created(True)
             # _exec_btn removed with toolbar in app.py, state managed by tool_panel
+
+            # Detector-backed projects carry no detector inside the asset (that is
+            # what keeps torch out of it), so the model is reloaded from the path
+            # recorded in the manifest.  Runs after the reference image and
+            # alignment mode are in place, both of which it needs.
+            app.restore_obb_state()
         
             # Update window title
             project_name = os.path.basename(project_dir)
@@ -525,7 +531,11 @@ class ProjectManager:
             "center_col": float(center[1]),
             "height": float(size[0]),
             "width": float(size[1]),
-            "angle_deg": float(alignment.get("box_angle_deg", 0.0)),
+            # Negated here so the dict is directly usable by the canvas, which
+            # stores ROI angles CW+ while manifests record them CCW+.  Converting
+            # at this boundary rather than at each set_roi() call keeps the two
+            # conventions from meeting in the middle of the GUI.
+            "angle_deg": -float(alignment.get("box_angle_deg", 0.0)),
             "alignment_mode": alignment.get("mode", "single_box"),
         }
         control_points = ProjectManager._control_points(model)
@@ -615,7 +625,7 @@ class ProjectManager:
             app._ref_canvas.set_roi(
                 app._workflow.box_center,
                 app._workflow.box_size,
-                app._workflow.box_angle_deg,
+                -app._workflow.box_angle_deg,
             )
             app._ref_canvas.confirm_roi()
 

@@ -218,6 +218,15 @@ class FakeApp:
     def restore_gui_state(self, gui_state):
         self.calls.append(("restore_gui_state", dict(gui_state)))
 
+    def restore_obb_state(self):
+        """Mirror of the real hook.
+
+        A test double must implement the interface it stands in for, otherwise a
+        missing method looks like a production bug (as it did when this was first
+        added) and the shape of the real call sequence goes untested.
+        """
+        self.calls.append(("restore_obb_state",))
+
     def _update_calibration_status(self):
         self.calls.append(("update_calibration_status",))
 
@@ -329,7 +338,11 @@ class TestLoadProject:
         # patch frame origin is (ROI_CENTER - ROI_SIZE/2)
         assert app._ref_canvas.roi_center == pytest.approx(ROI_CENTER)
         assert app._ref_canvas.roi_size == pytest.approx(ROI_SIZE)
-        assert app._ref_canvas.roi_angle == pytest.approx(12.5)
+        # Negated on the way in: manifests record box angles CCW+ (the
+        # compute_rotated_box_corners convention) while ImageCanvas stores ROI
+        # angles CW+, because its rotate handle derives them from arctan2 in image
+        # coordinates.  Handing over the raw value drew a mirrored box.
+        assert app._ref_canvas.roi_angle == pytest.approx(-12.5)
 
     def test_matching_params_restored_from_the_model_manifest(self, tmp_path,
                                                              taught_workflow):
@@ -519,7 +532,8 @@ class TestLegacyProjectUpgrade:
 
         # ROI and matching restored from the converted model asset
         assert app._ref_canvas.roi_center == pytest.approx(ROI_CENTER)
-        assert app._ref_canvas.roi_angle == pytest.approx(12.5)
+        # Negated for the canvas' CW+ convention; see the test above.
+        assert app._ref_canvas.roi_angle == pytest.approx(-12.5)
         assert app._ref_canvas.roi_confirmed is True
         calls = [c for c in app.tool_panel.calls if c[0] == "set_matching_params"]
         assert calls[0][2] == pytest.approx(0.55)

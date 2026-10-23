@@ -271,6 +271,22 @@ def _crop_angle(box_angle_deg: float, rotation_deg: float = 0.0) -> float:
     Kept as a function rather than a sign at each call site so the reasoning lives
     in one place and a new call site cannot silently pick the wrong convention.
 
+    Three conventions exist in this codebase, and getting one wrong is silent
+    because an axis-aligned box hides the sign entirely:
+
+    ==========================================  =====================
+    where                                       positive means
+    ==========================================  =====================
+    manifest / ``compute_rotated_box_corners``  visually CCW (row, col)
+    ``crop_and_straighten`` (this function)     maths CCW on (x, y) = (col, row)
+    ``ImageCanvas._roi_angle``                  visually CW
+    ==========================================  =====================
+
+    So a manifest angle reaching ``crop_and_straighten`` must be negated (this
+    function), and one reaching the canvas must be negated too.  Five call sites
+    have been wrong at one time or another; ``grep -n "set_roi("`` and this
+    docstring are the checklist.
+
     Args:
         box_angle_deg: Box orientation as stored (visually CCW positive).
         rotation_deg: Target rotation relative to the taught box.
@@ -969,6 +985,20 @@ class ObbAlignment(AlignmentStrategy):
         return self._anchor_observation
 
     # -- inspection -----------------------------------------------------------
+
+    def observations_for(self, image: np.ndarray) -> List[Any]:
+        """Return the selected observations for ``image`` without teaching.
+
+        Used when reopening a project: the geometry is already stored, so this only
+        re-runs detection to repopulate the anchor list.  Teaching would re-derive
+        the nominal size from today's detections, moving the frame the tools were
+        taught in.
+        """
+        if self._source is None:
+            raise RuntimeError(
+                "ObbAlignment has no detection source. Attach one before detecting."
+            )
+        return self._select(self._source.detect(image))
 
     def detect(self, inspection_image: np.ndarray) -> List[Dict[str, Any]]:
         """Localise targets, returning match dicts in the engine's usual shape.

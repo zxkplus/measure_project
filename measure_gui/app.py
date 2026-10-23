@@ -47,6 +47,35 @@ from .tool_panel import ToolPanel
 from measure.rectify import crop_and_straighten
 
 
+class _AnchorStub:
+    """Minimal stand-in for a detection, for restoring views from stored geometry.
+
+    A reopened project has the anchor's centre/size/angle in its manifest but no
+    ``ObbObservation`` — that type belongs to a live detector result.  The template
+    view only needs the geometry, so this carries exactly that and nothing else.
+    """
+
+    __slots__ = ("row", "col", "height", "width", "angle_deg", "class_id",
+                 "class_name", "score", "corners")
+
+    def __init__(self, center, size, angle_deg):
+        self.row, self.col = float(center[0]), float(center[1])
+        self.height, self.width = float(size[0]), float(size[1])
+        self.angle_deg = float(angle_deg)
+        self.class_id = None
+        self.class_name = None
+        self.score = None
+        self.corners = None
+
+    @property
+    def center(self):
+        return (self.row, self.col)
+
+    @property
+    def size(self):
+        return (self.height, self.width)
+
+
 class MeasureApp:
     """Main application class."""
 
@@ -456,10 +485,12 @@ class MeasureApp:
                     if ref_img is not None:
                         self._reference_image = ref_img
                         self._ref_canvas.load_image(ref_img)
+                        # Negated: box angles follow the model convention (CCW+),
+                        # the canvas stores ROI angles CW+.  See _crop_angle().
                         self._ref_canvas.set_roi(
                             self._workflow.box_center,
                             self._workflow.box_size,
-                            self._workflow.box_angle_deg,
+                            -self._workflow.box_angle_deg,
                         )
                         self._ref_canvas.confirm_roi()
 
@@ -1026,6 +1057,11 @@ class MeasureApp:
                 anchor_class_id=best.class_id,
                 anchor_observation=best,
                 min_score=self.tool_panel.get_obb_settings()["conf"],
+                # Persist the detector's identity so a reopened project knows which
+                # model produced it and can reload it automatically.  Without this
+                # the manifest recorded an empty model_ref and every load started
+                # from scratch, asking the user to browse for the file again.
+                model_ref=source.serialize(),
             )
         except ValueError as exc:
             self.tool_panel.set_obb_status(f"建模失败：{exc}", False)
@@ -1108,6 +1144,9 @@ class MeasureApp:
                 anchor_class_id=chosen.class_id,
                 anchor_observation=chosen,
                 min_score=self.tool_panel.get_obb_settings()["conf"],
+                # Keep the recorded identity: re-teaching a different anchor must
+                # not erase which model this project belongs to.
+                model_ref=strategy.model_ref or None,
             )
         except ValueError as exc:
             self.tool_panel.set_obb_status(f"建模失败：{exc}", False)
@@ -1131,11 +1170,15 @@ class MeasureApp:
         Tools are defined in patch coordinates, so the template view must show the
         frame those coordinates refer to.  Without this the view keeps whatever the
         ROI preview last drew, which for a detector mode is a different box.
+
+        Needs no detector: ``align()`` derives the patch from the anchor geometry
+        alone, which is why this works while restoring a project — before the model
+        has been reloaded.
         """
         if observation is None or self._reference_image is None:
             return
         strategy = self._workflow._alignment if self._workflow else None
-        if strategy is None or getattr(strategy, "source", None) is None:
+        if strategy is None or strategy.nominal_size is None:
             return
         try:
             patch = strategy.align(
@@ -1144,6 +1187,90 @@ class MeasureApp:
         except Exception:  # noqa: BLE001 - preview must never break the load
             return
         self.template_view.load_template(patch)
+
+    def restore_obb_state(self) -> None:
+        """Rebuild detector-backed state after loading an OBB project.
+
+        Called by the project loader once the workflow is in place.  Three things
+        are restored, in order of how much the user notices their absence:
+
+        1. **The template view** — it must show the straightened patch, since that
+           is the frame the tools live in.  This needs no detector: the patch
+           follows from the anchor geometry already in the manifest.
+        2. **The recorded model** — the path and digest are read back into the panel
+           so a reopened project does not ask the user to browse for a file it
+           already knows.
+        3. **The detector itself** — reloaded automatically from the recorded path
+           when that file still exists.  A detector is deliberately never stored
+           inside a project (that is what keeps torch out of the model asset), so
+           it must be re-created; doing it silently is what makes reopening feel
+           like reopening rather than reconfiguring.
+
+        Failure at step 3 is reported, not fatal: the model geometry is intact and
+        the user can still point at a different weights file.
+        """
+        if self._workflow is None:
+            return
+        strategy = self._workflow._alignment
+        if getattr(strategy, "mode_name", None) != "obb":
+            return
+
+        # 1. Template view from the stored anchor geometry (no detector needed).
+        anchor = strategy.anchor_observation
+        if anchor is None and strategy.nominal_size is not None:
+            anchor = _AnchorStub(strategy.box_center, strategy.box_size,
+                                 strategy.box_angle_deg)
+        if anchor is not None:
+            self._refresh_obb_template_view(anchor)
+
+        # 2. Panel fields from the recorded model identity.
+        model_ref = strategy.model_ref or {}
+        if model_ref:
+            self.tool_panel.set_obb_model(
+                model_ref.get("path", ""), model_ref.get("sha256"))
+            if model_ref.get("imgsz") is not None:
+                self.tool_panel._obb_imgsz_var.set(str(int(model_ref["imgsz"])))
+            if model_ref.get("conf") is not None:
+                self.tool_panel._obb_conf_var.set(float(model_ref["conf"]))
+            # Class names are only needed to label entries; the anchor list itself
+            # is rebuilt from a fresh detection below, so nothing to set here.
+
+        # 3. Reload the detector from the recorded path.
+        path = model_ref.get("path")
+        if not path:
+            self.tool_panel.set_obb_status(
+                "工程未记录模型路径，请选择模型文件后点击「载入模型并自检」", False)
+            # Gate execution too: without a detector a run returns zero targets,
+            # which reads as "the part is absent" rather than "no model attached".
+            self.tool_panel.set_detector_ready(False)
+            return
+        if not os.path.isfile(path):
+            self.tool_panel.set_obb_status(
+                f"记录的模型文件不存在：{path}\n请重新选择模型文件", False)
+            self.tool_panel.set_detector_ready(False)
+            return
+
+        source = self._load_obb_source()
+        if source is None:
+            # _load_obb_source already reported why.
+            self.tool_panel.set_detector_ready(False)
+            return
+
+        mismatch = None
+        if hasattr(source, "verify_matches"):
+            mismatch = source.verify_matches(model_ref)
+
+        strategy._source = source
+        self._obb_observations = strategy.observations_for(self._reference_image)
+        self.tool_panel.set_obb_detections(self._obb_observations)
+        self.tool_panel.set_detector_ready(True)
+        self.tool_panel.set_obb_status(
+            (f"已自动载入模型：{os.path.basename(path)}"
+             + (f"\n⚠ {mismatch}" if mismatch else "，指纹一致")),
+            mismatch is None,
+        )
+        self._status_text.set(
+            f"OBB 工程已打开：模型 {os.path.basename(path)} 已自动载入")
 
     def _sync_detector_state(self) -> None:
         """Reflect whether a detector is attached, for the current mode.
