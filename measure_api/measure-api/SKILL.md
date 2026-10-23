@@ -6,7 +6,10 @@ description: |
   inspect industrial parts via machine vision, call a measurement REST API, build a web or desktop 
   application around an industrial vision pipeline, perform NCC template matching measurements, 
   run batch inspection across multiple production images, or create measurement models for 
-  production quality control. The API has a two-phase lifecycle: Teaching (build + tune a model)
+  production quality control. Also covers **localisation-only** models (report a part's centre and
+  rotation without measuring it) and **OBB / YOLO oriented-box localisation** — how stage 1
+  locates a target, which of those are reachable from each API generation, and why OBB is
+  GUI/engine-only today. The API has a two-phase lifecycle: Teaching (build + tune a model)
   and Measurement (run model on production images). All endpoints return JSON.
 ---
 
@@ -32,6 +35,31 @@ implementations currently disagree (dependency type rules, template-search defau
 frame/unit tracking), a deliberate-looking-like-a-bug convention in shared
 edge-pair code,
 which side owns each difference, and what is still undecided.
+
+## Localisation-only and OBB (read this before answering "where is the part")
+
+Stage 1 (locate) and stage 2 (measure) are separable. A model with **no measurement tools**
+is a supported configuration: the part's pose *is* the result. Stage 1 is pluggable — a
+template search, a detector-supplied oriented box (OBB), a fixed ROI, or no search at all.
+
+```python
+target.pose                 # center_row, center_col, angle_deg, scale, score
+target.is_localization_only # True when the model defines no tools
+```
+
+- In **v1** this shows up as `template_ready` + zero measurements; each target has
+  `measurements == {}` and flat `row`/`col`/`rotation_deg`. There is **no `pose` key**.
+- **v1 has no OBB entry point.** OBB exists in the shared engine and the GUI only.
+- In **v2** use `POST /api/v2/template-matches` (returns poses directly); a recipe run also
+  exposes `targets[].localization`, but `Recipe.nodes` requires ≥1 node, so a recipe cannot
+  be localisation-only. **v2 has no OBB capability.**
+- `angle_deg` is the target's **absolute** orientation (visually CCW positive). Do not
+  re-derive it from a match's reported rotation — the two locator families report their
+  delta with opposite signs. Call `AlignmentStrategy.absolute_rotation()` /
+  `crop_angle()`.
+
+Full detail, including the OBB teach sequence, detector-identity persistence and the angle
+conventions: **[references/localization.md](references/localization.md)**.
 
 ## Overview
 
@@ -70,6 +98,7 @@ When a user asks to work with the Measure API:
 | [api_reference.md](references/api_reference.md) | When writing v1 API call code — endpoint list, request/response schemas, curl examples |
 | [workflow_teaching.md](references/workflow_teaching.md) | When building a measurement model from scratch — detailed steps with parameter guidance |
 | [workflow_measurement.md](references/workflow_measurement.md) | When running batch measurement — loading model, interpreting results, error recovery |
+| [localization.md](references/localization.md) | When the task is "where is the part" — localisation-only models, pose output, OBB detectors, and where each API generation stands |
 | [generated/object_contracts.md](references/generated/object_contracts.md) | **Authoritative object types, params and defaults** for v1 *and* v2 |
 | [generated/v2_surface.md](references/generated/v2_surface.md) | v2 route index + schema index, rendered from `docs/v2-openapi.json` |
 | [v1-v2-divergence.md](references/v1-v2-divergence.md) | **Read first for cross-generation work** — conflicts, shared defects, undecided ownership |
@@ -95,4 +124,8 @@ regenerate after changing the engine: `python scripts/gen_api_reference.py`.
 - **A run-time exception truncates every later tool and adds `"_error"`.** The engine wraps the whole per-target tool loop in one `try`, so if tool *N* raises, tools *N+1…* are never evaluated and `targets[].measurements` gains a string-valued `"_error"` key. Do not iterate `measurements` assuming every entry is a result dict — skip `_error` (and any missing label) explicitly. A cleanly *invalid* measurement, by contrast, does appear as `{"type": ..., "label": ..., "valid": false}` with no value keys.
 - **`POST /measurements` registers the tool even when the test fails.** The definition is appended regardless of `valid`, so tuning by repeated POSTs silently accumulates tools and eventually hits `Duplicate measurement label`. Iterate with `POST /measurements/test` (no side effects) or `PUT /measurements/<label>`, and only POST once you are happy.
 - **Cascade delete**: Deleting a primitive measurement removes all composed measurements that depend on it.
+- **A model with no measurement tools is not broken — it is a localisation-only model.** The pose (centre + rotation) is then the deliverable; `measurements == {}` and `valid == True` is the normal shape. See [localization.md](references/localization.md) before "fixing" it.
+- **`score` can be `null`.** The search-free alignment modes (`none`, `fixed_roi`) run no correlation, so `score` is `None`, not `0.0`. `None < threshold` raises in Python.
+- **Never re-derive a target's angle.** A template match reports `absolute - taught`; an OBB detector reports `taught - absolute`. Both arrive in the same field. Compute through `AlignmentStrategy.absolute_rotation()` / `crop_angle()`, or the error will be twice the deviation with the wrong sign — and zero at the taught pose, so it survives self-matching tests.
+- **OBB is engine + GUI only.** Neither v1 nor v2 accepts a detector or a model path. Do not offer an OBB workflow to an API-only caller.
 - **v1 storage is not v2 storage**: `save()` writes `config.json` + `template.npz` + `reference.png`. The GUI and the v2 API use a different manifest-v3.0 asset (`manifest.json` + `reference.npy` + `workflow.npz`). The two directories are not interchangeable.

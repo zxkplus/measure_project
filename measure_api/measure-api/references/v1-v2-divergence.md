@@ -224,12 +224,39 @@ These came from the unification work and are already merged. They are facts, not
 
 ---
 
-## 7. Planned work: OBB localization (design agreed, implementation paused)
+## 7. OBB localization: landed in the engine + GUI, still absent from v2
 
 **Decision taken:** define one shared *localization-source* abstraction and let both
 generations adopt it — v1/GUI through `AlignmentStrategy`, v2 through `Localization`.
-Neither side invents its own second version of the concept. Implementation is on hold
-pending coordination with the v2 owner.
+Neither side invents its own second version of the concept.
+
+**Status (updated):** the abstraction and its first two consumers exist in the shared
+engine, and OBB works end to end through the GUI. v2 is untouched.
+
+| Layer | State |
+|---|---|
+| `measure/obb_source.py` — `ObbObservation`, `ObbSource` protocol, selection | done |
+| `measure/alignment.py` — `ObbAlignment` (third `AlignmentStrategy` arm) | done |
+| `measure/obb_source` consumed by `measure_obb/ultralytics_source.py` (lazy import) | done |
+| GUI — model browser, self-check, anchor picker, detector auto-reload on open | done |
+| v1 API | not done, and not planned: it can only build template models |
+| v2 API | **not done** — no route, no `Localization` arm, no torch dependency |
+
+What a v2 implementer needs to know before adding the third arm:
+
+- `Localization`'s `one_source()` validator currently asserts *exactly one* of
+  `template` / `fixed_roi`; a third arm extends that validator rather than bypassing it.
+- The detector must stay an injected capability. `measure/` imports no ML runtime, and
+  `tests/v2/test_deployment.py` already blocks GUI/Flask/matplotlib imports in the service —
+  an OBB arm has to respect the same boundary (`measure_obb/` is where torch lives).
+- Model identity to record: path + sha256 + `conf` + `imgsz` + class names
+  (`UltralyticsObbSource.serialize()` produces exactly this shape).
+- The patch frame is the **anchor's** nominal size, fixed for every instance — v2's
+  `TargetAlignment.reference_to_patch` already expresses that frame, so an OBB arm should
+  populate it from the anchor rather than from each instance's own extents.
+
+Open questions from the original design discussion remain open (see "What is still blocked"
+below); they are about ownership, not about the concept.
 
 ### Why a shared abstraction rather than two implementations
 
