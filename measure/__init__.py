@@ -55,6 +55,7 @@ from measure.measure_template import (
     ThresholdPreprocessor,
     TemplatePoint,
     DistanceMeasure,
+    check_roi_covers_template,
 )
 
 # Workflow

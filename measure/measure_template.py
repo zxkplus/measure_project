@@ -249,6 +249,61 @@ def _deserialize_preprocessor(data: Dict[str, Any]) -> Preprocessor:
     return cls.deserialize(data)
 
 
+def check_roi_covers_template(roi_xyxy: Tuple[float, float, float, float],
+                              click_col: float, click_row: float,
+                              template_size: float,
+                              margin: float = 0.0) -> List[Dict[str, Any]]:
+    """Check that a search ROI can reach the template's taught centre.
+
+    A template match can only report centres in
+    ``[roi_x1 + half, roi_x2 - half] x [roi_y1 + half, roi_y2 - half]``.
+    When the taught click point lies outside that window, the correlation peak
+    is pinned to the ROI border: the reported centre is biased by a fixed
+    offset and the score is under-estimated, which typically shows up later as
+    a constant distance deviation (e.g. every frame measuring 22 px short).
+
+    Args:
+        roi_xyxy: Search region ``(x1, y1, x2, y2)`` in image pixels, the same
+            convention as the ``roi`` field of an algorithm element.
+        click_col: Taught template centre column (x).
+        click_row: Taught template centre row (y).
+        template_size: Square template side length in pixels.
+        margin: Extra margin in pixels required on every side (default 0.0,
+            i.e. only require the template itself to fit).
+
+    Returns:
+        List of issue dicts, empty when the ROI can reach the taught centre.
+        Each issue has ``side`` (``"left"``/``"right"``/``"top"``/``"bottom"``),
+        ``required`` (the bound the ROI must satisfy), ``actual`` (current
+        value) and a human-readable ``message``.
+    """
+    x1, y1, x2, y2 = (float(v) for v in roi_xyxy)
+    half = float(template_size) / 2.0
+    m = float(margin)
+    checks = (
+        ("left", x1, click_col - half - m, lambda a, r: a <= r),
+        ("right", x2, click_col + half + m, lambda a, r: a >= r),
+        ("top", y1, click_row - half - m, lambda a, r: a <= r),
+        ("bottom", y2, click_row + half + m, lambda a, r: a >= r),
+    )
+    issues: List[Dict[str, Any]] = []
+    for side, actual, required, ok in checks:
+        if not ok(actual, required):
+            issues.append({
+                "side": side,
+                "required": required,
+                "actual": actual,
+                "message": (
+                    f"ROI {side} clips the template: "
+                    f"roi_{side} must be <= {required:.1f} (actual {actual:.1f})"
+                    if side in ("left", "top") else
+                    f"ROI {side} clips the template: "
+                    f"roi_{side} must be >= {required:.1f} (actual {actual:.1f})"
+                ),
+            })
+    return issues
+
+
 # =========================================================================
 # TemplatePoint
 # =========================================================================
@@ -814,6 +869,9 @@ class TemplatePoint:
                 else:
                     result = self._match_multi_angle_scale(search_img, r1, c1)
 
+        # Tag the result with ROI clipping diagnostics (peak pinned to the
+        # search-region border) before returning it.
+        self._attach_search_diagnostics(result, search_region, r1, c1, search_img)
         self.result = result
 
         # Detailed timing breakdown
@@ -825,6 +883,77 @@ class TemplatePoint:
                       "sw": search_img.shape[1], "sh": search_img.shape[0],
                       "ps": self._pyramid_scale})
         return self.result
+
+    def _attach_search_diagnostics(self, result: Dict[str, Any],
+                                   search_region,
+                                   r1: int, c1: int,
+                                   search_img: np.ndarray) -> None:
+        """Attach 'search clipped' diagnostics to a match result (in place).
+
+        A match is flagged as clipped when its reported centre sits on the
+        boundary of the reachable centre window — meaning the template's true
+        correlation peak lies outside the search region and the reported
+        position/score is a boundary-constrained, lower-quality estimate.
+
+        The flag is recomputed from the matched centre (not from the integer
+        peak) so it also works for the subpixel path; the subpixel shift can
+        move the centre inward slightly, hence the 0.5 px tolerance.
+        """
+        if search_region is None:
+            result['diagnostics'] = {
+                'search_clip': False,
+                'clip_sides': [],
+                'search_region': None,
+            }
+            return
+        if not result.get('valid', False):
+            # No reliable centre for invalid results: report no clipping claim.
+            result['diagnostics'] = {
+                'search_clip': False,
+                'clip_sides': [],
+                'search_region': None,
+            }
+            return
+
+        h, w = search_img.shape[:2]
+        r2, c2 = r1 + h, c1 + w
+        half_r, half_c = self._crop_h / 2.0, self._crop_w / 2.0
+        min_r, max_r = r1 + half_r, r2 - half_r
+        min_c, max_c = c1 + half_c, c2 - half_c
+        eps = 0.5  # px tolerance for the subpixel-refined centre
+
+        def _sides(row: float, col: float) -> List[str]:
+            sides = []
+            if col <= min_c + eps:
+                sides.append('left')
+            if col >= max_c - eps:
+                sides.append('right')
+            if row <= min_r + eps:
+                sides.append('top')
+            if row >= max_r - eps:
+                sides.append('bottom')
+            return sides
+
+        def _diag(row: float, col: float) -> Dict[str, Any]:
+            sides = _sides(row, col)
+            return {
+                'search_clip': bool(sides),
+                'clip_sides': sides,
+                'reachable_center_range': {
+                    'row': [min_r, max_r],
+                    'col': [min_c, max_c],
+                },
+            }
+
+        diag = _diag(float(result.get('matched_row', 0.0)),
+                     float(result.get('matched_col', 0.0)))
+        diag['search_region'] = [c1, r1, c2, r2]  # x1, y1, x2, y2
+        result['diagnostics'] = diag
+
+        # Multi-target mode: tag every match individually.
+        for match in result.get('matches') or []:
+            match['diagnostics'] = _diag(float(match.get('matched_row', 0.0)),
+                                         float(match.get('matched_col', 0.0)))
 
     def _match_translation_only(self, search_img: np.ndarray,
                                  r1: int, c1: int) -> Dict[str, Any]:

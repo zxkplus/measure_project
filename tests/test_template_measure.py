@@ -20,6 +20,7 @@ from measure.measure_template import (TemplatePoint, DistanceMeasure,
                               RawPreprocessor, CannyPreprocessor,
                               SobelPreprocessor, CLAHEPreprocessor,
                               ThresholdPreprocessor,
+                              check_roi_covers_template,
                               _PREPROCESSOR_REGISTRY, _deserialize_preprocessor)
 
 
@@ -310,6 +311,65 @@ class TestTemplatePoint:
         assert abs(result['dx'] - 3.0) < 2.0, f"dx={result['dx']:.3f}, expected ~3.0"
 
         print("  ✓ test_dx_dy_displacement passed")
+
+
+# =========================================================================
+# Test: Search-region clipping diagnostics
+# =========================================================================
+
+class TestSearchClipDiagnostics:
+    """ROI-vs-template reachability check and border-pinned match diagnostics."""
+
+    @staticmethod
+    def test_check_roi_covers_template_detects_left_clip():
+        """The real defect: ROI x1=92 clips a 1200 px template taught at x=670."""
+        issues = check_roi_covers_template([92, 1875, 3642, 3435], 670, 2611, 1200)
+        assert len(issues) == 1
+        assert issues[0]["side"] == "left"
+        assert issues[0]["required"] == 70.0
+        assert issues[0]["actual"] == 92.0
+        print("  ✓ test_check_roi_covers_template_detects_left_clip passed")
+
+    @staticmethod
+    def test_check_roi_covers_template_accepts_expanded_roi():
+        """Widening the ROI to x1=0 makes the taught centre reachable."""
+        assert check_roi_covers_template([0, 1875, 3642, 3435], 670, 2611, 1200) == []
+        print("  ✓ test_check_roi_covers_template_accepts_expanded_roi passed")
+
+    @staticmethod
+    def test_check_roi_covers_template_margin():
+        """A margin requirement can flag an ROI that barely fits the template."""
+        assert check_roi_covers_template([55, 0, 400, 400], 100, 100, 80) == []
+        issues = check_roi_covers_template([55, 0, 400, 400], 100, 100, 80, margin=10)
+        assert [i["side"] for i in issues] == ["left"]
+        print("  ✓ test_check_roi_covers_template_margin passed")
+
+    @staticmethod
+    def test_measure_flags_border_pinned_match():
+        """Peak pinned to the left ROI edge is reported as search_clip."""
+        ref = create_synthetic_reference()
+        pt = TemplatePoint(ref, click_row=100, click_col=100, template_size=80)
+        # Left edge c1=70 -> min reachable centre col = 70 + 40 = 110 > click 100.
+        # Right edge 200 keeps the near-duplicate feature B out of the search.
+        result = pt.measure(ref, search_region=(40, 360, 70, 200))
+        diag = result["diagnostics"]
+        assert diag["search_clip"] is True
+        assert diag["clip_sides"] == ["left"]
+        assert abs(result["matched_col"] - 110.0) < 0.6
+        # Boundary constraint under-estimates the score.
+        assert result["match_score"] < 0.99
+        print("  ✓ test_measure_flags_border_pinned_match passed")
+
+    @staticmethod
+    def test_measure_does_not_flag_interior_match():
+        """A match well inside the ROI is not flagged."""
+        ref = create_synthetic_reference()
+        pt = TemplatePoint(ref, click_row=100, click_col=100, template_size=80)
+        result = pt.measure(ref, search_region=(40, 360, 20, 360))
+        assert result["diagnostics"]["search_clip"] is False
+        assert result["diagnostics"]["clip_sides"] == []
+        assert abs(result["matched_col"] - 100) < 2
+        print("  ✓ test_measure_does_not_flag_interior_match passed")
 
 
 # =========================================================================
