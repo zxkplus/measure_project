@@ -26,3 +26,6 @@ docs/*
 /inspection.png
 /result_image.png
 /roi_image.png
+
+# replay / debug-analysis artifacts (scripts, rendered images, JSON evidence)
+replay-output/
