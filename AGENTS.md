@@ -88,6 +88,49 @@ from measure import MeasurementWorkflow, MultiTargetWorkflow
 
 Tests write visual output to `tests/output/<test_name>/`. All test artifacts are gitignored.
 
+## Template Matching: the Search ROI Must Reach the Taught Click Point
+
+`TemplatePoint.measure()` can only report centres inside
+`[roi_x1 + half, roi_x2 - half] × [roi_y1 + half, roi_y2 - half]`
+(`half = template_size / 2`). If the taught click point lies outside that
+window, `cv2.matchTemplate` pins the correlation peak to the ROI border: the
+score drops (e.g. 1.000 → 0.964), the centre is offset by a fixed amount, and
+a two-point distance becomes systematically biased. Nothing errors — the
+result looks plausible and just fails later on a distance tolerance.
+
+Real incident (bottle-neck alignment, 2026-10): template A was taught at
+x=670 with `template_size=1200`, so its left edge is x=70, but the request ROI
+started at `x1=92`. A was pinned at x=692 (= 92 + 600) in every frame, the
+measured distance came out ~2291 px against a taught reference of 2314 px
+(deviation ≈ -23 px vs 8 px tolerance), all 9 frames were rejected and the
+session failed with `no valid alignment frame found`. The part itself measured
+fine — widening the ROI to `x1=0` restored 2314.0 px and deviation ≤ 0.76 px.
+The reference distance is derived from the taught click points, so it is
+unreachable while the ROI clips them.
+
+Triage checklist:
+
+- matched centre exactly equals `roi_x1 + half` (or the mirrored
+  right/top/bottom bound) in **every** frame → pinned peak, not part motion;
+- score visibly below what the same template scores on the teach image;
+- constant deviation across all frames → configuration problem, not a
+  part/scale difference (the teach image reproduces the same bias).
+
+Detection shipped with the engine:
+
+- `TemplatePoint.measure()` returns a `diagnostics` dict with `search_clip`,
+  `clip_sides`, `reachable_center_range` and the effective `search_region`
+  (multi-target matches carry their own `diagnostics`);
+- `measure.check_roi_covers_template(roi_xyxy, click_col, click_row,
+  template_size, margin=...)` returns `left/right/top/bottom` issues and is
+  meant for model-save and request-build validation (keep a margin, e.g.
+  50 px, not just the bare `half`).
+
+Fix the configuration: widen the ROI to at least `click ± half` (incident:
+`x1 ≤ 70`). Do not loosen the distance tolerance and do not move the click
+points away from the physical feature — the reference distance is defined by
+them.
+
 ## Coding Style & Naming Conventions
 
 - **Language:** Python 3.9+.

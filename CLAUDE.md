@@ -120,7 +120,7 @@ Users register custom preprocessors via `_PREPROCESSOR_REGISTRY['my_type'] = MyC
 
 **`TemplatePoint`** — Single template point, following `LineMeasureObject`/`CircleMeasureObject` pattern:
 - `__init__(reference_image, click_row, click_col, template_size=80, preprocessor=None, match_score_threshold=0.5, use_subpixel=True)` — crops template + applies preprocessor immediately. `preprocessor=None` defaults to `RawPreprocessor`.
-- `measure(inspection_image, search_region=None) -> Dict` — applies same preprocessor to inspection image, runs `cv2.matchTemplate(TM_CCOEFF_NORMED)`, subpixel refinement via 2D quadratic fitting. Returns `{'matched_row', 'matched_col', 'dx', 'dy', 'match_score', 'valid', ...}`.
+- `measure(inspection_image, search_region=None) -> Dict` — applies same preprocessor to inspection image, runs `cv2.matchTemplate(TM_CCOEFF_NORMED)`, subpixel refinement via 2D quadratic fitting. Returns `{'matched_row', 'matched_col', 'dx', 'dy', 'match_score', 'valid', ...}` plus a `diagnostics` dict (`search_clip` / `clip_sides`): a taught click point outside the search region pins the peak to the ROI border, biasing the position and any distance computed from it — see "Template Matching: the Search ROI Must Reach the Taught Click Point" in `AGENTS.md`, and use `measure.check_roi_covers_template()` when validating a ROI.
 - `visualize(image, ...) -> np.ndarray` — draws template box + matched crosshair. `wait_time=-1` suppresses display.
 - `save(filepath)` / `from_file(filepath, preprocessor=None)` — `.npz` serialization with JSON-encoded preprocessor data. `from_file` accepts optional `preprocessor` override. Backward-compatible with old `use_edges` format.
 
