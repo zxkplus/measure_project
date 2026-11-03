@@ -23,6 +23,7 @@ class CalculationContext:
     operation_id: str
     trace_id: str
     commit_guard: Any = None
+    image_cache: Any = field(default=None, repr=False)
     _files: Any = field(default=None, init=False, repr=False)
 
     @property
@@ -33,7 +34,8 @@ class CalculationContext:
             Shared-file accessor governed by this operation's deployment and commit guard.
         """
         if self._files is None:
-            self._files = SharedFiles(self.settings, self.commit_guard)
+            self._files = SharedFiles(self.settings, self.commit_guard, self.image_cache)
+            self.image_cache = self._files.image_cache
         return self._files
 
     def stage(self, stage_id: str) -> Tuple[CalculationContext, OutputSpec]:
@@ -58,7 +60,8 @@ class CalculationContext:
             "writable_roots": None if writable is None else [*writable, "__stages__"],
         })
         guard = replace(self.commit_guard, finalize=False)
-        context = CalculationContext(child_settings, stage_id, self.trace_id, guard)
+        context = CalculationContext(child_settings, stage_id, self.trace_id, guard,
+                                     self.files.image_cache)
         output = OutputSpec(directory=FileReference(root="__stages__", path="."))
         return context, output
 

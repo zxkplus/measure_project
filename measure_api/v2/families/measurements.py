@@ -146,8 +146,7 @@ def read_gray(request: ProbeRequest, context: CalculationContext) -> np.ndarray:
     Returns:
         Verified 8-bit gray pixels in the measurement source frame.
     """
-    image, _ = context.files.read_image(request.image)
-    return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    return context.files.read_gray(request.image)
 
 
 def extract_profile(request: ProfileRequest, context: CalculationContext) -> ProfileResult:

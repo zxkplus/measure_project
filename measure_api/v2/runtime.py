@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import ctypes
 import fcntl
 import sys
@@ -26,6 +28,7 @@ from typing import Any, Dict, Optional
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.files import SharedFiles, filesystem_lock, atomic_json
 from measure_api.v2.models import CalculationRequest, ServiceSettings
+from measure_api.v2.operation_store import OperationStore
 from measure_api.v2.registry import CalculationContext, operations
 from measure_api.v2.result_diagnostics import operation_diagnostics
 from measure_api.v2.timing import monotonic_now
@@ -101,6 +104,8 @@ def worker_job(connection: Connection, name: str, payload: dict, settings_payloa
         settings = ServiceSettings.model_validate(settings_payload)
         configure_worker(settings)
         operation = operations()[name]
+        setup_ms = (monotonic_now() - started) * 1000
+        preparation_started = monotonic_now()
         files = SharedFiles(settings, guard)
         request = operation.request_model.model_validate(payload)
         if operation.prepare is not None:
@@ -109,7 +114,11 @@ def worker_job(connection: Connection, name: str, payload: dict, settings_payloa
         request = files.snapshot_request(request)
         connection.send({"phase": "prepared", "request": request.model_dump(mode="json"),
                          "preparation_ms": (monotonic_now() - started) * 1000,
-                         "worker_started_monotonic": started})
+                         "worker_setup_ms": setup_ms,
+                         "request_preparation_ms": (monotonic_now() - preparation_started) * 1000,
+                         "preparation_cache": dict(files.cache_stats),
+                         "worker_started_monotonic": started,
+                         "prepared_monotonic": monotonic_now()})
         if connection.recv() != "execute":
             return
         context = CalculationContext(settings, identity, trace_id, guard)
@@ -185,10 +194,19 @@ class OperationRuntime:
         self.directory = settings.state_directory or Path(tempfile.gettempdir()) / (
             "measure-v2-state-" + root_key)
         self.settings = settings.model_copy(update={"state_directory": self.directory})
+        self.store = OperationStore(self.directory)
+        self._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="operation-state")
+        self._dirty: Dict[str, int] = {}
+        self._removed = set()
+        self._marker_changes = {}
+        self._persist_lock = None
+        self._admission_lock = None
 
     async def start(self) -> None:
         """Recover interrupted work before opening admission."""
         self.semaphore = asyncio.Semaphore(self.settings.max_workers)
+        self._persist_lock = asyncio.Lock()
+        self._admission_lock = asyncio.Lock()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.owner = (self.directory / ".owner.lock").open("a+b")
         try:
@@ -197,37 +215,35 @@ class OperationRuntime:
             self.owner.close()
             raise ServiceError("service.state_in_use", "Operation state already has an ASGI owner",
                                503) from error
-        journal = self.directory / "journal.json"
-        if journal.exists():
-            try:
-                saved = json.loads(journal.read_text())
-            except (OSError, ValueError) as error:
-                self.owner.close()
-                raise ServiceError("service.journal_invalid", "Operational journal is unreadable",
-                                   503) from error
-            self.records = saved.get("records", {})
-            self.metadata = saved.get("metadata", {})
-            self.expired = saved.get("expired", {})
-            self.expired_traces = saved.get("expired_traces", {})
-            for record in self.records.values():
-                if record["state"] not in TERMINAL_STATES:
-                    recovered = self._completed(record["operation_id"])
-                    if recovered is not None:
-                        record.update(state="succeeded", result=recovered["result"],
-                                      completed_at=utc_now())
-                        record["diagnostics"].update(operation_diagnostics(recovered["result"]))
-                        for metric in ["compute_ms", "cache"]:
-                            if metric in recovered:
-                                record["diagnostics"][metric] = recovered[metric]
-                        self.metadata[record["operation_id"]]["terminal_at"] = time.time()
-                        continue
+        try:
+            saved = await self._io(self.store.load)
+        except BaseException:
+            self.owner.close()
+            self._writer.shutdown(wait=True)
+            raise
+        self.records = saved["records"]
+        self.metadata = saved["metadata"]
+        self.expired = saved["expired"]
+        self.expired_traces = saved["expired_traces"]
+        for identity, record in self.records.items():
+            if record["state"] not in TERMINAL_STATES:
+                recovered = self._completed(identity)
+                if recovered is not None:
+                    record.update(state="succeeded", result=recovered["result"],
+                                  completed_at=utc_now())
+                    record["diagnostics"].update(operation_diagnostics(recovered["result"]))
+                    for metric in ["compute_ms", "cache"]:
+                        if metric in recovered:
+                            record["diagnostics"][metric] = recovered[metric]
+                else:
                     record.update(state="failed", completed_at=utc_now(), error=ServiceError(
                         "worker.interrupted", "Operation interrupted by service restart", 503,
                         retryable=True).payload(record["trace_id"]))
-                    self.metadata[record["operation_id"]]["terminal_at"] = time.time()
-            for identity, meta in self.metadata.items():
-                if meta.get("key"):
-                    self.idempotency[tuple(meta["key"])] = (identity, meta["fingerprint"])
+                self.metadata[identity]["terminal_at"] = time.time()
+                self._dirty[identity] = 1
+        for identity, meta in self.metadata.items():
+            if meta.get("key"):
+                self.idempotency[tuple(meta["key"])] = (identity, meta["fingerprint"])
         for directory in self.directory.iterdir():
             if directory.is_dir() and len(directory.name) == 32:
                 self._cleanup_owned(directory.name)
@@ -246,35 +262,50 @@ class OperationRuntime:
                     oldest.unlink()
         self._expire()
         try:
-            self._persist()
+            await self._persist()
         except ServiceError:
+            await self._io(self.store.close)
+            self._writer.shutdown(wait=True)
             self.owner.close()
             raise
         self.ready = True
 
-    def _persist(self) -> None:
-        stage = self.directory / "journal.partial"
-        try:
-            with stage.open("w") as target:
-                json.dump({"records": self.records, "metadata": self.metadata,
-                           "expired": self.expired, "expired_traces": self.expired_traces},
-                          target, allow_nan=False)
-                target.flush()
-                os.fsync(target.fileno())
-            os.replace(stage, self.directory / "journal.json")
-        except OSError as error:
-            raise ServiceError(
-                "service.journal_unavailable", "Operational journal cannot be written", 503,
-                retryable=True,
-            ) from error
+    async def _io(self, function, *args):
+        return await asyncio.get_running_loop().run_in_executor(
+            self._writer, partial(function, *args))
 
-    def _checkpoint(self) -> bool:
-        """Keep admitted work observable when its durable journal is temporarily unavailable."""
+    async def _persist(self, identity: Optional[str] = None) -> None:
+        if identity is not None:
+            self._dirty[identity] = self._dirty.get(identity, 0) + 1
+        async with self._persist_lock:
+            revisions = dict(self._dirty)
+            updates = {key: (copy.deepcopy(self.records[key]), copy.deepcopy(self.metadata[key]))
+                       for key in revisions if key in self.records}
+            removed = set(self._removed)
+            markers = dict(self._marker_changes)
+            if not updates and not removed and not markers:
+                return
+            metrics = await self._io(self.store.save, updates, removed, markers)
+            for key, revision in revisions.items():
+                if self._dirty.get(key) == revision:
+                    self._dirty.pop(key, None)
+            self._removed.difference_update(removed)
+            for key, value in markers.items():
+                if self._marker_changes.get(key) == value:
+                    self._marker_changes.pop(key, None)
+            if identity in self.records:
+                diagnostics = self.records[identity]["diagnostics"]
+                storage = diagnostics.setdefault("storage", {"backend": "sqlite", "writes": []})
+                storage["writes"].append(metrics)
+                storage["writes"] = storage["writes"][-8:]
+
+    async def _checkpoint(self, identity: Optional[str] = None) -> bool:
+        """Keep accepted work observable and retain completion files on storage failure."""
         try:
-            self._persist()
+            await self._persist(identity)
             return True
         except ServiceError:
-            logging.getLogger(__name__).warning("Operational journal checkpoint failed")
+            logging.getLogger(__name__).warning("Operational state checkpoint failed")
             return False
 
     def _expire(self) -> None:
@@ -285,20 +316,30 @@ class OperationRuntime:
                 record = self.records.pop(identity, None)
                 if record is not None:
                     self.expired_traces[record["trace_id"]] = now
+                    self._marker_changes[("trace", record["trace_id"])] = now
                 self.metadata.pop(identity, None)
                 self.expired[identity] = now
+                self._removed.add(identity)
+                self._dirty.pop(identity, None)
+                self._marker_changes[("operation", identity)] = now
                 if meta.get("key"):
                     self.idempotency.pop(tuple(meta["key"]), None)
         for identity, expired_at in list(self.expired.items()):
             if now - expired_at >= self.settings.expired_retention_seconds:
                 self.expired.pop(identity)
+                self._marker_changes[("operation", identity)] = None
         for trace_id, expired_at in list(self.expired_traces.items()):
             if now - expired_at >= self.settings.expired_retention_seconds:
                 self.expired_traces.pop(trace_id)
+                self._marker_changes[("trace", trace_id)] = None
         while len(self.expired_traces) > self.settings.max_retained_operations:
-            self.expired_traces.pop(next(iter(self.expired_traces)))
+            oldest = next(iter(self.expired_traces))
+            self.expired_traces.pop(oldest)
+            self._marker_changes[("trace", oldest)] = None
         while len(self.expired) > self.settings.max_retained_operations:
-            self.expired.pop(next(iter(self.expired)))
+            oldest = next(iter(self.expired))
+            self.expired.pop(oldest)
+            self._marker_changes[("operation", oldest)] = None
 
     async def close(self) -> None:
         """Stop admission, allow a bounded drain, and terminate every unfinished process."""
@@ -310,8 +351,10 @@ class OperationRuntime:
         if self.tasks:
             await asyncio.gather(*list(self.tasks), return_exceptions=True)
         try:
-            self._checkpoint()
+            await self._checkpoint()
         finally:
+            await self._io(self.store.close)
+            self._writer.shutdown(wait=True)
             self.owner.close()
 
     async def wait(self, identity: str, wait_ms: int) -> dict:
@@ -386,8 +429,9 @@ class OperationRuntime:
         self.jobs[identity] = job
         self.pending += 1
         try:
-            self._persist()
+            await self._persist(identity)
         except ServiceError:
+            self._dirty.pop(identity, None)
             self.pending -= 1
             self.jobs.pop(identity, None)
             self.records.pop(identity, None)
@@ -415,13 +459,20 @@ class OperationRuntime:
                     pass
         return self.get(identity)
 
-    def _transition(self, identity: str, state: str) -> None:
+    async def _transition(self, identity: str, state: str) -> None:
         record = self.records[identity]
         record["state"] = state
         record["diagnostics"]["events"].append({"state": state, "at": utc_now()})
-        durable = self._checkpoint()
-        if identity in self.jobs:
-            self.jobs[identity]["journal_durable"] = durable
+        job = self.jobs.get(identity)
+        revision = 0
+        if job is not None:
+            revision = job.get("state_revision", 0) + 1
+            job["state_revision"] = revision
+            # Async persistence must not expose an older durable flag to cleanup.
+            job["journal_durable"] = False
+        durable = await self._checkpoint(identity)
+        if job is not None and job["state_revision"] == revision:
+            job["journal_durable"] = durable
 
     async def _run(self, identity: str) -> None:
         job = self.jobs[identity]
@@ -430,8 +481,10 @@ class OperationRuntime:
         acquired = False
         try:
             remaining = max(0, job["deadline"] - monotonic_now())
+            waiting = monotonic_now()
             try:
                 await asyncio.wait_for(self.semaphore.acquire(), remaining)
+                record["diagnostics"]["semaphore_wait_ms"] = (monotonic_now()-waiting) * 1000
                 acquired = True
                 record["diagnostics"]["queue_ms"] = (monotonic_now()-job["started"]) * 1000
             except asyncio.TimeoutError:
@@ -467,11 +520,26 @@ class OperationRuntime:
                     if record["state"] in TERMINAL_STATES:
                         break
                 if connection.poll():
+                    received = monotonic_now()
                     message = connection.recv()
+                    record["diagnostics"]["ipc_receive_ms"] = (monotonic_now()-received) * 1000
                     if message["phase"] == "prepared":
-                        if not self._admit_prepared(identity, message["request"]):
+                        record["diagnostics"]["prepared_received_monotonic"] = monotonic_now()
+                        binding_started = monotonic_now()
+                        if not await self._admit_prepared(identity, message["request"]):
                             connection.send("discard")
                             break
+                        record["diagnostics"]["identity_binding_ms"] = (
+                            monotonic_now() - binding_started) * 1000
+                        record["diagnostics"]["worker_spawn_ms"] = (
+                            message["worker_started_monotonic"] - job["process_started"]) * 1000
+                        record["diagnostics"]["prepared_message_delay_ms"] = (
+                            record["diagnostics"]["prepared_received_monotonic"]
+                            - message["prepared_monotonic"]) * 1000
+                        record["diagnostics"]["worker_setup_ms"] = message["worker_setup_ms"]
+                        record["diagnostics"]["request_preparation_ms"] = message["request_preparation_ms"]
+                        record["diagnostics"]["preparation_cache"] = message["preparation_cache"]
+                        record["diagnostics"]["timing_version"] = 2
                         connection.send("execute")
                         record["diagnostics"]["preparation_ms"] = message["preparation_ms"]
                         record["diagnostics"]["worker_started_monotonic"] = (
@@ -483,7 +551,7 @@ class OperationRuntime:
                         )
                         record["diagnostics"]["admission_ms"] = (
                             monotonic_now() - job["started"]) * 1000
-                        self._transition(identity, "running")
+                        await self._transition(identity, "running")
                         if not job["prepared"].done():
                             job["prepared"].set_result(True)
                     else:
@@ -496,7 +564,7 @@ class OperationRuntime:
                             record["result"] = message["result"]
                             record["diagnostics"]["compute_ms"] = message["compute_ms"]
                             record["diagnostics"]["cache"] = message["cache"]
-                            self._finish(identity, "succeeded")
+                            await self._finish(identity, "succeeded")
                         else:
                             record["error"] = message["error"]
                             record["diagnostics"]["http_status"] = message["status"]
@@ -506,20 +574,20 @@ class OperationRuntime:
                             state = ("timed_out"
                                      if message["error"]["code"] == "operation.timed_out"
                                      else "failed")
-                            self._finish(identity, state)
+                            await self._finish(identity, state)
                 elif not process.is_alive():
                     recovered = self._completed(identity)
                     if recovered is not None:
                         record["result"] = recovered["result"]
                         record["diagnostics"]["compute_ms"] = recovered["compute_ms"]
                         record["diagnostics"]["cache"] = recovered["cache"]
-                        self._finish(identity, "succeeded")
+                        await self._finish(identity, "succeeded")
                         break
                     record["diagnostics"]["http_status"] = 503
                     record["error"] = ServiceError("worker.interrupted",
                         "Computation worker was interrupted", 503, retryable=True
                     ).payload(record["trace_id"])
-                    self._finish(identity, "failed")
+                    await self._finish(identity, "failed")
                 else:
                     await asyncio.sleep(0.005)
         except ServiceError as error:
@@ -527,7 +595,7 @@ class OperationRuntime:
             record["diagnostics"]["http_status"] = error.status
             if not job["prepared"].done():
                 job.update(preparation_error=record["error"], status=error.status)
-            self._finish(identity, "failed")
+            await self._finish(identity, "failed")
         except (EOFError, OSError, RuntimeError):
             if record["state"] not in TERMINAL_STATES:
                 recovered = self._completed(identity)
@@ -536,13 +604,13 @@ class OperationRuntime:
                     for metric in ["compute_ms", "cache"]:
                         if metric in recovered:
                             record["diagnostics"][metric] = recovered[metric]
-                    self._finish(identity, "succeeded")
+                    await self._finish(identity, "succeeded")
                     return
                 record["diagnostics"]["http_status"] = 503
                 record["error"] = ServiceError("worker.interrupted",
                     "Computation worker was interrupted", 503, retryable=True
                 ).payload(record["trace_id"])
-                self._finish(identity, "failed")
+                await self._finish(identity, "failed")
         finally:
             process = job["process"]
             if process is not None:
@@ -562,7 +630,11 @@ class OperationRuntime:
             self.pending -= 1
             self.jobs.pop(identity, None)
 
-    def _admit_prepared(self, identity: str, payload: dict) -> bool:
+    async def _admit_prepared(self, identity: str, payload: dict) -> bool:
+        async with self._admission_lock:
+            return await self._bind_prepared(identity, payload)
+
+    async def _bind_prepared(self, identity: str, payload: dict) -> bool:
         job = self.jobs[identity]
         canonical = dict(payload)
         for control in ("mode", "wait_ms", "idempotency_key"):
@@ -581,13 +653,15 @@ class OperationRuntime:
                 job["redirect"] = prior
             self.records.pop(identity)
             self.metadata.pop(identity)
-            self._checkpoint()
+            self._dirty.pop(identity, None)
+            self._removed.add(identity)
+            await self._checkpoint()
             return False
         if key[2]:
             self.idempotency[key] = (identity, fingerprint)
             self.metadata[identity].update(key=key, fingerprint=fingerprint)
         try:
-            self._persist()
+            await self._persist(identity)
         except ServiceError:
             if key[2]:
                 self.idempotency.pop(key, None)
@@ -595,14 +669,17 @@ class OperationRuntime:
             raise
         return True
 
-    def _finish(self, identity: str, state: str) -> None:
+    async def _finish(self, identity: str, state: str) -> None:
         record = self.records[identity]
         record["diagnostics"].update(
             operation_diagnostics(record.get("result"), record.get("error"))
         )
         record["completed_at"] = utc_now()
         self.metadata[identity]["terminal_at"] = time.time()
-        self._transition(identity, state)
+        started = monotonic_now()
+        await self._transition(identity, state)
+        record["diagnostics"]["terminal_persist_ms"] = (monotonic_now() - started) * 1000
+        record["diagnostics"]["terminal_observable_at"] = utc_now()
 
     async def _stop(self, identity: str, state: str, code: str) -> None:
         job = self.jobs.get(identity)
@@ -637,16 +714,16 @@ class OperationRuntime:
             record.update(result=recovered["result"], error=None)
             record["diagnostics"].update(cache=recovered["cache"],
                                            compute_ms=recovered["compute_ms"])
-            self._finish(identity, "succeeded")
+            await self._finish(identity, "succeeded")
             return
         if state == "cancelled":
-            self._transition(identity, "cancelling")
+            await self._transition(identity, "cancelling")
         self.records[identity]["diagnostics"]["http_status"] = (
             429 if code == "operation.memory_limit" else 503 if state == "failed" else 409)
         self.records[identity]["error"] = ServiceError(
             code, "Operation stopped before completion", 503 if state == "failed" else 409,
             retryable=state == "failed").payload(self.records[identity]["trace_id"])
-        self._finish(identity, state)
+        await self._finish(identity, state)
 
     def _completed(self, identity: str) -> Optional[dict]:
         """Recover a committed result even if its worker died before notifying HTTP."""
