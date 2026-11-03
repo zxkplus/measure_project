@@ -98,7 +98,7 @@ def create_app(settings: Optional[ServiceSettings] = None) -> FastAPI:
         writable = settings.writable_roots
         aliases = settings.shared_roots if writable is None else writable
         write_ready = all(os.access(settings.shared_roots[alias], os.W_OK) for alias in aliases)
-        if not runtime.ready or not readable or not write_ready:
+        if not runtime.ready or runtime.pool.ready_count == 0 or not readable or not write_ready:
             raise ServiceError("service.not_ready", "Workers or shared roots are unavailable", 503,
                                retryable=True)
         return {"status": "ready", "workers": settings.max_workers}

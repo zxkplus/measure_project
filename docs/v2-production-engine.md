@@ -23,7 +23,9 @@ startup. `MEASURE_V2_CONFIG`, `MEASURE_V2_HOST` and `MEASURE_V2_PORT` supply def
 --workers 1` also reads `MEASURE_V2_CONFIG`.
 
 One ASGI process owns one state directory through an exclusive OS lock. CPU parallelism comes from
-`max_workers` independent spawned processes; it is not Uvicorn worker count. This implementation
+`max_workers` independent prewarmed spawned processes (five by default); it is not Uvicorn worker
+count. Successful tasks reuse a worker; hard cancellation, faults and memory limits retire and
+replace that worker. See [worker-pool operation](v2-worker-pool.md). This implementation
 uses Unix process/file-lock facilities and supports Linux/macOS. Separate state directories isolate
 additional service instances. `/health/live` checks HTTP responsiveness; `/health/ready` additionally
 checks workers and configured readable/writable roots. OpenAPI and interactive docs are at

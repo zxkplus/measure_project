@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import ctypes
 import fcntl
+import gc
 import sys
 import threading
 import hashlib
@@ -32,6 +33,7 @@ from measure_api.v2.operation_store import OperationStore
 from measure_api.v2.registry import CalculationContext, operations
 from measure_api.v2.result_diagnostics import operation_diagnostics
 from measure_api.v2.timing import monotonic_now
+from measure_api.v2.worker_pool import WorkerPool, terminate_process
 
 TERMINAL_STATES = {"succeeded", "failed", "cancelled", "timed_out"}
 
@@ -46,6 +48,25 @@ def utc_now() -> str:
 
 
 @dataclass
+class FileFlag:
+    """A task-owned stop/commit flag that can travel over a persistent worker pipe."""
+
+    path: str
+
+    @property
+    def value(self) -> bool:
+        """Read the flag under the operation's existing filesystem commit lock."""
+        return Path(self.path).exists()
+
+    @value.setter
+    def value(self, enabled: bool) -> None:
+        if enabled:
+            Path(self.path).touch(exist_ok=True)
+        else:
+            Path(self.path).unlink(missing_ok=True)
+
+
+@dataclass
 class CommitGuard:
     """Arbitrate cancellation against a manifest commit across processes."""
 
@@ -57,18 +78,19 @@ class CommitGuard:
     deadline: float = float("inf")
 
 
-def configure_worker(settings: ServiceSettings) -> None:
+def configure_worker(settings: ServiceSettings, memory_limit: bool = True) -> None:
     """Bound native parallelism and private allocations in a compute process.
 
     Args:
         settings: Deployment roots and resource limits shared by HTTP and compute workers.
+        memory_limit: Apply the private allocation limit for an assigned task.
     """
     import resource
 
     import cv2
 
     cv2.setNumThreads(1)
-    if sys.platform.startswith("linux"):
+    if memory_limit and sys.platform.startswith("linux"):
         # Linux DATA limits heap allocation; OS resident-memory monitoring covers native buffers.
         _, hard = resource.getrlimit(resource.RLIMIT_DATA)
         limit = settings.max_worker_memory_bytes
@@ -78,7 +100,8 @@ def configure_worker(settings: ServiceSettings) -> None:
 
 
 def worker_job(connection: Connection, name: str, payload: dict, settings_payload: dict,
-               identity: str, trace_id: str, guard: CommitGuard) -> None:
+               identity: str, trace_id: str, guard: CommitGuard,
+               settings: Optional[ServiceSettings] = None) -> bool:
     """Validate in isolation, then execute only after HTTP admission confirms identity.
 
     Args:
@@ -90,18 +113,15 @@ def worker_job(connection: Connection, name: str, payload: dict, settings_payloa
         identity: Runtime operation identifier used for retained state and owned staging.
         trace_id: Trace identity echoed in the public operation and error envelope.
         guard: Shared deadline, stop flag and death-safe commit lock for publication.
+        settings: Already validated deployment settings of the prewarmed worker.
+
+    Returns:
+        Whether the caller must retire this worker after receiving the outcome.
     """
     started = monotonic_now()
     compute_started = None
-    parent_pid = os.getppid()
-    def stop_on_parent_death():
-        while True:
-            threading.Event().wait(0.1)
-            if os.getppid() != parent_pid:
-                os._exit(1)
-    threading.Thread(target=stop_on_parent_death, daemon=True).start()
     try:
-        settings = ServiceSettings.model_validate(settings_payload)
+        settings = settings or ServiceSettings.model_validate(settings_payload)
         configure_worker(settings)
         operation = operations()[name]
         setup_ms = (monotonic_now() - started) * 1000
@@ -112,7 +132,9 @@ def worker_job(connection: Connection, name: str, payload: dict, settings_payloa
             request = operation.prepare(request, files)
             request = operation.request_model.model_validate(request)
         request = files.snapshot_request(request)
-        connection.send({"phase": "prepared", "request": request.model_dump(mode="json"),
+        connection.send({"phase": "prepared", "operation_id": identity,
+                         "worker_python_threads": threading.active_count(),
+                         "request": request.model_dump(mode="json"),
                          "preparation_ms": (monotonic_now() - started) * 1000,
                          "worker_setup_ms": setup_ms,
                          "request_preparation_ms": (monotonic_now() - preparation_started) * 1000,
@@ -120,7 +142,7 @@ def worker_job(connection: Connection, name: str, payload: dict, settings_payloa
                          "worker_started_monotonic": started,
                          "prepared_monotonic": monotonic_now()})
         if connection.recv() != "execute":
-            return
+            return False
         context = CalculationContext(settings, identity, trace_id, guard)
         compute_started = monotonic_now()
         result = operation.result_model.model_validate(operation.execute(request, context))
@@ -131,18 +153,55 @@ def worker_job(connection: Connection, name: str, payload: dict, settings_payloa
     except ServiceError as error:
         outcome = {"ok": False, "error": error.payload(trace_id), "status": error.status}
     except MemoryError:
-        outcome = {"ok": False, "error": ServiceError(
+        outcome = {"ok": False, "recycle_worker": True, "error": ServiceError(
             "operation.memory_limit", "Computation exceeded its memory budget", 429,
             retryable=True).payload(trace_id), "status": 429}
     except BaseException:
-        outcome = {"ok": False, "error": ServiceError(
+        outcome = {"ok": False, "recycle_worker": True, "error": ServiceError(
             "calculation.failed", "Calculation failed unexpectedly", 500,
         ).payload(trace_id), "status": 500}
     if compute_started is not None and "compute_ms" not in outcome:
         outcome["compute_ms"] = (monotonic_now() - compute_started) * 1000
     try:
-        connection.send({"phase": "finished", **outcome})
+        connection.send({"phase": "finished", "operation_id": identity, **outcome})
     except (BrokenPipeError, EOFError, OSError):
+        return True
+    return outcome.get("recycle_worker", False)
+
+
+def worker_main(connection: Connection, settings_payload: dict) -> None:
+    """Prewarm once, then process independent task envelopes on one exclusive pipe."""
+    started = monotonic_now()
+    parent_pid = os.getppid()
+
+    def stop_on_parent_death():
+        while True:
+            threading.Event().wait(0.1)
+            if os.getppid() != parent_pid:
+                os._exit(1)
+
+    threading.Thread(target=stop_on_parent_death, daemon=True).start()
+    try:
+        settings = ServiceSettings.model_validate(settings_payload)
+        # Apply the DATA budget per task: even an undersized deployment must remain
+        # able to report a typed memory-limit failure instead of failing startup.
+        configure_worker(settings, memory_limit=False)
+        operations()
+        connection.send({"phase": "ready", "started_monotonic": started,
+                         "setup_ms": (monotonic_now() - started) * 1000})
+        while True:
+            task = connection.recv()
+            if task is None:
+                return
+            identity = task["identity"]
+            recycle = worker_job(connection, task["name"], task["request"], settings_payload,
+                       identity, task["trace_id"], task["guard"], settings)
+            del task
+            gc.collect()
+            if recycle:
+                return
+            connection.send({"phase": "idle", "operation_id": identity})
+    except (EOFError, BrokenPipeError, OSError):
         pass
     finally:
         connection.close()
@@ -185,7 +244,7 @@ class OperationRuntime:
         self.tasks = set()
         self.ready = False
         self.pending = 0
-        self.semaphore = None
+        self.pool = None
         self.mp = multiprocessing.get_context("spawn")
         for variable in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
             os.environ[variable] = "1"
@@ -204,7 +263,8 @@ class OperationRuntime:
 
     async def start(self) -> None:
         """Recover interrupted work before opening admission."""
-        self.semaphore = asyncio.Semaphore(self.settings.max_workers)
+        self.pool = WorkerPool(self.mp, self.settings.max_workers, worker_main,
+                               self.settings.model_dump(mode="json"))
         self._persist_lock = asyncio.Lock()
         self._admission_lock = asyncio.Lock()
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -264,6 +324,13 @@ class OperationRuntime:
         try:
             await self._persist()
         except ServiceError:
+            await self._io(self.store.close)
+            self._writer.shutdown(wait=True)
+            self.owner.close()
+            raise
+        try:
+            await self.pool.start()
+        except BaseException:
             await self._io(self.store.close)
             self._writer.shutdown(wait=True)
             self.owner.close()
@@ -344,12 +411,14 @@ class OperationRuntime:
     async def close(self) -> None:
         """Stop admission, allow a bounded drain, and terminate every unfinished process."""
         self.ready = False
+        await self.pool.stop_replacing()
         if self.tasks:
             await asyncio.wait(self.tasks, timeout=self.settings.shutdown_wait_seconds)
         for identity in list(self.jobs):
             await self._stop(identity, "failed", "worker.interrupted")
         if self.tasks:
             await asyncio.gather(*list(self.tasks), return_exceptions=True)
+        await self.pool.close()
         try:
             await self._checkpoint()
         finally:
@@ -417,8 +486,8 @@ class OperationRuntime:
         except OSError as error:
             raise ServiceError("service.state_unavailable", "Operation staging is unavailable",
                                503, retryable=True) from error
-        guard = CommitGuard(str(owned / "commit.lock"), self.mp.Value("b", False, lock=False),
-                            self.mp.Value("b", False, lock=False),
+        guard = CommitGuard(str(owned / "commit.lock"), FileFlag(str(owned / "commit.flag")),
+                            FileFlag(str(owned / "stop.flag")),
                             staging_directory=str(owned / "stages"),
                             deadline=started + request.timeout_ms / 1000)
         job = {"prepared": prepared, "guard": guard, "process": None,
@@ -478,29 +547,53 @@ class OperationRuntime:
         job = self.jobs[identity]
         record = self.records[identity]
         connection = None
-        acquired = False
+        worker = None
+        dispatched = False
         try:
             remaining = max(0, job["deadline"] - monotonic_now())
             waiting = monotonic_now()
             try:
-                await asyncio.wait_for(self.semaphore.acquire(), remaining)
+                job["acquiring"] = asyncio.create_task(self.pool.acquire())
+                try:
+                    worker = await asyncio.wait_for(job["acquiring"], remaining)
+                except asyncio.CancelledError:
+                    if not job.get("stopping"):
+                        raise
+                    await asyncio.shield(job["stop_task"])
+                    return
+                finally:
+                    job["acquiring"] = None
                 record["diagnostics"]["semaphore_wait_ms"] = (monotonic_now()-waiting) * 1000
-                acquired = True
+                record["diagnostics"]["worker_checkout_ms"] = (monotonic_now()-waiting) * 1000
                 record["diagnostics"]["queue_ms"] = (monotonic_now()-job["started"]) * 1000
             except asyncio.TimeoutError:
                 await self._stop(identity, "timed_out", "operation.timed_out")
                 return
             if record["state"] in TERMINAL_STATES:
                 return
-            parent, child = self.mp.Pipe()
-            connection = parent
-            process = self.mp.Process(target=worker_job, args=(
-                child, record["operation"], job["request"].model_dump(mode="json"),
-                self.settings.model_dump(mode="json"), identity, record["trace_id"], job["guard"]))
+            process = worker.process
+            connection = worker.connection
             job["process"] = process
+            record["diagnostics"].update(
+                worker_pid=process.pid, worker_use_count=worker.uses + 1,
+                worker_reused=worker.uses > 0, worker_boot_spawn_ms=worker.boot_spawn_ms,
+                worker_boot_setup_ms=worker.boot_setup_ms, worker_spawn_ms=0.0,
+                timing_version=3,
+            )
             job["process_started"] = monotonic_now()
-            process.start()
-            child.close()
+            if await asyncio.to_thread(resident_bytes, process.pid) > self.settings.max_worker_memory_bytes:
+                await self._stop(identity, "failed", "operation.memory_limit")
+                return
+            try:
+                dispatched = True
+                await asyncio.wait_for(asyncio.to_thread(connection.send, {
+                    "identity": identity, "trace_id": record["trace_id"],
+                    "name": record["operation"], "request": job["request"].model_dump(mode="json"),
+                    "guard": job["guard"],
+                }), max(0, job["deadline"] - monotonic_now()))
+            except asyncio.TimeoutError:
+                await self._stop(identity, "timed_out", "operation.timed_out")
+                return
             memory_checked = 0.0
             while record["state"] not in TERMINAL_STATES:
                 if job.get("stopping"):
@@ -522,6 +615,8 @@ class OperationRuntime:
                 if connection.poll():
                     received = monotonic_now()
                     message = connection.recv()
+                    if message.get("operation_id") != identity:
+                        raise RuntimeError("Worker returned another operation's message")
                     record["diagnostics"]["ipc_receive_ms"] = (monotonic_now()-received) * 1000
                     if message["phase"] == "prepared":
                         record["diagnostics"]["prepared_received_monotonic"] = monotonic_now()
@@ -531,7 +626,7 @@ class OperationRuntime:
                             break
                         record["diagnostics"]["identity_binding_ms"] = (
                             monotonic_now() - binding_started) * 1000
-                        record["diagnostics"]["worker_spawn_ms"] = (
+                        record["diagnostics"]["worker_dispatch_ms"] = (
                             message["worker_started_monotonic"] - job["process_started"]) * 1000
                         record["diagnostics"]["prepared_message_delay_ms"] = (
                             record["diagnostics"]["prepared_received_monotonic"]
@@ -539,7 +634,8 @@ class OperationRuntime:
                         record["diagnostics"]["worker_setup_ms"] = message["worker_setup_ms"]
                         record["diagnostics"]["request_preparation_ms"] = message["request_preparation_ms"]
                         record["diagnostics"]["preparation_cache"] = message["preparation_cache"]
-                        record["diagnostics"]["timing_version"] = 2
+                        record["diagnostics"]["worker_python_threads"] = message["worker_python_threads"]
+                        record["diagnostics"]["timing_version"] = 3
                         connection.send("execute")
                         record["diagnostics"]["preparation_ms"] = message["preparation_ms"]
                         record["diagnostics"]["worker_started_monotonic"] = (
@@ -612,16 +708,9 @@ class OperationRuntime:
                 ).payload(record["trace_id"])
                 await self._finish(identity, "failed")
         finally:
-            process = job["process"]
-            if process is not None:
-                if process.is_alive():
-                    process.terminate()
-                await asyncio.to_thread(process.join)
-                process.close()
-            if connection is not None:
-                connection.close()
-            if acquired:
-                self.semaphore.release()
+            if worker is not None:
+                await self.pool.release(worker, identity, dispatched, resident_bytes,
+                                        self.settings.max_worker_memory_bytes)
             if not job["prepared"].done():
                 job["prepared"].set_result(True)
             self._cleanup_owned(identity)
@@ -694,6 +783,9 @@ class OperationRuntime:
         """Kill a stalled commit, then inspect the durable completion boundary."""
         job = self.jobs[identity]
         guard = job["guard"]
+        acquiring = job.get("acquiring")
+        if acquiring is not None and not acquiring.done():
+            acquiring.cancel()
         def mark_stopped():
             try:
                 with filesystem_lock(guard.lock, blocking=False):
@@ -704,8 +796,7 @@ class OperationRuntime:
         await asyncio.to_thread(mark_stopped)
         process = job["process"]
         if process is not None and process.is_alive():
-            process.terminate()
-            await asyncio.to_thread(process.join)
+            await terminate_process(process)
         with filesystem_lock(guard.lock):
             recovered = self._completed(identity)
             guard.stopped.value = True

@@ -523,3 +523,21 @@ def test_journal_failure_after_admission_is_queryable_and_capacity_recovers(tmp_
             "/api/v2/image-inspections", json=inspection(idempotency_key="storage-retry")
         )
         assert recovered.status_code == 200, recovered.text
+
+
+
+def test_unexpected_task_failure_retires_worker_before_following_request(tmp_path):
+    settings_for(tmp_path)
+    with real_server(tmp_path, "raise-payload") as (client, _):
+        client.post("/api/v2/image-previews", json={
+            **inspection(mode="async"),
+            "output": {"directory": {"root": "exchange", "path": "outputs"}},
+        })
+        records = client.get("/api/v2/operations").json()["operations"]
+        failed = terminal(client, records[0]["operation_id"])
+        assert failed["state"] == "failed"
+        assert failed["error"]["code"] == "calculation.failed"
+        following = client.post("/api/v2/image-inspections", json=inspection())
+        assert following.status_code == 200, following.text
+        assert (following.json()["diagnostics"]["worker_pid"]
+                != failed["diagnostics"]["worker_pid"])
