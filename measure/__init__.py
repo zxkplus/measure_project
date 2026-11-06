@@ -58,6 +58,34 @@ from measure.measure_template import (
     check_roi_covers_template,
 )
 
+# Circle location and camera-on-arm pick calibration
+from measure.circle_locator import (
+    CircleDetection,
+    CircleLocator,
+    estimate_noise_sigma,
+    find_circle_center,
+)
+from measure.robot_calibration import (
+    CalibrationError,
+    CalibrationSample,
+    CallableRobot,
+    CameraGripperOffset,
+    ImageRobotCalibration,
+    OffsetSample,
+    RobotLink,
+    RobotPickRecipe,
+    VerificationCheck,
+    VerificationReport,
+    calibrate_gripper_offset,
+    calibrate_image_to_robot,
+    capture_and_calibrate,
+    combine_offsets,
+    fit_image_to_robot,
+    verify_image_to_robot,
+    verify_pick,
+)
+from measure.pick_api import GantryPick, PickError, TargetLocation
+
 # Workflow
 from measure.measure_workflow import (
     MeasurementWorkflow,
