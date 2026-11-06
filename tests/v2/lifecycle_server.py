@@ -12,6 +12,8 @@ original_link = os.link
 def controlled_link(source, destination, *args, **kwargs):
     """Pause at an external filesystem boundary, never inside calculation logic."""
     name = Path(destination).name
+    if boundary == "raise-payload" and name == "preview.png":
+        raise RuntimeError("Controlled unexpected worker failure")
     pause_before = ((boundary == "before-payload" and name == "preview.png")
                     or (boundary == "before-manifest" and name == "manifest.json"))
     pause_after = boundary == "after-manifest" and name == "manifest.json"

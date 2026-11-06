@@ -1,6 +1,7 @@
 """Lifecycle acceptance using public HTTP and real shared files."""
 
 import time
+import sqlite3
 from contextlib import contextmanager
 
 import cv2
@@ -54,6 +55,48 @@ def test_retry_identity_is_scoped_by_caller_and_verified_content(tmp_path):
                               headers={"X-Caller-Id": "camera-a"})
         assert changed.status_code == 409
         assert changed.json()["error"]["code"] == "operation.idempotency_conflict"
+
+
+def test_concurrent_retries_bind_one_durable_operation(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    settings = settings_for(tmp_path, state_directory=tmp_path / "runtime")
+    with TestClient(create_app(settings)) as client, ThreadPoolExecutor(2) as threads:
+        calls = [threads.submit(client.post, "/api/v2/image-inspections",
+                                json=inspection(idempotency_key="same-content"))
+                 for _ in range(2)]
+        responses = [call.result(timeout=10) for call in calls]
+        assert all(response.status_code == 200 for response in responses)
+        assert len({response.json()["operation_id"] for response in responses}) == 1
+        assert len(client.get("/api/v2/operations").json()["operations"]) == 1
+
+
+def test_blocked_storage_writer_does_not_block_http_health(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    entered, release = Event(), Event()
+    with TestClient(create_app(settings_for(tmp_path))) as client:
+        store = client.app.state.runtime.store
+        original = store._write
+
+        def blocked(*args, **kwargs):
+            entered.set()
+            assert release.wait(5)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(store, "_write", blocked)
+        with ThreadPoolExecutor(1) as threads:
+            operation = threads.submit(client.post, "/api/v2/image-inspections",
+                                       json=inspection())
+            try:
+                assert entered.wait(2)
+                started = time.monotonic()
+                assert client.get("/api/v2/health/ready").status_code == 200
+                assert time.monotonic() - started < 0.5
+            finally:
+                release.set()
+            assert operation.result(timeout=10).status_code == 200
 
 
 def terminal(client, identity, seconds=15):
@@ -382,8 +425,8 @@ def test_journal_admission_failure_is_typed_and_releases_capacity(tmp_path):
     state = tmp_path / "runtime"
     settings = settings_for(tmp_path, state_directory=state, max_pending=1)
     with TestClient(create_app(settings), raise_server_exceptions=False) as client:
-        obstruction = state / "journal.partial"
-        obstruction.mkdir()
+        lock = sqlite3.connect(state / "operations.sqlite3")
+        lock.execute("BEGIN IMMEDIATE")
         failed = client.post("/api/v2/image-inspections", json=inspection(),
                              headers={"X-Trace-Id": "storage-probe"})
         assert failed.status_code == 503, failed.text
@@ -392,7 +435,8 @@ def test_journal_admission_failure_is_typed_and_releases_capacity(tmp_path):
         assert failed.json()["error"]["retryable"]
         assert client.get("/api/v2/operations").json()["operations"] == []
         assert not [item for item in state.iterdir() if item.is_dir() and len(item.name) == 32]
-        obstruction.rmdir()
+        lock.rollback()
+        lock.close()
         recovered = client.post("/api/v2/image-inspections", json=inspection())
         assert recovered.status_code == 200, recovered.text
         assert recovered.json()["state"] == "succeeded"
@@ -406,7 +450,7 @@ def test_journal_outage_preserves_committed_success_across_shutdown_and_restart(
 
     settings_for(tmp_path)
     os.mkfifo(tmp_path / "release.fifo")
-    obstruction = tmp_path / "runtime" / "journal.partial"
+    lock = None
     saved_result = None
     try:
         with real_server(tmp_path, "after-manifest") as (client, _):
@@ -416,7 +460,8 @@ def test_journal_outage_preserves_committed_success_across_shutdown_and_restart(
             })
             assert response.status_code == 202, response.text
             wait_for_boundary(tmp_path)
-            obstruction.mkdir()
+            lock = sqlite3.connect(tmp_path / "runtime" / "operations.sqlite3")
+            lock.execute("BEGIN IMMEDIATE")
             identity = response.json()["operation_id"]
             if completion == "cancel":
                 completed = client.post(f"/api/v2/operations/{identity}:cancel")
@@ -431,8 +476,9 @@ def test_journal_outage_preserves_committed_success_across_shutdown_and_restart(
                 saved_result = observed["result"]
                 assert client.get(f"/api/v2/operations/{identity}").json()["result"] == saved_result
     finally:
-        if obstruction.exists():
-            obstruction.rmdir()
+        if lock is not None:
+            lock.rollback()
+            lock.close()
     with real_server(tmp_path) as (client, _):
         recovered = client.get(f"/api/v2/operations/{identity}")
         assert recovered.status_code == 200, recovered.text
@@ -452,19 +498,19 @@ def test_journal_failure_after_admission_is_queryable_and_capacity_recovers(tmp_
 
     settings = settings_for(tmp_path, state_directory=tmp_path / "runtime", max_pending=1)
     with TestClient(create_app(settings), raise_server_exceptions=False) as client:
-        original_replace = os.replace
+        store = client.app.state.runtime.store
+        original_write = store._write
         admitted = False
 
-        def unavailable_after_admission(source, destination, *args, **kwargs):
+        def unavailable_after_admission(*args, **kwargs):
             nonlocal admitted
-            if Path(destination).name == "journal.json":
-                if admitted:
-                    raise OSError("Controlled journal storage outage")
-                admitted = True
-            return original_replace(source, destination, *args, **kwargs)
+            if admitted:
+                raise OSError("Controlled operational storage outage")
+            admitted = True
+            return original_write(*args, **kwargs)
 
         with monkeypatch.context() as fault:
-            fault.setattr(os, "replace", unavailable_after_admission)
+            fault.setattr(store, "_write", unavailable_after_admission)
             failed = client.post(
                 "/api/v2/image-inspections", json=inspection(idempotency_key="storage-retry")
             )
@@ -477,3 +523,21 @@ def test_journal_failure_after_admission_is_queryable_and_capacity_recovers(tmp_
             "/api/v2/image-inspections", json=inspection(idempotency_key="storage-retry")
         )
         assert recovered.status_code == 200, recovered.text
+
+
+
+def test_unexpected_task_failure_retires_worker_before_following_request(tmp_path):
+    settings_for(tmp_path)
+    with real_server(tmp_path, "raise-payload") as (client, _):
+        client.post("/api/v2/image-previews", json={
+            **inspection(mode="async"),
+            "output": {"directory": {"root": "exchange", "path": "outputs"}},
+        })
+        records = client.get("/api/v2/operations").json()["operations"]
+        failed = terminal(client, records[0]["operation_id"])
+        assert failed["state"] == "failed"
+        assert failed["error"]["code"] == "calculation.failed"
+        following = client.post("/api/v2/image-inspections", json=inspection())
+        assert following.status_code == 200, following.text
+        assert (following.json()["diagnostics"]["worker_pid"]
+                != failed["diagnostics"]["worker_pid"])

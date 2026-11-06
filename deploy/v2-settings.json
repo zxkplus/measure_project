@@ -6,7 +6,7 @@
   },
   "writable_roots": ["outputs"],
   "state_directory": "/var/lib/measure-v2/state",
-  "max_workers": 2,
+  "max_workers": 5,
   "max_pending": 16,
   "max_input_bytes": 268435456,
   "max_image_pixels": 67108864,

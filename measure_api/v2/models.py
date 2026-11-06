@@ -125,7 +125,7 @@ class ServiceSettings(StrictModel):
 
     shared_roots: Dict[str, Path]
     writable_roots: Optional[List[str]] = None
-    max_workers: int = Field(default=2, ge=1, le=64)
+    max_workers: int = Field(default=5, ge=1, le=64)
     max_pending: int = Field(default=16, ge=1, le=10000)
     max_input_bytes: int = Field(default=256 * 1024 * 1024, ge=1)
     max_image_pixels: int = Field(default=64 * 1024 * 1024, ge=1)

@@ -10,6 +10,7 @@ import fcntl
 import json
 import os
 import shutil
+from collections import OrderedDict
 from pathlib import Path
 from contextlib import contextmanager
 from typing import Iterator, Any, List, Tuple
@@ -26,14 +27,49 @@ from measure_api.v2.models import (
 from measure_api.v2.versions import decoder_identity
 
 
+class OperationImages:
+    """Bounded immutable decoded arrays shared only by one operation and its stages."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.bytes = 0
+        self.entries = OrderedDict()
+
+    def get(self, key: str):
+        value = self.entries.get(key)
+        if value is not None:
+            self.entries.move_to_end(key)
+        return value
+
+    def put(self, key: str, image: np.ndarray) -> np.ndarray:
+        image.setflags(write=False)
+        if image.nbytes > self.limit:
+            return image
+        if key in self.entries:
+            self.bytes -= self.entries.pop(key).nbytes
+        while self.entries and self.bytes + image.nbytes > self.limit:
+            self.bytes -= self.entries.popitem(last=False)[1].nbytes
+        self.entries[key] = image
+        self.bytes += image.nbytes
+        return image
+
+
 class SharedFiles:
     """Validate configured boundaries and read verified upstream inputs."""
 
-    def __init__(self, settings: ServiceSettings, commit_guard: Any = None) -> None:
+    def __init__(self, settings: ServiceSettings, commit_guard: Any = None,
+                 image_cache: Any = None) -> None:
         self.settings = settings
         self.commit_guard = commit_guard
         self.pending_manifests = []
-        self.cache_stats = {"hits": 0, "misses": 0, "evictions": 0}
+        self.cache_stats = {"hits": 0, "misses": 0, "evictions": 0, "memory_hits": 0,
+                            "gray_conversions": 0, "input_read_ms": 0.0,
+                            "file_read_ms": 0.0, "verified_bytes": 0,
+                            "decode_ms": 0.0, "cache_read_ms": 0.0,
+                            "cache_lock_wait_ms": 0.0}
+        self.image_cache = image_cache if image_cache is not None else OperationImages(
+            min(settings.cache_max_bytes, settings.max_worker_memory_bytes // 4))
+        self._decoder = None
 
     def resolve(self, reference: FileReference, write: bool = False) -> Path:
         """Resolve symlinks before permitting any access to a shared pathname.
@@ -72,6 +108,7 @@ class SharedFiles:
         Returns:
             Stable input bytes and their pinned SHA-256 file reference.
         """
+        started = monotonic_now()
         path = self.resolve(reference)
         try:
             with path.open("rb") as source:
@@ -95,6 +132,8 @@ class SharedFiles:
             raise ServiceError(
                 "file.digest_mismatch", "Input does not match its expected SHA-256", 409,
             )
+        self.cache_stats["file_read_ms"] += (monotonic_now() - started) * 1000
+        self.cache_stats["verified_bytes"] += len(data)
         return data, reference.model_copy(update={"sha256": digest})
 
     def read_image(self, reference: FileReference) -> Tuple[np.ndarray, FileReference]:
@@ -106,7 +145,9 @@ class SharedFiles:
         Returns:
             Independent decoded pixel array and its verified immutable source reference.
         """
+        read_started = monotonic_now()
         data, verified = self.read_bytes(reference)
+        self.cache_stats["input_read_ms"] += (monotonic_now() - read_started) * 1000
         is_png = data.startswith(b"\x89PNG\r\n\x1a\n")
         is_jpeg = data.startswith(b"\xff\xd8\xff")
         if not (is_png or is_jpeg):
@@ -116,16 +157,36 @@ class SharedFiles:
             raise ServiceError("image.too_large", "Image exceeds configured pixel limit")
         if width * height * 4 + len(data) > self.settings.max_worker_memory_bytes:
             raise ServiceError("operation.memory_limit", "Image exceeds worker memory budget", 429)
-        identity = decoder_identity() + ":" + verified.sha256
+        if self._decoder is None:
+            self._decoder = decoder_identity()
+        identity = self._decoder + ":" + verified.sha256
         key = hashlib.sha256(identity.encode()).hexdigest()
-        image = self._cached_image(key, data)
+        image = self.image_cache.get(key)
+        if image is not None:
+            self.cache_stats["hits"] += 1
+            self.cache_stats["memory_hits"] += 1
+        else:
+            image = self._cached_image(key, data)
         if image is None:
             raise ServiceError("image.invalid", "Input cannot be decoded as an image")
         if image.dtype != np.uint8 or (image.ndim != 2 and image.shape[2] != 3):
             raise ServiceError("image.unsupported_pixels", "Expected GRAY8 or three-channel BGR8")
         if image.shape[0] * image.shape[1] > self.settings.max_image_pixels:
             raise ServiceError("image.too_large", "Image exceeds configured pixel limit")
-        return image, verified
+        return self.image_cache.put(key, image), verified
+
+    def read_gray(self, reference: FileReference) -> np.ndarray:
+        """Reuse a task-local grayscale array after rechecking the input content."""
+        image, verified = self.read_image(reference)
+        if image.ndim == 2:
+            return image
+        key = "gray:" + self._decoder + ":" + verified.sha256
+        gray = self.image_cache.get(key)
+        if gray is None:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            self.cache_stats["gray_conversions"] += 1
+            self.image_cache.put(key, gray)
+        return gray
 
     def _cached_image(self, key: str, data: bytes) -> np.ndarray:
         """Cache disposable decoded pixels by verified content and decoder version."""
@@ -133,36 +194,48 @@ class SharedFiles:
                    and self.settings.state_directory is not None)
         if not enabled:
             self.cache_stats["misses"] += 1
-            return cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED)
+            started = monotonic_now()
+            image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED)
+            self.cache_stats["decode_ms"] += (monotonic_now() - started) * 1000
+            return image
         directory = self.settings.state_directory / "decoded-cache"
         directory.mkdir(parents=True, exist_ok=True)
+        path = directory / (key + ".cache")
+        # Immutable atomic cache files remain readable through an open descriptor on eviction.
+        started = monotonic_now()
+        try:
+            blob = path.read_bytes()
+            if hashlib.sha256(blob[32:]).digest() == blob[:32]:
+                image = np.load(io.BytesIO(blob[32:]), allow_pickle=False)
+                self.cache_stats["hits"] += 1
+                self.cache_stats["cache_read_ms"] += (monotonic_now() - started) * 1000
+                try:
+                    os.utime(path, None)
+                except FileNotFoundError:
+                    pass
+                return image
+        except (ValueError, OSError):
+            pass
+        # Decode outside the quota/publication lock so unrelated images can proceed.
+        started = monotonic_now()
+        image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED)
+        self.cache_stats["decode_ms"] += (monotonic_now() - started) * 1000
+        self.cache_stats["misses"] += 1
+        if image is None:
+            return image
+        buffer = io.BytesIO()
+        np.save(buffer, image, allow_pickle=False)
+        encoded = buffer.getvalue()
+        blob = hashlib.sha256(encoded).digest() + encoded
+        waiting = monotonic_now()
         with (directory / ".lock").open("a+b") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            for partial in directory.glob("*.partial"):
-                partial.unlink(missing_ok=True)
-            path = directory / (key + ".cache")
-            if path.exists():
-                try:
-                    blob = path.read_bytes()
-                    if hashlib.sha256(blob[32:]).digest() != blob[:32]:
-                        raise ValueError("Cache checksum mismatch")
-                    image = np.load(io.BytesIO(blob[32:]), allow_pickle=False)
-                    os.utime(path, None)
-                    self.cache_stats["hits"] += 1
-                    return image.copy()
-                except (ValueError, OSError):
-                    path.unlink(missing_ok=True)
-            self.cache_stats["misses"] += 1
-            image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED)
-            if image is None:
-                return image
-            buffer = io.BytesIO()
-            np.save(buffer, image, allow_pickle=False)
-            encoded = buffer.getvalue()
-            blob = hashlib.sha256(encoded).digest() + encoded
+            self.cache_stats["cache_lock_wait_ms"] += (monotonic_now() - waiting) * 1000
             if len(blob) <= self.settings.cache_max_bytes:
                 entries = sorted(directory.glob("*.cache"),
                                  key=lambda item: item.stat().st_mtime_ns)
+                # Replace the same key without counting its existing bytes twice.
+                entries = [item for item in entries if item != path]
                 total = sum(item.stat().st_size for item in entries)
                 while entries and (len(entries) >= self.settings.cache_max_entries
                                    or total + len(blob) > self.settings.cache_max_bytes):

@@ -22,7 +22,11 @@ Set `MEASURE_V2_SHARED_ROOT` to an existing readable/writable shared directory a
 For multiple aliases, read-only roots and limits, set `MEASURE_V2_CONFIG` to a JSON `ServiceSettings`
 file or pass settings to the public `create_app` factory when embedding. Only one ASGI process owns
 the operation state. Calculations and input hashing run in bounded, independently cancellable
-spawn-based processes. Health and capability endpoints use the
+spawn-based processes. Five workers are prewarmed by default before readiness; successful
+tasks reuse their worker after a cleanup acknowledgement. A cancelled, timed-out, crashed or
+unexpectedly failed worker is reaped and replaced independently. Request contexts, images and
+publication guards remain task-owned. See [worker-pool operation](../../docs/v2-worker-pool.md).
+Health and capability endpoints use the
 `/api/v2` prefix, as do `/docs` and `/openapi.json`.
 
 ## Caller contract

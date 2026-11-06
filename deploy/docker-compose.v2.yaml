@@ -20,7 +20,7 @@ services:
       - ${MEASURE_V2_OUTPUTS_DIR}:/shared/outputs
       - ${MEASURE_V2_STATE_DIR}:/var/lib/measure-v2/state
       - ${MEASURE_V2_SETTINGS_FILE:-./v2-settings.json}:/etc/measure-v2/settings.json:ro
-    mem_limit: ${MEASURE_V2_CONTAINER_MEMORY:-6g}
+    mem_limit: ${MEASURE_V2_CONTAINER_MEMORY:-12g}
     stop_grace_period: 15s
     healthcheck:
       test:
