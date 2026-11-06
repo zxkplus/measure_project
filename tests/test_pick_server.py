@@ -1,4 +1,4 @@
-"""HTTP tests for the gantry pick service."""
+"""HTTP tests for the stateless gantry pick service."""
 
 from __future__ import annotations
 
@@ -9,8 +9,10 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
+from measure.pick_api import GantryPick
 from measure_api.pick_server import PickSettings, create_app
 
 WIDTH = 640
@@ -46,7 +48,6 @@ def _robot_point(uv):
 def _settings(tmp_path: Path):
     return PickSettings(
         runs_dir=tmp_path / "runs",
-        recipe_path=tmp_path / "recipe.json",
         debug_default=False,
         annotated_max_px=800,
     )
@@ -66,11 +67,30 @@ def _upload_vision(client, images=None, points=None):
     )
 
 
-def _upload_locate(client, image, pose=(90.0, 180.0)):
+def _upload_offset(client):
+    return client.post(
+        "/api/v1/calibrate/offset",
+        json={"samples": [{"place_pose": [108, 184], "center_pose": [100, 180]}]},
+    )
+
+
+def _upload_locate(
+    client,
+    image,
+    pose=(90.0, 180.0),
+    vision_matrix=None,
+    offset_matrix=None,
+):
+    data = {
+        "robot_pose": json.dumps(list(pose)),
+        "vision_matrix": json.dumps(vision_matrix),
+    }
+    if offset_matrix is not None:
+        data["offset_matrix"] = json.dumps(offset_matrix)
     return client.post(
         "/api/v1/locate",
         files=[("image", ("shot.png", _png(image), "image/png"))],
-        data={"robot_pose": json.dumps(list(pose))},
+        data=data,
     )
 
 
@@ -84,34 +104,51 @@ def _run_dirs(settings):
     ]
 
 
-def test_debug_off_keeps_business_only(tmp_path):
+def _manifest(settings, run_id):
+    return json.loads(
+        (settings.runs_dir / run_id / "manifest.json").read_text(encoding="utf-8")
+    )
+
+
+def test_debug_off_returns_matrices_and_coordinates(tmp_path):
     settings = _settings(tmp_path)
     client = TestClient(create_app(settings))
 
     vision = _upload_vision(client)
     assert vision.status_code == 200
-    payload = vision.json()
-    assert payload["ok"] is True
-    assert "run_id" not in payload
-    assert "overview" not in payload
+    vision_payload = vision.json()
+    assert set(vision_payload) == {"ok", "matrix"}
+    vision_matrix = vision_payload["matrix"]
+    assert np.asarray(vision_matrix).shape == (3, 3)
 
-    offset = client.post(
-        "/api/v1/calibrate/offset",
-        json={"samples": [{"place_pose": [108, 184], "center_pose": [100, 180]}]},
-    )
+    offset = _upload_offset(client)
     assert offset.status_code == 200
-    assert offset.json()["offset_xy"] == [8.0, 4.0]
-    assert "run_id" not in offset.json()
+    offset_payload = offset.json()
+    assert set(offset_payload) == {"ok", "matrix"}
+    offset_matrix = offset_payload["matrix"]
+    assert offset_matrix == [
+        [1.0, 0.0, 8.0],
+        [0.0, 1.0, 4.0],
+        [0.0, 0.0, 1.0],
+    ]
 
-    locate = _upload_locate(client, _image((300.0, 200.0)))
-    assert locate.status_code == 200
-    assert locate.json()["gripper_xy"] is not None
-    assert "run_id" not in locate.json()
-
+    located = _upload_locate(
+        client,
+        _image((300.0, 200.0)),
+        vision_matrix=vision_matrix,
+        offset_matrix=offset_matrix,
+    )
+    assert located.status_code == 200
+    payload = located.json()
+    assert set(payload) == {"ok", "camera_center_xy", "gripper_xy"}
+    assert payload["gripper_xy"] == pytest.approx(
+        (
+            payload["camera_center_xy"][0] + 8.0,
+            payload["camera_center_xy"][1] + 4.0,
+        ),
+        abs=1e-9,
+    )
     assert _run_dirs(settings) == []
-    status = client.get("/api/v1/status").json()
-    assert status["ready"] is True
-    assert status["debug"] is False
 
 
 def test_debug_on_writes_and_serves_artifacts(tmp_path):
@@ -122,70 +159,106 @@ def test_debug_on_writes_and_serves_artifacts(tmp_path):
     vision = _upload_vision(client)
     assert vision.status_code == 200
     vision_payload = vision.json()
-    assert vision_payload["ok"] is True
+    assert "matrix" in vision_payload
     assert vision_payload["run_id"]
-    assert vision_payload["overview"].startswith("/files/")
-    assert len(vision_payload["images"]) == 4
+    assert "overview" not in vision_payload
+    assert "images" not in vision_payload
+    vision_run = vision_payload["run_id"]
+    manifest = _manifest(settings, vision_run)
+    assert manifest["type"] == "vision"
+    assert manifest["overview"] == "overview.jpg"
+    assert manifest["images"][0]["annotated"]
 
-    overview = client.get(vision_payload["overview"])
-    assert overview.status_code == 200
-    assert overview.headers["content-type"].startswith("image/jpeg")
-
-    annotated = client.get(vision_payload["images"][0]["annotated"])
-    assert annotated.status_code == 200
-
-    offset = client.post(
-        "/api/v1/calibrate/offset",
-        json={"samples": [{"place_pose": [108, 184], "center_pose": [100, 180]}]},
+    assert client.get(f"/api/v1/runs/{vision_run}").status_code == 200
+    assert client.get(f"/files/{vision_run}/overview.jpg").status_code == 200
+    assert (
+        client.get(
+            f"/files/{vision_run}/{manifest['images'][0]['annotated']}"
+        ).status_code
+        == 200
     )
-    assert offset.status_code == 200
-    assert offset.json()["run_id"]
 
-    locate = _upload_locate(client, _image((300.0, 200.0)))
-    assert locate.status_code == 200
-    locate_payload = locate.json()
+    offset = _upload_offset(client)
+    assert offset.status_code == 200
+    assert offset.json()["matrix"]
+    assert offset.json()["run_id"]
+    assert "offset_xy" not in offset.json()
+
+    located = _upload_locate(
+        client,
+        _image((300.0, 200.0)),
+        vision_matrix=vision_payload["matrix"],
+        offset_matrix=offset.json()["matrix"],
+    )
+    assert located.status_code == 200
+    locate_payload = located.json()
     assert locate_payload["run_id"]
-    assert locate_payload["gripper_xy"] is not None
-    assert client.get(locate_payload["annotated"]).status_code == 200
+    assert "annotated" not in locate_payload
+    assert "original" not in locate_payload
+    locate_run = locate_payload["run_id"]
+    locate_manifest = _manifest(settings, locate_run)
+    assert locate_manifest["type"] == "locate"
+    assert locate_manifest["images"][0]["annotated"]
+    assert (
+        client.get(
+            f"/files/{locate_run}/{locate_manifest['images'][0]['annotated']}"
+        ).status_code
+        == 200
+    )
 
     runs = client.get("/api/v1/runs").json()["runs"]
     assert len(runs) == 3
-    assert all(item["url"].startswith("/api/v1/runs/") for item in runs)
-
-    manifest = client.get(f"/api/v1/runs/{locate_payload['run_id']}")
-    assert manifest.status_code == 200
-    assert manifest.json()["run"]["type"] == "locate"
-
-    archive = client.get(f"/api/v1/runs/{vision_payload['run_id']}/archive")
+    archive = client.get(f"/api/v1/runs/{vision_run}/archive")
     assert archive.status_code == 200
     with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
         names = set(bundle.namelist())
     assert "manifest.json" in names
     assert "inputs.json" in names
     assert "result.json" in names
+    assert "recipe_snapshot.json" not in names
 
-    status = client.get("/api/v1/status").json()
-    assert status["debug"] is True
-    assert status["vision"]["run_id"] == vision_payload["run_id"]
-    assert status["offset"]["run_id"] == offset.json()["run_id"]
+
+def test_offset_is_optional_for_locate(tmp_path):
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+    vision = _upload_vision(client).json()
+
+    located = _upload_locate(
+        client,
+        _image((300.0, 200.0)),
+        vision_matrix=vision["matrix"],
+    )
+    assert located.status_code == 200
+    assert located.json()["gripper_xy"] is None
+    assert located.json()["camera_center_xy"]
 
 
 def test_locate_failure_saves_annotated_when_debug(tmp_path):
     settings = _settings(tmp_path)
     client = TestClient(create_app(settings))
     client.put("/api/v1/debug", json={"enabled": True})
-    assert _upload_vision(client).status_code == 200
+    vision = _upload_vision(client).json()
 
     blank = np.full((HEIGHT, WIDTH), 210, dtype=np.uint8)
-    response = _upload_locate(client, blank)
+    response = _upload_locate(
+        client,
+        blank,
+        vision_matrix=vision["matrix"],
+    )
 
     assert response.status_code == 422
     payload = response.json()
     assert payload["ok"] is False
     assert payload["run_id"]
-    assert payload["annotated"].startswith("/files/")
-    assert client.get(payload["annotated"]).status_code == 200
-    assert client.get(f"/api/v1/runs/{payload['run_id']}").json()["run"]["status"] == "failed"
+    manifest = _manifest(settings, payload["run_id"])
+    assert manifest["status"] == "failed"
+    assert manifest["images"][0]["annotated"]
+    assert (
+        client.get(
+            f"/files/{payload['run_id']}/{manifest['images'][0]['annotated']}"
+        ).status_code
+        == 200
+    )
 
 
 def test_vision_failure_saves_overview_when_debug(tmp_path):
@@ -203,10 +276,38 @@ def test_vision_failure_saves_overview_when_debug(tmp_path):
     assert payload["error"] == "no_target"
     assert payload["image_index"] == 2
     assert payload["run_id"]
-    assert payload["overview"].startswith("/files/")
-    assert client.get(payload["overview"]).status_code == 200
-    assert client.get("/api/v1/status").json()["vision"] is None
-    assert not settings.recipe_path.exists()
+    manifest = _manifest(settings, payload["run_id"])
+    assert manifest["status"] == "failed"
+    assert manifest["overview"] == "overview.jpg"
+    assert (
+        client.get(f"/files/{payload['run_id']}/overview.jpg").status_code
+        == 200
+    )
+
+
+def test_bad_vision_matrix_is_400(tmp_path):
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+    response = _upload_locate(
+        client,
+        _image((300.0, 200.0)),
+        vision_matrix=[[1, 2], [3, 4]],
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "bad_matrix"
+    assert _run_dirs(settings) == []
+
+
+def test_missing_vision_matrix_is_400(tmp_path):
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+    response = client.post(
+        "/api/v1/locate",
+        files=[("image", ("shot.png", _png(_image((300.0, 200.0))), "image/png"))],
+        data={"robot_pose": "[90, 180]"},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "bad_request"
 
 
 def test_validation_errors_do_not_create_runs(tmp_path):
@@ -215,7 +316,9 @@ def test_validation_errors_do_not_create_runs(tmp_path):
 
     response = client.post(
         "/api/v1/calibrate/vision",
-        files=[("images", ("a.png", _png(_image(CORNER_UV[0])), "image/png"))],
+        files=[
+            ("images", ("a.png", _png(_image(CORNER_UV[0])), "image/png"))
+        ],
         data={"robot_points": "[[1, 2]]"},
     )
     assert response.status_code == 400
@@ -223,52 +326,51 @@ def test_validation_errors_do_not_create_runs(tmp_path):
     assert _run_dirs(settings) == []
 
 
-def test_missing_vision_is_409(tmp_path):
-    settings = _settings(tmp_path)
-    client = TestClient(create_app(settings))
-    response = _upload_locate(client, _image((300.0, 200.0)))
-    assert response.status_code == 409
-    assert response.json()["error"] == "vision_not_calibrated"
-
-
-def test_offset_before_vision_is_409(tmp_path):
-    settings = _settings(tmp_path)
-    client = TestClient(create_app(settings))
-    response = client.post(
-        "/api/v1/calibrate/offset",
-        json={"samples": [{"place_pose": [1, 2], "center_pose": [3, 4]}]},
-    )
-    assert response.status_code == 409
-    assert response.json()["error"] == "vision_not_calibrated"
-
-
 def test_off_switch_stops_new_runs(tmp_path):
     settings = _settings(tmp_path)
     client = TestClient(create_app(settings))
     client.put("/api/v1/debug", json={"enabled": True})
-    assert _upload_vision(client).status_code == 200
+    vision = _upload_vision(client).json()
     before = len(_run_dirs(settings))
 
     client.put("/api/v1/debug", json={"enabled": False})
-    response = _upload_locate(client, _image((300.0, 200.0)))
+    response = _upload_locate(
+        client,
+        _image((300.0, 200.0)),
+        vision_matrix=vision["matrix"],
+    )
     assert response.status_code == 200
     assert "run_id" not in response.json()
     assert len(_run_dirs(settings)) == before
 
 
-def test_recipe_survives_app_restart(tmp_path):
+def test_status_endpoint_is_gone(tmp_path):
     settings = _settings(tmp_path)
-    first = TestClient(create_app(settings))
-    assert _upload_vision(first).status_code == 200
-    assert first.post(
-        "/api/v1/calibrate/offset",
-        json={"samples": [{"place_pose": [108, 184], "center_pose": [100, 180]}]},
-    ).status_code == 200
-    assert settings.recipe_path.is_file()
+    client = TestClient(create_app(settings))
+    assert client.get("/api/v1/status").status_code == 404
 
-    second = TestClient(create_app(settings))
-    status = second.get("/api/v1/status").json()
-    assert status["ready"] is True
-    locate = _upload_locate(second, _image((300.0, 200.0)))
-    assert locate.status_code == 200
-    assert locate.json()["gripper_xy"] is not None
+
+def test_coordinates_match_core_math(tmp_path):
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+    vision = _upload_vision(client).json()
+    offset = _upload_offset(client).json()
+    image = _image((300.0, 200.0))
+    response = _upload_locate(
+        client,
+        image,
+        vision_matrix=vision["matrix"],
+        offset_matrix=offset["matrix"],
+    )
+    expected = GantryPick().locate(
+        cv2.cvtColor(image, cv2.COLOR_GRAY2BGR),
+        (90.0, 180.0),
+        vision["matrix"],
+        offset["matrix"],
+    )
+    assert response.json()["camera_center_xy"] == pytest.approx(
+        expected.camera_center_xy, abs=1e-9
+    )
+    assert response.json()["gripper_xy"] == pytest.approx(
+        expected.gripper_xy, abs=1e-9
+    )

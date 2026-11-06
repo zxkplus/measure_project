@@ -8,9 +8,10 @@ or::
 
     uvicorn --factory measure_api.pick_server:create_app --host 127.0.0.1 --port 8100
 
-The service exposes three business calls, a global debug switch and read-only
-run artifact endpoints.  It never talks to a robot: the calling software moves
-the gantry and captures images, then sends XY coordinates here.
+The service exposes three stateless business calls, a global debug switch and
+read-only run artifact endpoints.  Calibration returns one 3x3 homogeneous
+matrix per step; the caller stores both matrices and sends them back to
+``/locate``.  The service never talks to a robot.
 """
 
 from __future__ import annotations
@@ -33,15 +34,17 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from measure.pick_api import GantryPick, PickError
+from measure.pick_api import (
+    GantryPick,
+    PickError,
+    offset_homogeneous_matrix,
+)
 from measure.pick_artifacts import (
     RunRecorder,
     cleanup_runs,
     decode_image,
     list_runs,
-    now_iso,
     read_manifest,
-    save_recipe_atomic,
     sha256_bytes,
     validate_run_id,
     zip_run,
@@ -50,7 +53,6 @@ from measure.robot_calibration import (
     CalibrationError,
     CameraGripperOffset,
     OffsetSample,
-    RobotPickRecipe,
     fit_image_to_robot,
 )
 
@@ -90,7 +92,6 @@ class PickSettings:
     """
 
     runs_dir: Path = Path("data/pick_runs")
-    recipe_path: Path = Path("data/pick_recipe.json")
     debug_default: bool = False
     annotated_max_px: int = 2000
     locate_keep_days: int = 2
@@ -109,9 +110,6 @@ class PickSettings:
         )
         return cls(
             runs_dir=Path(os.environ.get("PICK_RUNS_DIR", "data/pick_runs")),
-            recipe_path=Path(
-                os.environ.get("PICK_RECIPE_PATH", "data/pick_recipe.json")
-            ),
             debug_default=_env_bool("PICK_DEBUG", False),
             annotated_max_px=max(
                 256, _env_int("PICK_ANNOTATED_MAX_PX", 2000)
@@ -182,69 +180,19 @@ class DebugState:
 
 
 class PickService:
-    """Stateful facade over :class:`GantryPick` plus debug artifact recording."""
+    """Stateless business facade plus optional debug artifact recording."""
 
     def __init__(self, settings: PickSettings) -> None:
         self.settings = settings
         self.settings.runs_dir.mkdir(parents=True, exist_ok=True)
-        self.settings.recipe_path.parent.mkdir(parents=True, exist_ok=True)
         self.pick = GantryPick()
         self.debug = DebugState(settings.debug_default)
-        self.lock = threading.RLock()
-        self.vision_run_id: Optional[str] = None
-        self.offset_run_id: Optional[str] = None
-        self.load_error: Optional[str] = None
         self._last_cleanup = time.monotonic()
-        self._load_recipe()
         self._cleanup()
 
-    # -- persistence -----------------------------------------------------
-
-    def _load_recipe(self) -> None:
-        path = self.settings.recipe_path
-        if not path.is_file():
-            return
-        try:
-            recipe = RobotPickRecipe.load(str(path))
-            self.pick = GantryPick.from_recipe(recipe)
-            self.vision_run_id = recipe.metadata.get("vision_run_id")
-            self.offset_run_id = recipe.metadata.get("offset_run_id")
-        except Exception as exc:  # noqa: BLE001 - corrupted state must not brick startup
-            self.load_error = str(exc)
-            logger.exception("failed to load pick recipe %s", path)
-
-    def _save_recipe(self) -> None:
-        with self.lock:
-            recipe = self.pick.to_recipe()
-            recipe.metadata.update(
-                {
-                    "vision_run_id": self.vision_run_id,
-                    "offset_run_id": self.offset_run_id,
-                    "updated_at": now_iso(),
-                }
-            )
-            self.pick.metadata.update(recipe.metadata)
-            try:
-                save_recipe_atomic(recipe, self.settings.recipe_path)
-            except Exception as exc:  # noqa: BLE001 - storage failure is a 500
-                raise PickError(
-                    "recipe_save_failed",
-                    f"cannot save pick recipe: {exc}",
-                    500,
-                ) from exc
-
-    def _recipe_snapshot(self) -> Optional[Dict[str, Any]]:
-        try:
-            return self.pick.to_recipe().to_dict()
-        except PickError:
-            return None
+    # -- retention -------------------------------------------------------
 
     def _cleanup(self) -> None:
-        protected = [
-            value
-            for value in (self.vision_run_id, self.offset_run_id)
-            if value
-        ]
         try:
             cleanup_runs(
                 self.settings.runs_dir,
@@ -258,52 +206,15 @@ class PickService:
                     "offset": self.settings.calibration_keep_max,
                     "locate": self.settings.locate_keep_max,
                 },
-                protected=protected,
             )
         except Exception:  # noqa: BLE001 - cleanup is best effort
             logger.exception("pick run cleanup failed")
         self._last_cleanup = time.monotonic()
 
     def _maybe_cleanup(self) -> None:
-        """Throttled retention cleanup after a debug run is published."""
-        now = time.monotonic()
-        if now - self._last_cleanup < 60.0:
+        if time.monotonic() - self._last_cleanup < 60.0:
             return
         self._cleanup()
-
-    # -- status ----------------------------------------------------------
-
-    def status(self) -> Dict[str, Any]:
-        with self.lock:
-            vision: Optional[Dict[str, Any]] = None
-            if self.pick.image_robot is not None:
-                vision = {
-                    "run_id": self.vision_run_id,
-                    "rms_px": float(self.pick.image_robot.rms_px),
-                    "warnings": list(self.pick.image_robot.warnings),
-                }
-            offset: Optional[Dict[str, Any]] = None
-            if self.pick.gripper_offset is not None:
-                offset = {
-                    "run_id": self.offset_run_id,
-                    "offset_xy": [
-                        float(value) for value in self.pick.gripper_offset.offset_xy
-                    ],
-                    "std_xy": [
-                        float(value) for value in self.pick.gripper_offset.std_xy
-                    ],
-                    "warnings": list(self.pick.gripper_offset.warnings),
-                }
-            payload: Dict[str, Any] = {
-                "ok": True,
-                "ready": bool(self.pick.ready),
-                "debug": self.debug.enabled,
-                "vision": vision,
-                "offset": offset,
-            }
-            if self.load_error:
-                payload["load_error"] = self.load_error
-            return payload
 
     # -- helpers ---------------------------------------------------------
 
@@ -366,7 +277,7 @@ class PickService:
         artifact: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Publish a failed run (when debugging) and raise a stable error."""
+        """Publish a failed debug run (when enabled) and raise a stable error."""
         details: Dict[str, Any] = dict(extra or {})
         if recorder is not None:
             try:
@@ -377,16 +288,7 @@ class PickService:
                     status="failed",
                     error={"code": code, "message": message},
                 )
-                details["run_id"] = recorder.run_id
-                run_id = recorder.run_id
-                if artifact == "overview" and manifest.get("overview"):
-                    details["overview"] = _file_url(run_id, manifest["overview"])
-                if artifact == "annotated":
-                    images = manifest.get("images") or []
-                    if images and images[0].get("annotated"):
-                        details["annotated"] = _file_url(
-                            run_id, images[0]["annotated"]
-                        )
+                details["run_id"] = manifest["run_id"]
                 self._maybe_cleanup()
             except Exception:  # noqa: BLE001 - keep the business error
                 logger.exception("failed to publish debug run")
@@ -400,7 +302,6 @@ class PickService:
     ) -> Optional[Dict[str, Any]]:
         if recorder is None:
             return None
-        recorder.recipe_snapshot = self._recipe_snapshot()
         manifest = recorder.finish(result, status="ok")
         self._maybe_cleanup()
         return manifest
@@ -414,13 +315,9 @@ class PickService:
         *,
         debug: bool,
     ) -> Dict[str, Any]:
-        """Calibrate the image-to-robot affine from uploaded frames."""
+        """Return the fitted 3x3 vision matrix."""
         if len(images) < 4:
-            raise PickError(
-                "bad_request",
-                "at least 4 images are required",
-                400,
-            )
+            raise PickError("bad_request", "at least 4 images are required", 400)
         if len(images) != len(robot_points):
             raise PickError(
                 "image_count_mismatch",
@@ -445,16 +342,13 @@ class PickService:
                         for filename, data in images
                     ],
                 },
-                recipe_snapshot=self._recipe_snapshot(),
                 annotated_max_px=self.settings.annotated_max_px,
             )
 
-        decoded: List[Optional[np.ndarray]] = []
-        for filename, data in images:
-            decoded.append(decode_image(data))
-        bad = [
-            index for index, image in enumerate(decoded) if image is None
+        decoded: List[Optional[np.ndarray]] = [
+            decode_image(data) for _, data in images
         ]
+        bad = [index for index, image in enumerate(decoded) if image is None]
         if bad:
             if recorder is not None:
                 self._record_vision_images(
@@ -546,7 +440,7 @@ class PickService:
                 "calibration_invalid",
                 f"rms {calibration.rms_px:.3f} px exceeds the quality gate",
                 422,
-                calibration.to_dict(),
+                {"valid": False},
                 artifact="overview",
                 extra={
                     "rms_px": float(calibration.rms_px),
@@ -554,43 +448,30 @@ class PickService:
                 },
             )
 
-        with self.lock:
-            self.pick.set_vision(calibration)
-            self.vision_run_id = recorder.run_id if recorder is not None else None
-            self._save_recipe()
-
+        matrix = np.asarray(calibration.matrix, dtype=float)
         if recorder is not None:
             for index, sample in enumerate(calibration.samples):
                 recorder.set_residual(index, sample.residual_px)
             recorder.build_overview()
 
-        manifest = self._finish_success(recorder, calibration.to_dict())
+        debug_result: Dict[str, Any] = {
+            "matrix": matrix.tolist(),
+            "rms_px": float(calibration.rms_px),
+            "rms_mm": float(calibration.rms_mm),
+            "num_points": len(calibration.samples),
+            "principal_point": [float(value) for value in calibration.principal_point],
+            "image_size": None
+            if calibration.image_size is None
+            else [int(value) for value in calibration.image_size],
+            "warnings": list(calibration.warnings),
+        }
+        manifest = self._finish_success(recorder, debug_result)
         response: Dict[str, Any] = {
             "ok": True,
-            "rms_px": float(calibration.rms_px),
-            "warnings": list(calibration.warnings),
+            "matrix": matrix.tolist(),
         }
         if manifest is not None:
             response["run_id"] = manifest["run_id"]
-            if manifest.get("overview"):
-                response["overview"] = _file_url(
-                    manifest["run_id"], manifest["overview"]
-                )
-            response["images"] = [
-                {
-                    "index": entry["index"],
-                    "uv": entry["uv"],
-                    "confidence": entry["confidence"],
-                    "residual_px": entry["residual_px"],
-                    "original": _file_url(
-                        manifest["run_id"], entry["original"]
-                    ),
-                    "annotated": _file_url(
-                        manifest["run_id"], entry["annotated"]
-                    ),
-                }
-                for entry in manifest.get("images", [])
-            ]
         return response
 
     # -- offset calibration ---------------------------------------------
@@ -601,13 +482,7 @@ class PickService:
         *,
         debug: bool,
     ) -> Dict[str, Any]:
-        """Calibrate the camera-to-gripper XY offset."""
-        if self.pick.image_robot is None:
-            raise PickError(
-                "vision_not_calibrated",
-                "run /calibrate/vision before /calibrate/offset",
-                409,
-            )
+        """Return the fitted 3x3 pure-translation offset matrix."""
         if not samples:
             raise PickError("bad_request", "samples must not be empty", 400)
 
@@ -634,7 +509,6 @@ class PickService:
                 self.settings.runs_dir,
                 "offset",
                 {"samples": raw},
-                recipe_snapshot=self._recipe_snapshot(),
                 annotated_max_px=self.settings.annotated_max_px,
             )
 
@@ -649,27 +523,29 @@ class PickService:
                 {"valid": False},
                 extra={"warnings": [str(exc)]},
             )
+
         if not offset.valid:
             self._fail(
                 recorder,
                 "offset_invalid",
                 "; ".join(offset.warnings) or "offset calibration is not valid",
                 422,
-                offset.to_dict(),
+                {"valid": False},
                 extra={"warnings": list(offset.warnings)},
             )
 
-        with self.lock:
-            self.pick.set_offset(offset)
-            self.offset_run_id = recorder.run_id if recorder is not None else None
-            self._save_recipe()
-
-        manifest = self._finish_success(recorder, offset.to_dict())
-        response: Dict[str, Any] = {
-            "ok": True,
+        matrix = offset_homogeneous_matrix(offset.offset_xy)
+        debug_result = {
+            "matrix": matrix.tolist(),
             "offset_xy": [float(value) for value in offset.offset_xy],
             "std_xy": [float(value) for value in offset.std_xy],
+            "num_samples": len(offset.samples),
             "warnings": list(offset.warnings),
+        }
+        manifest = self._finish_success(recorder, debug_result)
+        response: Dict[str, Any] = {
+            "ok": True,
+            "matrix": matrix.tolist(),
         }
         if manifest is not None:
             response["run_id"] = manifest["run_id"]
@@ -682,10 +558,12 @@ class PickService:
         image_bytes: bytes,
         filename: str,
         robot_pose: Sequence[float],
+        vision_matrix: Sequence[Sequence[float]],
+        offset_matrix: Optional[Sequence[Sequence[float]]],
         *,
         debug: bool,
     ) -> Dict[str, Any]:
-        """Locate the target in one image and return both XY coordinates."""
+        """Locate the target and return camera-centred and gripper XY."""
         pose = self._parse_xy(robot_pose, "robot_pose")
         image = decode_image(image_bytes)
 
@@ -696,13 +574,14 @@ class PickService:
                 "locate",
                 {
                     "robot_pose": [pose[0], pose[1]],
+                    "vision_matrix": vision_matrix,
+                    "offset_matrix": offset_matrix,
                     "image": {
                         "filename": filename,
                         "sha256": sha256_bytes(image_bytes),
                         "bytes": len(image_bytes),
                     },
                 },
-                recipe_snapshot=self._recipe_snapshot(),
                 annotated_max_px=self.settings.annotated_max_px,
             )
 
@@ -723,7 +602,9 @@ class PickService:
             )
 
         try:
-            location = self.pick.locate(image, pose)
+            location = self.pick.locate(
+                image, pose, vision_matrix, offset_matrix
+            )
         except PickError as exc:
             if recorder is not None:
                 recorder.add_image(
@@ -760,6 +641,7 @@ class PickService:
             )
 
         if recorder is not None:
+            height, width = image.shape[:2]
             extra_lines = [
                 f"camera=({location.camera_center_xy[0]:.3f}, "
                 f"{location.camera_center_xy[1]:.3f})",
@@ -779,9 +661,7 @@ class PickService:
                 location.detection,
                 name="image",
                 robot_xy=pose,
-                principal_point=None
-                if self.pick.image_robot is None
-                else self.pick.image_robot.principal_point,
+                principal_point=((width - 1) * 0.5, (height - 1) * 0.5),
                 extra_lines=extra_lines,
             )
 
@@ -798,18 +678,9 @@ class PickService:
                 float(location.gripper_xy[0]),
                 float(location.gripper_xy[1]),
             ],
-            "confidence": float(location.confidence),
         }
         if manifest is not None:
             response["run_id"] = manifest["run_id"]
-            images = manifest.get("images") or []
-            if images:
-                response["annotated"] = _file_url(
-                    manifest["run_id"], images[0]["annotated"]
-                )
-                response["original"] = _file_url(
-                    manifest["run_id"], images[0]["original"]
-                )
         return response
 
 
@@ -843,6 +714,18 @@ def _filename(upload: UploadFile, fallback: str) -> str:
     return name if name else fallback
 
 
+def _parse_matrix_field(value: str, name: str) -> List[List[float]]:
+    try:
+        matrix = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise PickError(
+            "bad_matrix", f"{name} is not valid JSON: {exc}", 400
+        ) from exc
+    if not isinstance(matrix, list):
+        raise PickError("bad_matrix", f"{name} must be a 3x3 array", 400)
+    return matrix
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -855,7 +738,7 @@ def create_app(settings: Optional[PickSettings] = None) -> FastAPI:
 
     app = FastAPI(
         title="Gantry pick calibration API",
-        version="1.0.0",
+        version="2.0.0",
         docs_url=f"{PREFIX}/docs",
         openapi_url=f"{PREFIX}/openapi.json",
         redoc_url=None,
@@ -979,6 +862,8 @@ def create_app(settings: Optional[PickSettings] = None) -> FastAPI:
     def locate(
         image: UploadFile = File(...),
         robot_pose: str = Form(...),
+        vision_matrix: str = Form(...),
+        offset_matrix: Optional[str] = Form(None),
     ) -> Dict[str, Any]:
         try:
             pose = json.loads(robot_pose)
@@ -988,18 +873,23 @@ def create_app(settings: Optional[PickSettings] = None) -> FastAPI:
             ) from exc
         if not isinstance(pose, list):
             raise PickError("bad_request", "robot_pose must be an array", 400)
+
+        vision = _parse_matrix_field(vision_matrix, "vision_matrix")
+        offset = (
+            None
+            if offset_matrix is None or offset_matrix.strip() in {"", "null"}
+            else _parse_matrix_field(offset_matrix, "offset_matrix")
+        )
         return service.locate(
             _read_upload(image),
             _filename(image, "image.jpg"),
             pose,
+            vision,
+            offset,
             debug=service.debug.enabled,
         )
 
-    # -- status / runs ---------------------------------------------------
-
-    @app.get(f"{PREFIX}/status")
-    def status() -> Dict[str, Any]:
-        return service.status()
+    # -- runs ------------------------------------------------------------
 
     @app.get(f"{PREFIX}/runs")
     def runs(limit: int = Query(20, ge=1, le=100)) -> Dict[str, Any]:

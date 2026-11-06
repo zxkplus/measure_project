@@ -4,6 +4,8 @@
 > 测试：`tests/test_circle_locator.py`、`tests/test_robot_calibration.py`  
 > 可运行合成演示：`python scripts/robot_calibration_demo.py`
 
+> **HTTP 接口已改为无状态矩阵契约**：视觉/偏移标定各返回一个 3×3 齐次矩阵，`/locate` 由软件传入矩阵。本文保留底层标定数学与 `RobotPickRecipe` 演示；对外接口见 [`measure_api/PICK_API.md`](../measure_api/PICK_API.md) 和 [`measure_api/PICK_MODULE_GUIDE.md`](../measure_api/PICK_MODULE_GUIDE.md)。
+
 ## 0. 结论（TL;DR）
 
 1. **整体两段式思路成立**：四点标定建立“图像位移 → 机械位移”的映射；偏移标定建立“相机中心 → 夹爪中心”的修正；最后可以一次移动完成抓取。

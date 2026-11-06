@@ -1,10 +1,9 @@
 """Debug artifacts for the gantry pick API.
 
 A debug run is a self-contained directory holding the original images, an
-annotated copy of every image, the request inputs, the full algorithm result,
-the active recipe snapshot and a manifest.  The directory is written to a
-temporary name and renamed only when complete, so readers never see a partial
-run.
+annotated copy of every image, the request inputs, the full algorithm result
+and a manifest.  The directory is written under a temporary name and renamed
+only when complete, so readers never see a partial run.
 
 The module is intentionally free of HTTP and robot dependencies; the service
 layer decides whether a run is recorded.
@@ -15,7 +14,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import platform
 import re
 import shutil
@@ -356,7 +354,6 @@ class RunRecorder:
         run_type: str,
         inputs: Dict[str, Any],
         *,
-        recipe_snapshot: Optional[Dict[str, Any]] = None,
         annotated_max_px: int = 2000,
     ) -> None:
         if run_type not in {"vision", "offset", "locate"}:
@@ -364,7 +361,6 @@ class RunRecorder:
         self.run_id = new_run_id(run_type)
         self.run_type = run_type
         self.runs_dir = Path(runs_dir)
-        self.recipe_snapshot = recipe_snapshot
         self.annotated_max_px = int(annotated_max_px)
         self.created_at = now_iso()
         self._started = time.perf_counter()
@@ -507,11 +503,6 @@ class RunRecorder:
 
         write_json(self.temp_dir / "inputs.json", self.inputs)
         write_json(self.temp_dir / "result.json", result)
-        if self.recipe_snapshot is not None:
-            write_json(
-                self.temp_dir / "recipe_snapshot.json",
-                self.recipe_snapshot,
-            )
 
         manifest = {
             "schema": SCHEMA,
@@ -524,9 +515,6 @@ class RunRecorder:
             "error": to_jsonable(error),
             "inputs": "inputs.json",
             "result": "result.json",
-            "recipe_snapshot": "recipe_snapshot.json"
-            if self.recipe_snapshot is not None
-            else None,
             "overview": self.overview_rel,
             "images": to_jsonable(self.images),
             "environment": environment_info(),
@@ -542,7 +530,6 @@ class RunRecorder:
             "  manifest.json          run metadata and file index",
             "  inputs.json            original request inputs",
             "  result.json            full algorithm output",
-            "  recipe_snapshot.json   active recipe at run time",
             "  images/                original and annotated images",
             "  overview.jpg           contact sheet (vision calibration)",
             "",
@@ -581,15 +568,6 @@ def environment_info() -> Dict[str, Any]:
         "platform": platform.platform(),
         "service": SERVICE_VERSION,
     }
-
-
-def save_recipe_atomic(recipe: Any, path: Path) -> None:
-    """Write a recipe to *path* via a temporary file and ``os.replace``."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.tmp")
-    recipe.save(str(temporary))
-    os.replace(temporary, path)
 
 
 def read_manifest(run_dir: Path) -> Dict[str, Any]:
@@ -674,7 +652,7 @@ def cleanup_runs(
         runs_dir: Root containing run directories.
         keep_days_by_type: Maximum age per ``vision``/``offset``/``locate``.
         keep_max_by_type: Maximum number of runs per type.
-        protected: Run IDs that must never be deleted (active recipe).
+        protected: Run IDs that must never be deleted.
 
     Returns:
         The run IDs that were removed.
@@ -752,7 +730,6 @@ __all__ = [
     "render_annotation",
     "resize_max",
     "save_jpeg",
-    "save_recipe_atomic",
     "sha256_bytes",
     "to_jsonable",
     "validate_run_id",

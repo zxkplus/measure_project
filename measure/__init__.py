@@ -84,7 +84,12 @@ from measure.robot_calibration import (
     verify_image_to_robot,
     verify_pick,
 )
-from measure.pick_api import GantryPick, PickError, TargetLocation
+from measure.pick_api import (
+    GantryPick,
+    PickError,
+    TargetLocation,
+    offset_homogeneous_matrix,
+)
 
 # Workflow
 from measure.measure_workflow import (

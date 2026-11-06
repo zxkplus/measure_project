@@ -38,6 +38,7 @@
 │   ├── v2/                     # stateless FastAPI service (operation families)
 │   ├── pick_server.py          # 3-axis gantry pick service (/api/v1/*)
 │   ├── PICK_API.md             # pick service contract + artifact layout
+│   ├── PICK_MODULE_GUIDE.md    # colleague walkthrough + troubleshooting
 │   └── measure-api/SKILL.md    # agent-facing docs + references/
 ├── scripts/                    # migrate_models_to_manifest.py, gen_api_reference.py, …
 ├── tests/                      # Pytest test suite (+ tests/v2 for the FastAPI service)
@@ -55,7 +56,7 @@ Three HTTP surfaces coexist and are **not interchangeable**:
 - **v2** — `measure_api/v2/`: FastAPI, **stateless** atomic operations under `/api/v2/*`,
   organised as operation families with typed port compatibility. Its authoritative contract
   is `docs/v2-openapi.json` (`docs/v2-api-reference.md` for field-level detail).
-- **gantry pick** — `measure_api/pick_server.py`: stateful FastAPI service for a
+- **gantry pick** — `measure_api/pick_server.py`: stateless FastAPI service for a
   three-axis gantry, under `/api/v1/*` on port 8100. It is **not** the legacy v1 API;
   the shared prefix is historical. Contract: [`measure_api/PICK_API.md`](measure_api/PICK_API.md).
 
@@ -66,25 +67,28 @@ on anything that crosses v1/v2, read
 
 ### Gantry pick service (camera-on-arm)
 
-`measure_api/pick_server.py` is a separate stateful FastAPI service for a
+`measure_api/pick_server.py` is a separate stateless FastAPI service for a
 three-axis gantry; it is not v1 or v2. Core math lives in
 `measure/pick_api.py`, debug artifacts in `measure/pick_artifacts.py`, and
 offline replay in `measure/pick_replay.py`. The full contract, request/response
 examples, artifact layout and replay instructions are in
 [`measure_api/PICK_API.md`](measure_api/PICK_API.md); read that first when
-integrating with the equipment software.
+integrating with the equipment software.  The colleague-facing walkthrough
+(workflow, field semantics, troubleshooting) is
+[`measure_api/PICK_MODULE_GUIDE.md`](measure_api/PICK_MODULE_GUIDE.md).
 
-- Business calls: `POST /api/v1/calibrate/vision` (4+ images + robot points),
-  `POST /api/v1/calibrate/offset` (place/centre pose samples), and
-  `POST /api/v1/locate` (one image + current flange XY).
+- Business calls: `POST /api/v1/calibrate/vision` (4+ images + robot points)
+  and `POST /api/v1/calibrate/offset` (place/centre pose samples) each return
+  one 3x3 homogeneous matrix; `POST /api/v1/locate` takes the image, current
+  flange XY, `vision_matrix` and optional `offset_matrix` and returns
+  `camera_center_xy` / `gripper_xy`.
 - XY only; Z is ignored. The service never talks to the robot/PLC.
-- One active recipe per service instance at `data/pick_recipe.json`.
+- The service is stateless: no `pick_recipe.json` and no `/status`. The
+  software stores both matrices and passes them back to `/locate`.
 - Global debug switch: `GET/PUT /api/v1/debug`. Debug **on** writes a
   self-contained `data/pick_runs/<run_id>/` with original images, annotated
   images (circle + centre + labels), `inputs.json`, `result.json`,
-  `recipe_snapshot.json`, `manifest.json` and `overview.jpg`; debug **off**
-  writes no per-call files. The active recipe is always persisted so a
-  restart keeps the calibration.
+  `manifest.json` and `overview.jpg`; debug **off** writes no per-call files.
 - Read artifacts with `GET /api/v1/runs`, `GET /api/v1/runs/{id}`,
   `GET /api/v1/runs/{id}/archive` and `/files/{id}/...`.
 - Run with `python -m measure_api.pick_server` (default `127.0.0.1:8100`);

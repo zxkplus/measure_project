@@ -1,8 +1,13 @@
 # Gantry pick HTTP API
 
-Stateless-in-business, stateful-in-calibration HTTP service for a three-axis
-gantry.  The service computes XY coordinates only; the calling software moves
-the gantry and captures images.  Z is deliberately ignored.
+Stateless HTTP service for a three-axis gantry.  Each calibration call returns
+one 3x3 homogeneous matrix; the calling software stores both matrices and sends
+them back to `/locate`.  The service computes XY only and never talks to a
+robot/PLC; Z is deliberately ignored.  The default locator accepts circles with a
+radius of 6–3000 px (large enough for a 5 MP bottle mouth).
+
+> 面向同事的完整流程、现场操作和排错说明见
+> [`PICK_MODULE_GUIDE.md`](PICK_MODULE_GUIDE.md)。
 
 ## Run
 
@@ -20,9 +25,8 @@ Environment variables:
 | Variable | Default | Purpose |
 |---|---|---|
 | `PICK_RUNS_DIR` | `data/pick_runs` | debug run root |
-| `PICK_RECIPE_PATH` | `data/pick_recipe.json` | active calibration recipe |
 | `PICK_DEBUG` | `0` | start with the global debug switch on |
-| `PICK_ANNOTATED_MAX_PX` | `2000` | annotated long edge |
+| `PICK_ANNOTATED_MAX_PX` | `2000` | annotated source long edge |
 | `PICK_LOCATE_KEEP_DAYS` | `2` | locate run retention |
 | `PICK_LOCATE_KEEP_MAX` | `500` | locate run retention |
 | `PICK_CALIBRATION_KEEP_DAYS` | `90` | vision/offset run retention |
@@ -30,20 +34,45 @@ Environment variables:
 | `PICK_CORS_ORIGINS` | empty | comma-separated browser origins |
 | `PICK_HOST` / `PICK_PORT` | `127.0.0.1` / `8100` | bind address |
 
-## Debug switch
+There is no server-side recipe file and no `/status` endpoint: the software
+owns the two matrices.
 
-Debug is global; it is **not** a per-request parameter.
+## Matrix conventions
 
-```http
-GET /api/v1/debug
-PUT /api/v1/debug   {"enabled": true}
+All matrices are row-major 3x3.
+
+### Vision matrix
+
+```text
+V = [[a00, a01, b0],
+     [a10, a11, b1],
+     [0,   0,   1 ]]
 ```
 
-- Off: no `pick_runs/<run_id>` directory, no images, no `inputs.json`/`result.json`.
-- On: every business call publishes a self-contained run directory.
-- The active `pick_recipe.json` is always saved; otherwise a restart would lose
-  the calibration.  Debug only controls the per-call evidence package.
-- The switch is in memory and resets to `PICK_DEBUG` on restart.
+`/locate` uses only the upper-left 2x2:
+
+```text
+A = V[:2, :2]
+camera_center_xy = robot_pose + A @ (image_centre - target_uv)
+```
+
+`b` is specific to the calibration target position and is **not** used by
+`/locate`; it is kept for storage/audit.
+
+The image centre is fixed to `((W-1)/2, (H-1)/2)`.  Changing resolution,
+cropping or scaling invalidates the matrix.
+
+### Offset matrix
+
+```text
+O = [[1, 0, dx],
+     [0, 1, dy],
+     [0, 0, 1 ]]
+```
+
+```text
+gripper_xy = camera_center_xy + (dx, dy)
+```
 
 ## Endpoints
 
@@ -63,14 +92,18 @@ curl -X POST http://127.0.0.1:8100/api/v1/calibrate/vision \
   -F 'robot_points=[[10.228,308.451],[26.428,309.193],[5.638,345.111],[22.058,346.681]]'
 ```
 
-Response (debug off):
+Response:
 
 ```json
-{"ok": true, "rms_px": 1.889, "warnings": ["high_residual"]}
+{
+  "ok": true,
+  "matrix": [
+    [-0.00126349, -0.01169656, 40.699445],
+    [ 0.01166881, -0.00132630, 297.676806],
+    [ 0.0,         0.0,         1.0]
+  ]
+}
 ```
-
-With debug on it additionally returns `run_id`, `overview`, and one entry per
-image with `uv`, `confidence`, `residual_px`, `original`, and `annotated` URLs.
 
 ### `POST /api/v1/calibrate/offset`
 
@@ -81,83 +114,99 @@ image with `uv`, `confidence`, `residual_px`, `original`, and `annotated` URLs.
 ```
 
 ```json
-{"ok": true, "offset_xy": [8.0, 4.0], "std_xy": [0.0, 0.0], "warnings": []}
+{
+  "ok": true,
+  "matrix": [
+    [1.0, 0.0, 8.0],
+    [0.0, 1.0, 4.0],
+    [0.0, 0.0, 1.0]
+  ]
+}
 ```
-
-With debug on it additionally returns `run_id`.
 
 ### `POST /api/v1/locate`
 
 `multipart/form-data`:
 
-| Field | Type | Meaning |
-|---|---|---|
-| `image` | file | current frame |
-| `robot_pose` | JSON string | flange `[x, y]` at capture time |
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `image` | file | yes | current frame |
+| `robot_pose` | JSON string | yes | flange `[x, y]` at capture time |
+| `vision_matrix` | JSON string | yes | 3x3 from `/calibrate/vision` |
+| `offset_matrix` | JSON string | no | 3x3 from `/calibrate/offset` |
 
 ```bash
+V='[[-0.00126349,-0.01169656,40.699445],[0.01166881,-0.00132630,297.676806],[0,0,1]]'
+O='[[1,0,8],[0,1,4],[0,0,1]]'
+
 curl -X POST http://127.0.0.1:8100/api/v1/locate \
-  -F "image=@shot.jpg" -F 'robot_pose=[100.0,200.0]'
+  -F "image=@shot.jpg" \
+  -F 'robot_pose=[90.0,180.0]' \
+  -F "vision_matrix=$V" \
+  -F "offset_matrix=$O"
 ```
 
 ```json
 {
   "ok": true,
-  "camera_center_xy": [96.0, 203.0],
-  "gripper_xy": [104.0, 207.0],
-  "confidence": 0.93
+  "camera_center_xy": [90.975, 181.975],
+  "gripper_xy": [98.975, 185.975]
 }
 ```
 
-`gripper_xy` is `null` when the offset has not been calibrated; the camera
-coordinate is still returned so the offset workflow can centre the camera.
+- `offset_matrix` omitted: `gripper_xy` is `null`.
+- `vision_matrix` required; a bad/singular matrix is `400 bad_matrix`.
+- Target not found / low confidence: `422`.
+- The response never includes Z.
 
-With debug on it additionally returns `run_id`, `annotated`, and `original`.
+## Debug switch
 
-### Status and runs
+Debug is global; it is **not** a per-request parameter.
 
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/api/v1/status` | active recipe, readiness, debug state |
-| `GET` | `/api/v1/runs?limit=20` | recent debug runs |
-| `GET` | `/api/v1/runs/{run_id}` | run manifest |
-| `GET` | `/api/v1/runs/{run_id}/archive` | ZIP for reproduction |
-| `GET` | `/files/{run_id}/...` | original/annotated images and JSON |
+```http
+GET /api/v1/debug
+PUT /api/v1/debug   {"enabled": true}
+```
 
-Run IDs look like `20261106-150834-vision-a1b2c3`.
+- Off: no `pick_runs/<run_id>` directory.
+- On: each call publishes a self-contained run directory and adds a single
+  `run_id` to the business response.
+- The switch is in memory and resets to `PICK_DEBUG` on restart.
 
-## Debug run layout
+## Debug artifact layout
 
 ```text
 data/pick_runs/<run_id>/
 ├── manifest.json
-├── inputs.json
-├── result.json
-├── recipe_snapshot.json
+├── inputs.json            # includes the matrices used by /locate
+├── result.json            # matrix/coordinates + diagnostics
 ├── README.txt
-├── overview.jpg              # vision only
+├── overview.jpg           # vision only
 └── images/
     ├── 00_original.jpg
     ├── 00_annotated.jpg
     └── ...
 ```
 
-The annotation draws the detected circle in green, its centre in red, and a
-footer with `uv`, radius, confidence, and robot XY.  Locate annotations also
-draw the principal point in blue and an arrow to the target.  Original images
-are preserved byte-for-byte.
+No `recipe_snapshot.json`: there is no server-side recipe.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/runs?limit=20` | recent runs |
+| `GET` | `/api/v1/runs/{run_id}` | manifest |
+| `GET` | `/api/v1/runs/{run_id}/archive` | ZIP for reproduction |
+| `GET` | `/files/{run_id}/...` | original/annotated images and JSON |
 
 ## Replay
-
-Download the run ZIP and run:
 
 ```bash
 python -m measure.pick_replay data/pick_runs/<run_id>
 ```
 
-The CLI re-detects, re-fits, and compares the result with `result.json`.
+The CLI re-runs detection/calibration and compares the matrix or coordinates
+with `result.json`.
 
-## Error format
+## Errors
 
 ```json
 {"ok": false, "error": "no_target", "message": "circle not found in image"}
@@ -165,7 +214,6 @@ The CLI re-detects, re-fits, and compares the result with `result.json`.
 
 | HTTP | Meaning |
 |---|---|
-| 400 | malformed request, count mismatch |
-| 409 | vision calibration missing/invalid |
-| 422 | unreadable image, no target, size mismatch, invalid calibration |
+| 400 | malformed request, count mismatch, bad/singular matrix |
+| 422 | unreadable image, no target, low confidence, invalid calibration |
 | 500 | unexpected failure |
