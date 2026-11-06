@@ -22,7 +22,10 @@
 │   ├── alignment.py            # AlignmentStrategy: pluggable ROI locators
 │   ├── obb_source.py           # OBB detection primitives (no ML dependency)
 │   ├── rectify.py              # Pure geometry: crop_and_straighten, affine maps
-│   └── result_format.py        # Result formatting shared by GUI and API layers
+│   ├── result_format.py        # Result formatting shared by GUI and API layers
+│   ├── pick_api.py             # 3-axis gantry pick: vision + offset + locate
+│   ├── pick_artifacts.py       # Debug run dirs, annotations, manifests, ZIP
+│   └── pick_replay.py          # Offline replay CLI for pick debug runs
 ├── measure_obb/                # Detector adapters (import ML runtimes; NOT imported by measure/)
 │   └── ultralytics_source.py   # YOLO-OBB adapter implementing measure.obb_source.ObbSource
 ├── run_gui.py                  # GUI entry point
@@ -30,9 +33,11 @@
 │   ├── app.py, template_view.py, image_canvas.py, tool_panel.py,
 │   ├── project_manager.py, result_panel.py, calibration_dialog.py, dialogs.py
 │   └── alignment.py, multi_target.py, utils.py    # thin shims over measure/*
-├── measure_api/                # REST APIs — two generations, see "APIs" below
+├── measure_api/                # HTTP APIs — see "APIs" below
 │   ├── server.py, project.py, quality.py, schemas.py, visualizer.py   # v1
 │   ├── v2/                     # stateless FastAPI service (operation families)
+│   ├── pick_server.py          # 3-axis gantry pick service (/api/v1/*)
+│   ├── PICK_API.md             # pick service contract + artifact layout
 │   └── measure-api/SKILL.md    # agent-facing docs + references/
 ├── scripts/                    # migrate_models_to_manifest.py, gen_api_reference.py, …
 ├── tests/                      # Pytest test suite (+ tests/v2 for the FastAPI service)
@@ -43,18 +48,47 @@
 
 ## APIs
 
-Two generations coexist and are **not interchangeable**:
+Three HTTP surfaces coexist and are **not interchangeable**:
 
 - **v1** — `measure_api/server.py`: Flask, stateful sessions under `/api/session/*`,
   persists `config.json` + `template.npz` + `reference.png`.
 - **v2** — `measure_api/v2/`: FastAPI, **stateless** atomic operations under `/api/v2/*`,
   organised as operation families with typed port compatibility. Its authoritative contract
   is `docs/v2-openapi.json` (`docs/v2-api-reference.md` for field-level detail).
+- **gantry pick** — `measure_api/pick_server.py`: stateful FastAPI service for a
+  three-axis gantry, under `/api/v1/*` on port 8100. It is **not** the legacy v1 API;
+  the shared prefix is historical. Contract: [`measure_api/PICK_API.md`](measure_api/PICK_API.md).
 
-Neither API imports `measure_gui`; both use the shared `measure/` engine. Before working on
-anything that crosses the two, read
+None of the three imports `measure_gui`; all use the shared `measure/` engine. Before working
+on anything that crosses v1/v2, read
 [`measure_api/measure-api/references/v1-v2-divergence.md`](measure_api/measure-api/references/v1-v2-divergence.md)
 — where they disagree, known shared defects, and undecided ownership questions.
+
+### Gantry pick service (camera-on-arm)
+
+`measure_api/pick_server.py` is a separate stateful FastAPI service for a
+three-axis gantry; it is not v1 or v2. Core math lives in
+`measure/pick_api.py`, debug artifacts in `measure/pick_artifacts.py`, and
+offline replay in `measure/pick_replay.py`. The full contract, request/response
+examples, artifact layout and replay instructions are in
+[`measure_api/PICK_API.md`](measure_api/PICK_API.md); read that first when
+integrating with the equipment software.
+
+- Business calls: `POST /api/v1/calibrate/vision` (4+ images + robot points),
+  `POST /api/v1/calibrate/offset` (place/centre pose samples), and
+  `POST /api/v1/locate` (one image + current flange XY).
+- XY only; Z is ignored. The service never talks to the robot/PLC.
+- One active recipe per service instance at `data/pick_recipe.json`.
+- Global debug switch: `GET/PUT /api/v1/debug`. Debug **on** writes a
+  self-contained `data/pick_runs/<run_id>/` with original images, annotated
+  images (circle + centre + labels), `inputs.json`, `result.json`,
+  `recipe_snapshot.json`, `manifest.json` and `overview.jpg`; debug **off**
+  writes no per-call files. The active recipe is always persisted so a
+  restart keeps the calibration.
+- Read artifacts with `GET /api/v1/runs`, `GET /api/v1/runs/{id}`,
+  `GET /api/v1/runs/{id}/archive` and `/files/{id}/...`.
+- Run with `python -m measure_api.pick_server` (default `127.0.0.1:8100`);
+  tests with `pytest tests/test_pick_*.py -q`.
 
 Model assets taught by the GUI use manifest contract 3.1 (`manifest.json` + `reference.npy`
 + derived `workflow.npz`); legacy single-file `.npz` models upgrade automatically on open,
@@ -85,6 +119,8 @@ from measure import MeasurementWorkflow, MultiTargetWorkflow
 | `pytest --headless` | Run tests without `cv2.imshow` pop‑ups (default in `pyproject.toml`). |
 | `pytest tests/test_1d_measure.py -v` | Run a specific test file with verbose output. |
 | `pytest -k test_fit_circle` | Run tests matching a keyword expression. |
+| `python -m measure_api.pick_server` | Start the gantry pick HTTP service (port 8100). |
+| `pytest tests/test_pick_*.py -q` | Run the pick API/artifact/HTTP tests. |
 
 Tests write visual output to `tests/output/<test_name>/`. All test artifacts are gitignored.
 
