@@ -112,7 +112,8 @@ def main() -> None:
         "Defaults and constraints below come directly from the schema rather than inferred values.",
         "Calculation responses wrap their result in OperationResponse;",
         "inspect both state and validity.",
-        "", "## Route index", "", "65 required routes, including 55 calculation operations.",
+        "", "## Route index", "",
+        f"{len(manifest)} required routes, including {len(registry)} calculation operations.",
         "Documentation/schema endpoints are served by FastAPI but excluded from its paths list.",
         "", "| Family | Method | Route | Calculation ID |", "|---|---|---|---|",
     ]

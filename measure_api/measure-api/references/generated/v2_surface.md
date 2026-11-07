@@ -9,7 +9,7 @@ stateless FastAPI v2 service, which its own README designates as the
 authoritative contract. The hand-written v1 reference in
 `../api_reference.md` does not describe these routes.
 
-Paths: **63** · Schemas: **222**
+Paths: **66** · Schemas: **230**
 
 ## Endpoints
 
@@ -17,6 +17,8 @@ Paths: **63** · Schemas: **222**
 |---|---|---|---|
 | `POST` | `/api/v2/alignments/control-points` | `ControlAlignmentRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/alignments/rigid` | `RigidAlignmentRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibrate/offset` | `GantryOffsetRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibrate/vision` | `GantryVisionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/calibration-exports` | `CalibrationExportRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/calibration-features/checkerboard-corners` | `CheckerboardRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/calibration-features/dot-grids` | `DotGridRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
@@ -54,6 +56,7 @@ Paths: **63** · Schemas: **222**
 | `POST` | `/api/v2/image-stitches` | `StitchRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/image-undistortions` | `UndistortionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/legacy-project-conversions` | `LegacyConversionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/locate` | `GantryLocateRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/measurement-batches` | `MeasurementBatchRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/measurements/circles` | `ImageCircleRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/measurements/edge-pairs` | `PairRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
@@ -88,7 +91,7 @@ documented in full in `docs/v2-api-reference.md` (4670 lines) plus the raw
 
 ## Schema index
 
-222 schemas; see `docs/v2-api-reference.md` for every field.
+230 schemas; see `docs/v2-api-reference.md` for every field.
 
 | Schema | Kind | Properties |
 |---|---|---|
@@ -148,6 +151,12 @@ documented in full in `docs/v2-api-reference.md` (4670 lines) plus the raw
 | `FileReference` | object | 4 |
 | `FitDiagnostics` | object | 7 |
 | `FrozenManifest` | object | 11 |
+| `GantryLocateRequest` | object | 8 |
+| `GantryLocateResult` | object | 2 |
+| `GantryMatrixResult` | object | 1 |
+| `GantryOffsetRequest` | object | 5 |
+| `GantryOffsetSample` | object | 2 |
+| `GantryVisionRequest` | object | 6 |
 | `GeometryTransformRequest` | object | 6 |
 | `GeometryTransformResult` | object | 4 |
 | `ImageCircleRequest` | object | 22 |
@@ -189,6 +198,8 @@ documented in full in `docs/v2-api-reference.md` (4670 lines) plus the raw
 | `OperationResponse_DotGridResult_` | object | 9 |
 | `OperationResponse_EdgeResult_` | object | 9 |
 | `OperationResponse_EvaluationResult_` | object | 9 |
+| `OperationResponse_GantryLocateResult_` | object | 9 |
+| `OperationResponse_GantryMatrixResult_` | object | 9 |
 | `OperationResponse_GeometryTransformResult_` | object | 9 |
 | `OperationResponse_ImageCircleResult_` | object | 9 |
 | `OperationResponse_ImageInspectionResult_` | object | 9 |

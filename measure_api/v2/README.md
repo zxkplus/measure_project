@@ -170,6 +170,17 @@ HTTP server processes with explicitly gated OS file publication, worker/service 
 in addition to synchronous/asynchronous calculation, waiting, queue/memory bounds, verified retry,
 cache eviction, retention expiration and input/output ownership tests.
 
+## Gantry pick calibration and location
+
+The existing V2 application also serves `POST /api/v2/calibrate/vision`,
+`POST /api/v2/calibrate/offset` and `POST /api/v2/locate`. These operations reuse the
+shared `measure.pick_api.GantryPick` engine and the same prewarmed compute pool;
+no additional FastAPI application or port is needed. Images are JSON shared-file
+references, and responses use the normal V2 operation envelope. Calibration returns
+`result.matrix`; location returns `result.camera_center_xy` and `result.gripper_xy`.
+The caller stores both matrices and supplies them on each location call.
+See [GANTRY_PICK.md](GANTRY_PICK.md) for requests, responses and coordinate conventions.
+
 ## Supplied recipes
 
 `/recipe-validations`, `/recipe-previews`, `/runs` and `/run-batches` accept explicit upstream

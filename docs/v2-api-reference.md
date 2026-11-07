@@ -13,7 +13,7 @@ inspect both state and validity.
 
 ## Route index
 
-65 required routes, including 55 calculation operations.
+68 required routes, including 58 calculation operations.
 Documentation/schema endpoints are served by FastAPI but excluded from its paths list.
 
 | Family | Method | Route | Calculation ID |
@@ -56,6 +56,9 @@ Documentation/schema endpoints are served by FastAPI but excluded from its paths
 | Features/calibration | POST | [`/api/v2/calibrations/cameras`](#route-api-v2-calibrations-cameras) | `calibrations.cameras` |
 | Features/calibration | POST | [`/api/v2/calibrations/plane-mappings`](#route-api-v2-calibrations-plane-mappings) | `calibrations.plane-mappings` |
 | Features/calibration | POST | [`/api/v2/calibrations/stereo-rigs`](#route-api-v2-calibrations-stereo-rigs) | `calibrations.stereo-rigs` |
+| Gantry pick | POST | [`/api/v2/calibrate/vision`](#route-api-v2-calibrate-vision) | `calibrate.vision` |
+| Gantry pick | POST | [`/api/v2/calibrate/offset`](#route-api-v2-calibrate-offset) | `calibrate.offset` |
+| Gantry pick | POST | [`/api/v2/locate`](#route-api-v2-locate) | `locate` |
 | Calibration utilities | POST | [`/api/v2/calibration-validations`](#route-api-v2-calibration-validations) | `calibration-validations` |
 | Calibration utilities | POST | [`/api/v2/calibration-origin-adjustments`](#route-api-v2-calibration-origin-adjustments) | `calibration-origin-adjustments` |
 | Calibration utilities | POST | [`/api/v2/calibration-inspections`](#route-api-v2-calibration-inspections) | `calibration-inspections` |
@@ -799,6 +802,67 @@ Named output ports (for recipe bindings):
 ```json
 {
   "asset": "calibration"
+}
+```
+
+Scheduling, errors and 200/202 behavior follow the shared guide.
+
+<a id="route-api-v2-calibrate-vision"></a>
+
+### POST `/api/v2/calibrate/vision`
+
+Compute gantry vision calibration from shared images.
+
+Calculation ID: `calibrate.vision`.
+
+Request: [GantryVisionRequest](#schema-gantryvisionrequest). Response: [OperationResponse_GantryMatrixResult_](#schema-operationresponse-gantrymatrixresult).
+
+Named output ports (for recipe bindings):
+
+```json
+{
+  "matrix": "matrix"
+}
+```
+
+Scheduling, errors and 200/202 behavior follow the shared guide.
+
+<a id="route-api-v2-calibrate-offset"></a>
+
+### POST `/api/v2/calibrate/offset`
+
+Compute gantry camera-to-gripper offset.
+
+Calculation ID: `calibrate.offset`.
+
+Request: [GantryOffsetRequest](#schema-gantryoffsetrequest). Response: [OperationResponse_GantryMatrixResult_](#schema-operationresponse-gantrymatrixresult).
+
+Named output ports (for recipe bindings):
+
+```json
+{
+  "matrix": "matrix"
+}
+```
+
+Scheduling, errors and 200/202 behavior follow the shared guide.
+
+<a id="route-api-v2-locate"></a>
+
+### POST `/api/v2/locate`
+
+Locate a circular target for camera or gripper centring.
+
+Calculation ID: `locate`.
+
+Request: [GantryLocateRequest](#schema-gantrylocaterequest). Response: [OperationResponse_GantryLocateResult_](#schema-operationresponse-gantrylocateresult).
+
+Named output ports (for recipe bindings):
+
+```json
+{
+  "camera_center_xy": "robot_xy",
+  "gripper_xy": "robot_xy"
 }
 ```
 
@@ -2091,6 +2155,84 @@ Complete verified upstream snapshot; prior IDs are optional provenance only.
 | `tolerance` | number | no | `1e-09` | minimum: 0.0; maximum: 1.0 |
 | `provenance` | object | no | `not declared` | — |
 
+<a id="schema-gantrylocaterequest"></a>
+
+### GantryLocateRequest
+
+Locate a circle using explicit matrices and the flange pose at capture time.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `mode` | `"sync"`, `"async"` | no | `"sync"` | — |
+| `wait_ms` | integer | no | `10000` | minimum: 0.0; maximum: 60000.0 |
+| `timeout_ms` | integer | no | `60000` | minimum: 1.0; maximum: 3600000.0 |
+| `idempotency_key` | string or null | no | `not declared` | anyOf[0] minLength: 1; anyOf[0] maxLength: 200 |
+| `image` | [FileReference](#schema-filereference) | yes | `not declared` | — |
+| `robot_pose` | array of number | yes | `not declared` | minItems: 2; maxItems: 3 |
+| `vision_matrix` | array of array of number | yes | `not declared` | minItems: 3; maxItems: 3 |
+| `offset_matrix` | array of array of number or null | no | `not declared` | anyOf[0] minItems: 3; anyOf[0] maxItems: 3 |
+
+<a id="schema-gantrylocateresult"></a>
+
+### GantryLocateResult
+
+Flange XY poses that centre the camera and optionally the gripper on the target.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `camera_center_xy` | array of number | yes | `not declared` | minItems: 2; maxItems: 2 |
+| `gripper_xy` | array of number or null | no | `not declared` | anyOf[0] minItems: 2; anyOf[0] maxItems: 2 |
+
+<a id="schema-gantrymatrixresult"></a>
+
+### GantryMatrixResult
+
+Upstream-owned row-major 3x3 vision affine or pure-translation offset.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `matrix` | array of array of number | yes | `not declared` | minItems: 3; maxItems: 3 |
+
+<a id="schema-gantryoffsetrequest"></a>
+
+### GantryOffsetRequest
+
+One or more samples of the additive camera-to-gripper XY correction.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `mode` | `"sync"`, `"async"` | no | `"sync"` | — |
+| `wait_ms` | integer | no | `10000` | minimum: 0.0; maximum: 60000.0 |
+| `timeout_ms` | integer | no | `60000` | minimum: 1.0; maximum: 3600000.0 |
+| `idempotency_key` | string or null | no | `not declared` | anyOf[0] minLength: 1; anyOf[0] maxLength: 200 |
+| `samples` | array of [GantryOffsetSample](#schema-gantryoffsetsample) | yes | `not declared` | minItems: 1 |
+
+<a id="schema-gantryoffsetsample"></a>
+
+### GantryOffsetSample
+
+Placed-target and camera-centred flange poses in the same controller unit.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `place_pose` | array of number | yes | `not declared` | minItems: 2; maxItems: 3 |
+| `center_pose` | array of number | yes | `not declared` | minItems: 2; maxItems: 3 |
+
+<a id="schema-gantryvisionrequest"></a>
+
+### GantryVisionRequest
+
+Same-size shared images paired with flange XY poses; optional Z is ignored.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `mode` | `"sync"`, `"async"` | no | `"sync"` | — |
+| `wait_ms` | integer | no | `10000` | minimum: 0.0; maximum: 60000.0 |
+| `timeout_ms` | integer | no | `60000` | minimum: 1.0; maximum: 3600000.0 |
+| `idempotency_key` | string or null | no | `not declared` | anyOf[0] minLength: 1; anyOf[0] maxLength: 200 |
+| `images` | array of [FileReference](#schema-filereference) | yes | `not declared` | minItems: 4 |
+| `robot_points` | array of array of number | yes | `not declared` | minItems: 4 |
+
 <a id="schema-geometrytransformrequest"></a>
 
 ### GeometryTransformRequest
@@ -2710,6 +2852,38 @@ Physical board coordinate in the declared unit.
 | `state` | `"queued"`, `"running"`, `"cancelling"`, `"succeeded"`, `"failed"`, `"cancelled"`, `"timed_out"` | yes | `not declared` | — |
 | `trace_id` | string | yes | `not declared` | — |
 | `result` | [EvaluationResult](#schema-evaluationresult) or null | no | `not declared` | — |
+| `error` | [ErrorDetail](#schema-errordetail) or null | no | `not declared` | — |
+| `created_at` | string | yes | `not declared` | — |
+| `completed_at` | string or null | no | `not declared` | — |
+| `diagnostics` | object | no | `not declared` | — |
+
+<a id="schema-operationresponse-gantrylocateresult"></a>
+
+### OperationResponse_GantryLocateResult_
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `operation_id` | string | yes | `not declared` | — |
+| `operation` | string | yes | `not declared` | — |
+| `state` | `"queued"`, `"running"`, `"cancelling"`, `"succeeded"`, `"failed"`, `"cancelled"`, `"timed_out"` | yes | `not declared` | — |
+| `trace_id` | string | yes | `not declared` | — |
+| `result` | [GantryLocateResult](#schema-gantrylocateresult) or null | no | `not declared` | — |
+| `error` | [ErrorDetail](#schema-errordetail) or null | no | `not declared` | — |
+| `created_at` | string | yes | `not declared` | — |
+| `completed_at` | string or null | no | `not declared` | — |
+| `diagnostics` | object | no | `not declared` | — |
+
+<a id="schema-operationresponse-gantrymatrixresult"></a>
+
+### OperationResponse_GantryMatrixResult_
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `operation_id` | string | yes | `not declared` | — |
+| `operation` | string | yes | `not declared` | — |
+| `state` | `"queued"`, `"running"`, `"cancelling"`, `"succeeded"`, `"failed"`, `"cancelled"`, `"timed_out"` | yes | `not declared` | — |
+| `trace_id` | string | yes | `not declared` | — |
+| `result` | [GantryMatrixResult](#schema-gantrymatrixresult) or null | no | `not declared` | — |
 | `error` | [ErrorDetail](#schema-errordetail) or null | no | `not declared` | — |
 | `created_at` | string | yes | `not declared` | — |
 | `completed_at` | string or null | no | `not declared` | — |

@@ -2932,6 +2932,369 @@
         }
       }
     },
+    "/api/v2/calibrate/vision": {
+      "post": {
+        "tags": [
+          "gantry_pick"
+        ],
+        "summary": "Compute gantry vision calibration from shared images",
+        "operationId": "calibrate.vision",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GantryVisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse_GantryMatrixResult_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Gone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted; query the retained operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse_GantryMatrixResult_"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/calibrate/offset": {
+      "post": {
+        "tags": [
+          "gantry_pick"
+        ],
+        "summary": "Compute gantry camera-to-gripper offset",
+        "operationId": "calibrate.offset",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GantryOffsetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse_GantryMatrixResult_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Gone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted; query the retained operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse_GantryMatrixResult_"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/locate": {
+      "post": {
+        "tags": [
+          "gantry_pick"
+        ],
+        "summary": "Locate a circular target for camera or gripper centring",
+        "operationId": "locate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GantryLocateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse_GantryLocateResult_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Gone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted; query the retained operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse_GantryLocateResult_"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/geometry/lines:fit": {
       "post": {
         "tags": [
@@ -10606,6 +10969,317 @@
         "title": "FrozenManifest",
         "description": "Complete verified upstream snapshot; prior IDs are optional provenance only."
       },
+      "GantryLocateRequest": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "sync",
+              "async"
+            ],
+            "title": "Mode",
+            "default": "sync"
+          },
+          "wait_ms": {
+            "type": "integer",
+            "maximum": 60000.0,
+            "minimum": 0.0,
+            "title": "Wait Ms",
+            "default": 10000
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "maximum": 3600000.0,
+            "minimum": 1.0,
+            "title": "Timeout Ms",
+            "default": 60000
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
+          "image": {
+            "$ref": "#/components/schemas/FileReference"
+          },
+          "robot_pose": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "maxItems": 3,
+            "minItems": 2,
+            "title": "Robot Pose"
+          },
+          "vision_matrix": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array",
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "type": "array",
+            "maxItems": 3,
+            "minItems": 3,
+            "title": "Vision Matrix"
+          },
+          "offset_matrix": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "type": "array",
+                  "maxItems": 3,
+                  "minItems": 3
+                },
+                "type": "array",
+                "maxItems": 3,
+                "minItems": 3
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offset Matrix"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "image",
+          "robot_pose",
+          "vision_matrix"
+        ],
+        "title": "GantryLocateRequest",
+        "description": "Locate a circle using explicit matrices and the flange pose at capture time."
+      },
+      "GantryLocateResult": {
+        "properties": {
+          "camera_center_xy": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "maxItems": 2,
+            "minItems": 2,
+            "title": "Camera Center Xy"
+          },
+          "gripper_xy": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array",
+                "maxItems": 2,
+                "minItems": 2
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gripper Xy"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "camera_center_xy"
+        ],
+        "title": "GantryLocateResult",
+        "description": "Flange XY poses that centre the camera and optionally the gripper on the target."
+      },
+      "GantryMatrixResult": {
+        "properties": {
+          "matrix": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array",
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "type": "array",
+            "maxItems": 3,
+            "minItems": 3,
+            "title": "Matrix"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "matrix"
+        ],
+        "title": "GantryMatrixResult",
+        "description": "Upstream-owned row-major 3x3 vision affine or pure-translation offset."
+      },
+      "GantryOffsetRequest": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "sync",
+              "async"
+            ],
+            "title": "Mode",
+            "default": "sync"
+          },
+          "wait_ms": {
+            "type": "integer",
+            "maximum": 60000.0,
+            "minimum": 0.0,
+            "title": "Wait Ms",
+            "default": 10000
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "maximum": 3600000.0,
+            "minimum": 1.0,
+            "title": "Timeout Ms",
+            "default": 60000
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
+          "samples": {
+            "items": {
+              "$ref": "#/components/schemas/GantryOffsetSample"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Samples"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "samples"
+        ],
+        "title": "GantryOffsetRequest",
+        "description": "One or more samples of the additive camera-to-gripper XY correction."
+      },
+      "GantryOffsetSample": {
+        "properties": {
+          "place_pose": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "maxItems": 3,
+            "minItems": 2,
+            "title": "Place Pose"
+          },
+          "center_pose": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "maxItems": 3,
+            "minItems": 2,
+            "title": "Center Pose"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "place_pose",
+          "center_pose"
+        ],
+        "title": "GantryOffsetSample",
+        "description": "Placed-target and camera-centred flange poses in the same controller unit."
+      },
+      "GantryVisionRequest": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "sync",
+              "async"
+            ],
+            "title": "Mode",
+            "default": "sync"
+          },
+          "wait_ms": {
+            "type": "integer",
+            "maximum": 60000.0,
+            "minimum": 0.0,
+            "title": "Wait Ms",
+            "default": 10000
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "maximum": 3600000.0,
+            "minimum": 1.0,
+            "title": "Timeout Ms",
+            "default": 60000
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
+          "images": {
+            "items": {
+              "$ref": "#/components/schemas/FileReference"
+            },
+            "type": "array",
+            "minItems": 4,
+            "title": "Images"
+          },
+          "robot_points": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array",
+              "maxItems": 3,
+              "minItems": 2
+            },
+            "type": "array",
+            "minItems": 4,
+            "title": "Robot Points"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "images",
+          "robot_points"
+        ],
+        "title": "GantryVisionRequest",
+        "description": "Same-size shared images paired with flange XY poses; optional Z is ignored."
+      },
       "GeometryTransformRequest": {
         "properties": {
           "mode": {
@@ -13317,6 +13991,164 @@
           "created_at"
         ],
         "title": "OperationResponse[EvaluationResult]"
+      },
+      "OperationResponse_GantryLocateResult_": {
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "title": "Operation Id"
+          },
+          "operation": {
+            "type": "string",
+            "title": "Operation"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "cancelling",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "timed_out"
+            ],
+            "title": "State"
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GantryLocateResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "diagnostics": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Diagnostics"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "operation_id",
+          "operation",
+          "state",
+          "trace_id",
+          "created_at"
+        ],
+        "title": "OperationResponse[GantryLocateResult]"
+      },
+      "OperationResponse_GantryMatrixResult_": {
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "title": "Operation Id"
+          },
+          "operation": {
+            "type": "string",
+            "title": "Operation"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "cancelling",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "timed_out"
+            ],
+            "title": "State"
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GantryMatrixResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "diagnostics": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Diagnostics"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "operation_id",
+          "operation",
+          "state",
+          "trace_id",
+          "created_at"
+        ],
+        "title": "OperationResponse[GantryMatrixResult]"
       },
       "OperationResponse_GeometryTransformResult_": {
         "properties": {

@@ -6,7 +6,7 @@ shared with the retired V2 API. Start/deploy using [the deployment guide](v2-pro
 The runtime generates OpenAPI and capability schemas from the same executable operation registry.
 For upstream integration, use [the API guide](v2-upstream-api.md),
 [complete field reference](v2-api-reference.md) and [OpenAPI snapshot](v2-openapi.json).
-The [required route manifest](v2-required-routes.json) records the 65 Spec requirements and the
+The [required route manifest](v2-required-routes.json) records the supported routes and the
 HTTP discovery acceptance test compares them with actual OpenAPI routes. Presence alone is not
 numerical acceptance; the family suites exercise the resulting observations and file effects.
 
@@ -52,6 +52,9 @@ numerical acceptance; the family suites exercise the resulting observations and 
 | Features/calibration | POST | `/api/v2/calibrations/cameras` |
 | Features/calibration | POST | `/api/v2/calibrations/plane-mappings` |
 | Features/calibration | POST | `/api/v2/calibrations/stereo-rigs` |
+| Gantry pick | POST | `/api/v2/calibrate/vision` |
+| Gantry pick | POST | `/api/v2/calibrate/offset` |
+| Gantry pick | POST | `/api/v2/locate` |
 | Calibration utilities | POST | `/api/v2/calibration-validations` |
 | Calibration utilities | POST | `/api/v2/calibration-origin-adjustments` |
 | Calibration utilities | POST | `/api/v2/calibration-inspections` |
@@ -93,6 +96,10 @@ computed result may contain missing edges, invalid geometry or a failed product 
 use stable IDs and named typed output ports; presentation labels/order do not define dependencies.
 Physical geometry is built from mapped samples, preserving actual target size after localization
 and normalization. Pixel and physical values remain separately traceable in run and export data.
+
+Gantry pick operations run inside the existing V2 service and compute flange XY poses using
+caller-owned 3x3 matrices. Their image inputs use shared-file references and their results use
+the normal operation envelope. See [the gantry pick contract](../measure_api/v2/GANTRY_PICK.md).
 
 File references use configured root aliases or restricted absolute engine paths; SHA-256 verifies
 expected bytes. Template/calibration/recipe file references are transitively resolved and hashed.

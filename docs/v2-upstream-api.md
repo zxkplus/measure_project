@@ -5,7 +5,7 @@ It describes the implemented FastAPI V2 service, API version `2.0`, recipe/asset
 The HTTP prefix is `/api/v2`. Requests use JSON control parameters and shared-file references;
 images, templates and other large payloads are exchanged through directories on the same node.
 
-The service implements 65 required routes, including 55 calculation operations. Use this guide
+The service implements 68 required routes, including 58 calculation operations. Use this guide
 for integration behavior, the [complete field reference](v2-api-reference.md) for every request,
 response and nested model, and the [OpenAPI snapshot](v2-openapi.json) for client generation.
 The deployed service exposes its actual schemas at `GET /api/v2/openapi.json` and interactive
@@ -112,7 +112,7 @@ header while its operation record still carries the original calculation trace.
 
 ### Shared calculation request fields
 
-The 55 calculation POSTs take a flat object. Add these controls alongside family-specific fields;
+The calculation POSTs take a flat object. Add these controls alongside family-specific fields;
 do not wrap the family payload under `data` or `parameters` at the HTTP boundary.
 
 | Field | Type | Default | Meaning |
@@ -791,7 +791,7 @@ Client-visible latency and total service/container peak memory require separate 
 
 ## API families and further reference
 
-The [complete route and schema catalog](v2-api-reference.md) covers all 65 routes and 222
+The [complete route and schema catalog](v2-api-reference.md) covers all 68 routes and 230
 OpenAPI components. The family guides explain algorithm/domain restrictions beyond schema bounds:
 
 | Family | Integration details |
@@ -800,6 +800,7 @@ OpenAPI components. The family guides explain algorithm/domain restrictions beyo
 | Edges, line/circle fits, composition, independent batches and product rules | [Atomic measurement guide](../measure_api/v2/ATOMIC_MEASUREMENTS.md) |
 | Templates, similarity, rigid/control alignment and transforms | [Template/alignment guide](v2-template-alignment-contract.md) |
 | Scalar/camera calibration | [Calibration guide](../measure_api/v2/CALIBRATIONS.md) |
+| Gantry vision/offset calibration and circular-target location | [Gantry pick guide](../measure_api/v2/GANTRY_PICK.md) |
 | Plane/stereo, origins, stitching and projection | [Plane/stereo guide](../measure_api/v2/PLANE_STEREO.md) |
 | Validation, preview, target-local execution and batches | [Recipe guide](../measure_api/v2/RECIPES.md) |
 | Vector/raster/diagnostics and CSV/JSON | [Result guide](../measure_api/v2/RESULTS.md) |
@@ -865,7 +866,7 @@ python docs/v2/generate_reference.py
 ```
 
 The generator uses the executable FastAPI models/registry without starting workers or reading
-shared assets. The reference snapshot has 63 OpenAPI path entries plus the two automatically served
+shared assets. The reference snapshot has 66 OpenAPI path entries plus the two automatically served
 documentation/schema routes. Numerical/deployment evidence and pending production qualification
 are described in [the acceptance record](v2-acceptance.md). Representative camera captures,
 independent physical truth, capture repeatability and agreed production performance thresholds
