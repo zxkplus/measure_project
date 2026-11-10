@@ -21679,6 +21679,28 @@
             "minimum": 8.0,
             "title": "Pyramid Max Template Size",
             "default": 400
+          },
+          "fine_search_policy": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "neighborhood",
+                  "whole"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fine Search Policy"
+          },
+          "fine_search_expand_px": {
+            "type": "integer",
+            "maximum": 4096.0,
+            "minimum": 0.0,
+            "title": "Fine Search Expand Px",
+            "default": 24
           }
         },
         "additionalProperties": false,

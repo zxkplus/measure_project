@@ -47,6 +47,21 @@ Constant spatial support, including uniform BGR color, cannot be taught.
   Anti-aliasing precedes decimation, and each coarse target is refined against
   original full-resolution numeric pixels. Pyramid candidates retain multiple
   targets, including odd-pixel translations.
+- `fine_search_policy` (`"neighborhood"` by default) decides which area those
+  pyramid refinements rescan. `"neighborhood"` rescans only `coarse center ± R`
+  with `R = ceil(hypot(support width, support height) * scale_max / 2) +
+  fine_search_expand_px` (default 24 px). The radius covers every rotation of
+  the scaled support plus coarse-centre quantization
+  (`0.5 / pyramid_scale` px); for a 1975x487 support the window is ~2085 px per
+  side instead of the whole 4096x3072 frame, which is where long supports spend
+  almost all their time. `"whole"` keeps the pre-2026-11 behaviour of rescanning
+  the entire search area and differs only in runtime.
+  `MEASURE_V2_TEMPLATE_FINE_POLICY=whole` changes the deployment default for
+  requests that omit the field. Results report `diagnostics.fine_search`
+  (`policy`, `neighborhood_radius`, per-target `windows`, `skipped_poses`,
+  `bounded_outside`): a pose variant that cannot fit its window is skipped and
+  listed, never clipped into a false edge peak, and `bounded_outside` warns that
+  a window was cut by the search-area border.
 
 Every match has center, mapped anchor, score, support-relative angle/scale,
 reference-to-inspection `mapping` and support-to-inspection `support_mapping`.

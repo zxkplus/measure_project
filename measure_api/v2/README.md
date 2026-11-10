@@ -29,6 +29,12 @@ publication guards remain task-owned. See [worker-pool operation](../../docs/v2-
 Health and capability endpoints use the
 `/api/v2` prefix, as do `/docs` and `/openapi.json`.
 
+Template localization rescans each coarse target only inside
+`coarse center ± (support half diagonal + fine_search_expand_px)` by default; set
+`MEASURE_V2_TEMPLATE_FINE_POLICY=whole` for a deployment-wide rollback to full-search-area
+rescans (requests may also choose per call with `search.fine_search_policy`). See the
+[template/alignment contract](../../docs/v2-template-alignment-contract.md).
+
 ## Caller contract
 
 - A file reference is either `{root: "exchange", path: "images/input.png"}` or

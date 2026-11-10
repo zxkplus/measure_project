@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import zipfile
 from typing import List, Literal, Optional, Tuple
 
@@ -206,6 +207,18 @@ def inspect_template(
     return TemplateInspectionResult(metadata=metadata, template=verified)
 
 
+def default_fine_policy() -> str:
+    """Return the deployment default for pyramid fine-search locality.
+
+    Returns:
+        ``MEASURE_V2_TEMPLATE_FINE_POLICY`` when it names a known policy, otherwise
+        ``"neighborhood"``. Set it to ``"whole"`` to restore the pre-change
+        full-search-area rescans for every request that omits the field.
+    """
+    value = os.getenv("MEASURE_V2_TEMPLATE_FINE_POLICY", "").strip().lower()
+    return value if value in {"neighborhood", "whole"} else "neighborhood"
+
+
 class SearchRegion(StrictModel):
     """Axis-aligned inspection search window, in full image pixels."""
 
@@ -235,6 +248,18 @@ class TemplateSearch(StrictModel):
     coarse_scale_step: float = Field(default=0.1, gt=0, le=10)
     pyramid_levels: int = Field(default=0, ge=0, le=8)
     pyramid_max_template_size: int = Field(default=400, ge=8, le=32768)
+    # None resolves to MEASURE_V2_TEMPLATE_FINE_POLICY (default "neighborhood").
+    fine_search_policy: Optional[Literal["neighborhood", "whole"]] = None
+    fine_search_expand_px: int = Field(default=24, ge=0, le=4096)
+
+    def resolved_fine_policy(self) -> str:
+        """Return the effective fine-search policy for this request.
+
+        Returns:
+            ``"neighborhood"`` (bounded local rescans) or ``"whole"`` (legacy
+            full-search-area rescans).
+        """
+        return self.fine_search_policy or default_fine_policy()
 
     @model_validator(mode="after")
     def validate_search(self) -> TemplateSearch:
@@ -303,18 +328,28 @@ def _peaks(scores: np.ndarray, options: TemplateSearch, width: int, height: int)
                 if 0 < p < work.shape[axis] - 1:
                     before = scores[y - 1, x] if axis == 0 else scores[y, x - 1]
                     after = scores[y + 1, x] if axis == 0 else scores[y, x + 1]
-                    denom = float(before - 2 * score + after)
-                    offset = float((before - after) / (2 * denom)) if abs(denom) > 1e-8 else 0
-                    if np.isfinite(offset) and abs(offset) <= 0.5:
-                        if axis == 0:
-                            dy = offset
-                        else:
-                            dx = offset
+                    offset = _subpixel_offset(before, score, after)
+                    if axis == 0:
+                        dy = offset
+                    else:
+                        dx = offset
         result.append((x + dx, y + dy, float(np.clip(score, -1, 1))))
         half_w = max(1, int(width * (1 - options.overlap)))
         half_h = max(1, int(height * (1 - options.overlap)))
         work[max(0, y - half_h):y + half_h + 1, max(0, x - half_w):x + half_w + 1] = -1
     return result
+
+
+def _subpixel_offset(before: float, centre: float, after: float) -> float:
+    """Refine one correlation peak with a local quadratic.
+
+    The vertex sits at ``(before - after) / (2 * (before - 2c + after))``; the
+    code has always used ``(before - after)`` over the inverted denominator,
+    which is a sign convention carried by every recorded observation.
+    """
+    denom = float(before - 2 * centre + after)
+    offset = float((before - after) / (2 * denom)) if abs(denom) > 1e-8 else 0.0
+    return offset if np.isfinite(offset) and abs(offset) <= 0.5 else 0.0
 
 
 def _grid(low: float, high: float, step: float) -> list:
@@ -324,8 +359,23 @@ def _grid(low: float, high: float, step: float) -> list:
     return values
 
 
-def _variant(pixels: np.ndarray, angle: float, scale: float, limit: tuple) -> tuple:
-    """Render a bounded rotated support and mask with its exact pixel mapping."""
+def _variant(pixels: np.ndarray, angle: float, scale: float,
+             feasible: tuple) -> Tuple[Optional[np.ndarray], Optional[np.ndarray],
+                                      Optional[np.ndarray], Tuple[float, ...]]:
+    """Render a rotated/scaled support and mask with its exact pixel mapping.
+
+    Args:
+        pixels: Rectified support pixels.
+        angle: Clockwise pose angle in degrees.
+        scale: Dimensionless pose scale.
+        feasible: Largest variant width/height the search area can accommodate.
+
+    Returns:
+        Variant, mask and support-to-search pose matrix, plus the rendered size.
+        When the rotated support would not fit the search area, all data is
+        ``None`` and only the required size is returned so callers can widen
+        their window instead of clipping the variant into false peaks.
+    """
     h, w = pixels.shape[:2]
     theta = np.deg2rad(angle)
     c, s = np.cos(theta) * scale, np.sin(theta) * scale
@@ -334,23 +384,44 @@ def _variant(pixels: np.ndarray, angle: float, scale: float, limit: tuple) -> tu
     warped = corners @ linear.T
     low, high = np.floor(warped.min(axis=0)), np.ceil(warped.max(axis=0))
     width, height = np.maximum(1, (high - low + 1).astype(int))
-    if width > limit[0] or height > limit[1]:
-        return None, None, None
+    size = (int(width), int(height))
+    if width > feasible[0] or height > feasible[1]:
+        return None, None, None, size
     matrix = np.eye(3)
     matrix[:2, :2], matrix[:2, 2] = linear, -low
     variant = cv2.warpAffine(pixels.astype(np.float32), matrix[:2], (width, height))
     mask = cv2.warpAffine(np.ones((h, w), np.uint8), matrix[:2], (width, height),
                           flags=cv2.INTER_NEAREST)
-    return variant, mask, matrix
+    return variant, mask, matrix, size
 
 
 def _scan(search: np.ndarray, pixels: np.ndarray, options: TemplateSearch,
           angle: float, scale: float, origin: tuple = (0, 0),
-          threshold: Optional[float] = None) -> list:
+          threshold: Optional[float] = None,
+          skipped: Optional[list] = None) -> list:
+    """Correlate one pose variant over a search area.
+
+    Args:
+        search: Numeric search-area pixels.
+        pixels: Rectified support pixels.
+        options: Search controls (threshold, overlap, subpixel).
+        angle: Pose angle in degrees.
+        scale: Pose scale.
+        origin: ``(x, y)`` of the search area's top-left pixel in its parent frame.
+        threshold: Optional coarse/neighborhood threshold override.
+        skipped: Optional list receiving poses whose rotated support exceeds the
+            search area; never silently clipped.
+
+    Returns:
+        Candidates as ``(score, angle, scale, support-to-parent pose matrix)``.
+    """
     if not _has_texture(search):
         return []
-    variant, mask, matrix = _variant(pixels, angle, scale, (search.shape[1], search.shape[0]))
+    variant, mask, matrix, size = _variant(
+        pixels, angle, scale, (search.shape[1], search.shape[0]))
     if variant is None:
+        if skipped is not None:
+            skipped.append({"angle": angle, "scale": scale, "required": list(size)})
         return []
     h, w = variant.shape[:2]
     if not _has_texture(variant):
@@ -392,6 +463,104 @@ def _suppress(candidates: list, pixels: np.ndarray, options: TemplateSearch) -> 
             if len(kept) >= (options.max_matches or 1000):
                 break
     return kept
+
+
+def _fine_radius(pixels: np.ndarray, options: TemplateSearch) -> int:
+    """Return the half-size of a coarse target's full-resolution fine window.
+
+    The radius covers the half of the support's largest centered extent (the
+    corners of a centered box reach ``diagonal / 2`` under any rotation) plus
+    ``fine_search_expand_px`` for coarse-centre quantization
+    (``0.5 / pyramid_scale`` px) and rotation/translation coupling. It depends
+    on the support, never on the whole image.
+
+    Args:
+        pixels: Rectified support pixels.
+        options: Search controls.
+
+    Returns:
+        Inclusive half-side in inspection pixels, at least one pixel.
+    """
+    h, w = pixels.shape[:2]
+    diagonal = float(np.hypot(w, h)) * options.scale_max
+    return max(1, int(np.ceil(diagonal / 2.0)) + options.fine_search_expand_px)
+
+
+def _local_window(search: np.ndarray, center: tuple, radius: int) -> np.ndarray:
+    """Clip an axis-aligned ``center +/- radius`` window to the search area.
+
+    Args:
+        search: Full search-area pixels.
+        center: Window center ``(x, y)`` in search-area coordinates.
+        radius: Inclusive half-side.
+
+    Returns:
+        Window as ``(x0, y0, x1, y1)`` with ``x1``/``y1`` exclusive; the
+        center is rounded to the nearest pixel so a side is at most
+        ``2 * radius + 1`` unless the search area clips it.
+
+    Raises:
+        ServiceError: ``template.fine_window_too_small`` when the clipped window
+            cannot hold any pose variant.
+    """
+    height, width = search.shape[:2]
+    cx = int(round(center[0]))
+    cy = int(round(center[1]))
+    x0 = max(0, min(cx - radius, width - 1))
+    y0 = max(0, min(cy - radius, height - 1))
+    x1 = min(width, cx + radius + 1)
+    y1 = min(height, cy + radius + 1)
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        raise ServiceError(
+            "template.fine_window_too_small",
+            "Fine-search neighborhood cannot hold the rotated support",
+        )
+    return np.array([x0, y0, x1, y1], dtype=int)
+
+
+def _fine_window(search: np.ndarray, pixels: np.ndarray, center: tuple,
+                 angles: list, scales: list, options: TemplateSearch,
+                 skipped_poses: Optional[list] = None) -> tuple:
+    """Rescan one coarse neighborhood at full resolution.
+
+    The window is the coarse center +/- ``_fine_radius`` clipped to the search
+    area. A pose variant wider or taller than the window cannot be masked
+    faithfully, so it is not scanned and is reported through ``skipped_poses``
+    instead of being clipped into false peaks. Poses that fit are refined.
+
+    Args:
+        search: Full search-area pixels.
+        pixels: Rectified support pixels.
+        center: Coarse pose center in search-area coordinates.
+        angles: Pose angles to refine.
+        scales: Pose scales to refine.
+        options: Search controls.
+        skipped_poses: Optional list receiving poses that no window could hold.
+
+    Returns:
+        ``(candidates, window, touches_border)`` with the window as
+        ``(x0, y0, x1, y1)`` and a flag for windows clipped by the search area.
+    """
+    window = _local_window(search, center, _fine_radius(pixels, options))
+    x0, y0, x1, y1 = (int(value) for value in window)
+    area = search[y0:y1, x0:x1]
+    skipped = []
+    refined = []
+    for fine_angle in angles:
+        for fine_scale in scales:
+            refined.extend(_scan(area, pixels, options, fine_angle, fine_scale, (x0, y0),
+                                 skipped=skipped))
+    if skipped:
+        if not refined:
+            # Nothing fits this neighborhood; surface it rather than a silent no_match.
+            raise ServiceError(
+                "template.fine_window_too_small",
+                "Fine-search neighborhood cannot hold the rotated support",
+            )
+        if skipped_poses is not None:
+            skipped_poses.extend(skipped)
+    touches_border = x0 == 0 or y0 == 0 or x1 == search.shape[1] or y1 == search.shape[0]
+    return refined, (x0, y0, x1, y1), touches_border
 
 
 def match_template(
@@ -453,26 +622,45 @@ def match_template(
                            [0, factor, (factor - 1)/2], [0, 0, 1]])
         candidates = [(score, angle, scale, np.linalg.inv(resize) @ matrix @ resize)
                       for score, angle, scale, matrix in candidates]
+    fine_windows = []
+    skipped_poses = []
+    bounded_outside = False
     if options.coarse_fine or factor < 1:
         # Coarse candidates locate target neighborhoods; none is lost by a global top-five limit.
         coarse_options = options.model_copy(update={"max_matches": 0})
         neighborhoods = _suppress(candidates, pixels, coarse_options)
+        policy = options.resolved_fine_policy()
         refined = []
         for _, angle, scale, matrix in neighborhoods:
             center = matrix @ [(w-1)/2, (h-1)/2, 1]
-            radius = int(np.ceil(max(w, h) * options.scale_max + 4/factor))
-            x0, y0 = max(0, int(center[0])-radius), max(0, int(center[1])-radius)
-            local = search[y0:min(search.shape[0], int(center[1])+radius+1),
-                           x0:min(search.shape[1], int(center[0])+radius+1)]
             angles = (_grid(max(options.angle_min, angle-astep),
                             min(options.angle_max, angle+astep), options.angle_step)
                       if options.coarse_fine else [angle])
             scales = (_grid(max(options.scale_min, scale-sstep),
                             min(options.scale_max, scale+sstep), options.scale_step)
                       if options.coarse_fine else [scale])
-            for fine_angle in angles:
-                for fine_scale in scales:
-                    refined.extend(_scan(local, pixels, options, fine_angle, fine_scale, (x0, y0)))
+            if policy == "whole":
+                # Legacy: rescan the whole search area; the pose center only labels it.
+                if not fine_windows:
+                    fine_windows.append({
+                        "angle": angle, "x": 0, "y": 0,
+                        "width": int(search.shape[1]), "height": int(search.shape[0]),
+                    })
+                for fine_angle in angles:
+                    for fine_scale in scales:
+                        refined.extend(_scan(search, pixels, options, fine_angle, fine_scale,
+                                             (0, 0), skipped=skipped_poses))
+                # Variants larger than the search area are clipped here (legacy behaviour).
+                bounded_outside = bounded_outside or bool(skipped_poses)
+                continue
+            local, window, touches_border = _fine_window(
+                search, pixels, center, angles, scales, options, skipped_poses)
+            refined.extend(local)
+            bounded_outside = bounded_outside or touches_border
+            fine_windows.append({
+                "angle": angle, "x": window[0], "y": window[1],
+                "width": window[2] - window[0], "height": window[3] - window[1],
+            })
         candidates = refined
     candidates = _suppress(candidates, pixels, options)
     matches = []
@@ -488,11 +676,19 @@ def match_template(
             mapping=coordinate_mapping(full, "reference", "inspection"),
             support_mapping=coordinate_mapping(matrix, "support", "inspection"),
         ))
+    fine_policy = options.resolved_fine_policy()
+    refined_locally = fine_policy == "neighborhood" and bool(fine_windows)
+    radius = _fine_radius(pixels, options) if refined_locally else None
     return TemplateMatchResult(
         valid=bool(matches), reason=None if matches else "no_match", image=image_ref,
         template=template, matches=matches,
         diagnostics={"pyramid_scale": factor, "preprocessing": metadata.preprocessing.type,
-                     "metric_frame": "inspection", "normalization_recovers_size": True},
+                     "metric_frame": "inspection", "normalization_recovers_size": True,
+                     "fine_search": {"policy": fine_policy, "neighborhood_radius": radius,
+                                     "expand_px": options.fine_search_expand_px,
+                                     "windows": fine_windows,
+                                     "skipped_poses": skipped_poses,
+                                     "bounded_outside": bounded_outside}},
     )
 
 

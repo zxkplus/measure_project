@@ -306,7 +306,7 @@ documented in full in `docs/v2-api-reference.md` (4670 lines) plus the raw
 | `TemplatePointLocalizationDiagnostics` | object | 5 |
 | `TemplatePointRequest` | object | 8 |
 | `TemplatePointResult` | object | 8 |
-| `TemplateSearch` | object | 17 |
+| `TemplateSearch` | object | 19 |
 | `ThresholdPreprocessing` | object | 3 |
 | `TwoPointRequest` | object | 6 |
 | `UndistortionRequest` | object | 10 |

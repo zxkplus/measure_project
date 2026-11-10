@@ -1,0 +1,38 @@
+{
+  "center": {
+    "x": 487.58577731251717,
+    "y": 353.3169500529766
+  },
+  "anchor": {
+    "x": 487.58577731251717,
+    "y": 353.3169500529766
+  },
+  "support_dx": 241.58577731251717,
+  "support_dy": 293.3169500529766,
+  "angle": 0.0,
+  "scale": 1.0,
+  "score": 0.99579256772995,
+  "pyramid_scale": 0.12981744421906694,
+  "support_shape": [
+    121,
+    493
+  ],
+  "search": {
+    "score_threshold": 0.7,
+    "max_matches": 1,
+    "overlap": 0.3,
+    "subpixel": true,
+    "angle_min": -10,
+    "angle_max": 10,
+    "angle_step": 2,
+    "scale_min": 1,
+    "scale_max": 1,
+    "scale_step": 0.1,
+    "coarse_fine": false,
+    "coarse_score_threshold": 0.5,
+    "coarse_angle_step": 5,
+    "coarse_scale_step": 0.1,
+    "pyramid_levels": 2,
+    "pyramid_max_template_size": 64
+  }
+}
