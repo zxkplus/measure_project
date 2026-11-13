@@ -393,6 +393,42 @@ needed. Each match contains score, angle/scale, anchor and reference-to-inspecti
 No match is a domain result with `valid: false`, an empty `matches` list and no stale geometry.
 For single template-point measurement, use `/measurements/template-points` and `max_matches: 1`.
 
+### Import an existing GUI direction template
+
+POST `/api/v2/template-imports` accepts a shared ZIP file reference and an output directory:
+
+```json
+{
+  "package": {"root": "exchange", "path": "incoming/gui-direction.zip"},
+  "output": {"directory": {"root": "outputs", "path": "direction-import"}},
+  "mode": "async",
+  "wait_ms": 0
+}
+```
+
+The ZIP may contain one common parent folder. The supported input is GUI manifest contract
+3.1, `single_box`, GRAY8 `reference.npy`, no measurement objects, one target and fixed scale.
+The importer validates reference shape and SHA-256, bounds ZIP expansion, and reads numeric
+NPY with `allow_pickle=False`. GUI workflow caches are ignored, never deserialized.
+Unsupported models fail with `template_import.invalid` and no final artifact manifest.
+
+The result returns unchanged reference pixels as PNG, a rebuilt native V2 template NPZ,
+its metadata, explicit V2 search parameters, warnings, and a jointly committed artifact set
+(reference, template, preview, original manifest). Preserve the input ZIP as a separate
+upstream asset. This operation does not create a recipe or require a measurement node.
+
+GUI `(row, column)` / `(height, width)` become V2 `(x, y)` / `(width, height)`; dimensions
+are rounded and the GUI counterclockwise box angle is negated for the clockwise V2 ROI.
+V2 template matching uses its native matcher and pyramid controls; it does not reproduce
+legacy v1 scores or cache sampling. Revalidate threshold and cycle time.
+
+For direction correction, match the imported reference and the current image with the same
+template and controls. Use `normalize(current_angle - reference_angle, 360)` as the clockwise
+image delta; the upstream controller applies its calibrated signed mechanical scale.
+Do not add the ROI angle again or assume the reference match angle is zero. Verify a single
+finite target above threshold, matching image dimensions/camera configuration and runtime
+identity before accepting a trial or reusing stored angles. Importing does not command motion.
+
 ### 3. Compute and version scalar calibration
 
 POST `/api/v2/calibrations/scales`:

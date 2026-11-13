@@ -9,7 +9,7 @@ stateless FastAPI v2 service, which its own README designates as the
 authoritative contract. The hand-written v1 reference in
 `../api_reference.md` does not describe these routes.
 
-Paths: **66** · Schemas: **230**
+Paths: **67** · Schemas: **233**
 
 ## Endpoints
 
@@ -76,6 +76,7 @@ Paths: **66** · Schemas: **230**
 | `POST` | `/api/v2/run-batches` | `RunBatchRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/runs` | `RunRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/template-builds` | `TemplateBuildRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/template-imports` | `TemplateImportRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/template-inspections` | `TemplateInspectionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/template-matches` | `TemplateMatchRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `GET` | `/api/v2/traces/{trace_id}` | — | 200, 400, 404, 409, 410, 422, 429, 500, 503 |
@@ -91,7 +92,7 @@ documented in full in `docs/v2-api-reference.md` (4670 lines) plus the raw
 
 ## Schema index
 
-230 schemas; see `docs/v2-api-reference.md` for every field.
+233 schemas; see `docs/v2-api-reference.md` for every field.
 
 | Schema | Kind | Properties |
 |---|---|---|
@@ -225,6 +226,7 @@ documented in full in `docs/v2-api-reference.md` (4670 lines) plus the raw
 | `OperationResponse_StereoTransformResult_` | object | 9 |
 | `OperationResponse_StitchResult_` | object | 9 |
 | `OperationResponse_TemplateBuildResult_` | object | 9 |
+| `OperationResponse_TemplateImportResult_` | object | 9 |
 | `OperationResponse_TemplateInspectionResult_` | object | 9 |
 | `OperationResponse_TemplateMatchResult_` | object | 9 |
 | `OperationResponse_TemplatePointResult_` | object | 9 |
@@ -308,6 +310,8 @@ documented in full in `docs/v2-api-reference.md` (4670 lines) plus the raw
 | `TemplateBuildRequest` | object | 10 |
 | `TemplateBuildResult` | object | 4 |
 | `TemplateFeaturePoint` | object | 5 |
+| `TemplateImportRequest` | object | 6 |
+| `TemplateImportResult` | object | 8 |
 | `TemplateInspectionRequest` | object | 5 |
 | `TemplateInspectionResult` | object | 2 |
 | `TemplateMatch` | object | 8 |

@@ -47,6 +47,11 @@
   {
     "family": "Templates",
     "method": "POST",
+    "path": "/api/v2/template-imports"
+  },
+  {
+    "family": "Templates",
+    "method": "POST",
     "path": "/api/v2/template-builds"
   },
   {

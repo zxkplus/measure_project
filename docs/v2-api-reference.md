@@ -13,7 +13,7 @@ inspect both state and validity.
 
 ## Route index
 
-68 required routes, including 58 calculation operations.
+69 required routes, including 59 calculation operations.
 Documentation/schema endpoints are served by FastAPI but excluded from its paths list.
 
 | Family | Method | Route | Calculation ID |
@@ -27,6 +27,7 @@ Documentation/schema endpoints are served by FastAPI but excluded from its paths
 | Images | POST | [`/api/v2/image-previews`](#route-api-v2-image-previews) | `image-previews` |
 | Images | POST | [`/api/v2/image-preprocessings`](#route-api-v2-image-preprocessings) | `image-preprocessings` |
 | Images | POST | [`/api/v2/image-crops`](#route-api-v2-image-crops) | `image-crops` |
+| Templates | POST | [`/api/v2/template-imports`](#route-api-v2-template-imports) | `template-imports` |
 | Templates | POST | [`/api/v2/template-builds`](#route-api-v2-template-builds) | `template-builds` |
 | Templates | POST | [`/api/v2/template-inspections`](#route-api-v2-template-inspections) | `template-inspections` |
 | Templates | POST | [`/api/v2/template-matches`](#route-api-v2-template-matches) | `template-matches` |
@@ -202,6 +203,26 @@ Named output ports (for recipe bindings):
 {
   "image": "image",
   "mapping": "transform"
+}
+```
+
+Scheduling, errors and 200/202 behavior follow the shared guide.
+
+<a id="route-api-v2-template-imports"></a>
+
+### POST `/api/v2/template-imports`
+
+Import a GUI manifest direction template.
+
+Calculation ID: `template-imports`.
+
+Request: [TemplateImportRequest](#schema-templateimportrequest). Response: [OperationResponse_TemplateImportResult_](#schema-operationresponse-templateimportresult).
+
+Named output ports (for recipe bindings):
+
+```json
+{
+  "template": "template_asset"
 }
 ```
 
@@ -3289,6 +3310,22 @@ Physical board coordinate in the declared unit.
 | `completed_at` | string or null | no | `not declared` | — |
 | `diagnostics` | object | no | `not declared` | — |
 
+<a id="schema-operationresponse-templateimportresult"></a>
+
+### OperationResponse_TemplateImportResult_
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `operation_id` | string | yes | `not declared` | — |
+| `operation` | string | yes | `not declared` | — |
+| `state` | `"queued"`, `"running"`, `"cancelling"`, `"succeeded"`, `"failed"`, `"cancelled"`, `"timed_out"` | yes | `not declared` | — |
+| `trace_id` | string | yes | `not declared` | — |
+| `result` | [TemplateImportResult](#schema-templateimportresult) or null | no | `not declared` | — |
+| `error` | [ErrorDetail](#schema-errordetail) or null | no | `not declared` | — |
+| `created_at` | string | yes | `not declared` | — |
+| `completed_at` | string or null | no | `not declared` | — |
+| `diagnostics` | object | no | `not declared` | — |
+
 <a id="schema-operationresponse-templateinspectionresult"></a>
 
 ### OperationResponse_TemplateInspectionResult_
@@ -4566,6 +4603,38 @@ Point port uses the same observation shape as atomic geometry ports.
 | `frame` | string | no | `"source"` | — |
 | `unit` | string | no | `"px"` | — |
 | `point` | [Point](#schema-point) or null | no | `not declared` | — |
+
+<a id="schema-templateimportrequest"></a>
+
+### TemplateImportRequest
+
+Import a bounded GUI model ZIP, without sessions or measurement nodes.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `mode` | `"sync"`, `"async"` | no | `"sync"` | — |
+| `wait_ms` | integer | no | `10000` | minimum: 0.0; maximum: 60000.0 |
+| `timeout_ms` | integer | no | `60000` | minimum: 1.0; maximum: 3600000.0 |
+| `idempotency_key` | string or null | no | `not declared` | anyOf[0] minLength: 1; anyOf[0] maxLength: 200 |
+| `package` | [FileReference](#schema-filereference) | yes | `not declared` | — |
+| `output` | [OutputSpec](#schema-outputspec) | yes | `not declared` | — |
+
+<a id="schema-templateimportresult"></a>
+
+### TemplateImportResult
+
+Native template, unchanged reference pixels and explicit search controls.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `source_package` | [FileReference](#schema-filereference) | yes | `not declared` | — |
+| `reference` | [FileReference](#schema-filereference) | yes | `not declared` | — |
+| `template` | [FileReference](#schema-filereference) | yes | `not declared` | — |
+| `metadata` | [TemplateMetadata](#schema-templatemetadata) | yes | `not declared` | — |
+| `search` | [TemplateSearch](#schema-templatesearch) | yes | `not declared` | — |
+| `warnings` | array of string | no | `not declared` | — |
+| `artifacts` | array of [FileDescriptor](#schema-filedescriptor) | yes | `not declared` | — |
+| `manifest` | [FileDescriptor](#schema-filedescriptor) | yes | `not declared` | — |
 
 <a id="schema-templateinspectionrequest"></a>
 
