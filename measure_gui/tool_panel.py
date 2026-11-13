@@ -32,6 +32,7 @@ class ToolPanel(ttk.Frame):
         on_create_template: () -> None
         on_execute: () -> None
         on_preprocessor_changed: (name: str) -> None
+        on_open_preprocessor_preview: () -> None
         on_score_threshold_changed: (value: float) -> None
         on_angle_range_changed: (value: str) -> None  # '±30', '±45', '±90'
         on_max_matches_changed: (value: int) -> None
@@ -78,6 +79,7 @@ class ToolPanel(ttk.Frame):
         self.on_create_template: Optional[Callable] = None
         self.on_execute: Optional[Callable] = None
         self.on_preprocessor_changed: Optional[Callable] = None
+        self.on_open_preprocessor_preview: Optional[Callable] = None
         self.on_score_threshold_changed: Optional[Callable] = None
         self.on_angle_range_changed: Optional[Callable] = None
         self.on_max_matches_changed: Optional[Callable] = None
@@ -182,15 +184,20 @@ class ToolPanel(ttk.Frame):
         # Preprocessor
         ttk.Label(self._template_form, text="预处理").pack(anchor=tk.W, **pad)
         self._preproc_var = tk.StringVar(value="raw")
+        preproc_row = ttk.Frame(self._template_form)
+        preproc_row.pack(fill=tk.X, **pad)
         preproc_combo = ttk.Combobox(
-            self._template_form, textvariable=self._preproc_var,
+            preproc_row, textvariable=self._preproc_var,
             values=["raw", "canny", "sobel", "clahe", "threshold"],
-            state="readonly", width=18,
+            state="readonly", width=12,
         )
-        preproc_combo.pack(fill=tk.X, **pad)
+        preproc_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
         preproc_combo.bind("<<ComboboxSelected>>",
                           lambda e: self._fire(self.on_preprocessor_changed,
                                               self._preproc_var.get()))
+        ttk.Button(preproc_row, text="预览…", width=7,
+                   command=lambda: self._fire(self.on_open_preprocessor_preview)
+                   ).pack(side=tk.LEFT, padx=(4, 0))
 
         # Match score threshold
         ttk.Label(self._template_form, text="匹配分数阈值").pack(anchor=tk.W, **pad)

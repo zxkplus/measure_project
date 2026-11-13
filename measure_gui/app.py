@@ -41,6 +41,7 @@ from .calibration_dialog import CalibrationDialog
 from .image_canvas import CanvasMode, ImageCanvas
 from measure.multi_target_workflow import MultiTargetWorkflow, TargetResult
 from .project_manager import ProjectManager
+from .preprocessor_preview import PreprocessorPreviewDialog
 from .result_panel import ResultPanel
 from .template_view import TemplateTool, TemplateView
 from .tool_panel import ToolPanel
@@ -96,6 +97,12 @@ class MeasureApp:
         # would replace the strategy we just loaded (a fixed_roi/none model came
         # back as single_box).  The flag suppresses only that re-teach.
         self._restoring_project = False
+
+        # Preprocessing preview.  ``_preview_dialog`` is the non-modal
+        # before/after window; ``_show_enhanced`` mirrors preprocessing onto the
+        # main canvases.  Both are view-only and never write project state.
+        self._preview_dialog: Optional[PreprocessorPreviewDialog] = None
+        self._show_enhanced: bool = False
 
         # File path tracking
         self._reference_image_path: Optional[str] = None
@@ -176,6 +183,13 @@ class MeasureApp:
         view_menu.add_command(label="100%", command=self._zoom_100)
         view_menu.add_separator()
         view_menu.add_command(label="重置 ROI", command=self._reset_roi)
+        view_menu.add_separator()
+        view_menu.add_command(label="预处理预览...",
+                              command=self._open_preprocessor_preview)
+        self._show_enhanced_var = tk.BooleanVar(value=False)
+        view_menu.add_checkbutton(label="画布显示增强后图像",
+                                  variable=self._show_enhanced_var,
+                                  command=self._on_show_enhanced_toggled)
 
         # Tools menu — checkerboard calibration (optional pixel scale)
         tools_menu = tk.Menu(menubar, tearoff=0)
@@ -206,6 +220,7 @@ class MeasureApp:
         self.tool_panel.on_create_template = self._create_template
         self.tool_panel.on_execute = self._execute
         self.tool_panel.on_preprocessor_changed = self._on_preprocessor_changed
+        self.tool_panel.on_open_preprocessor_preview = self._open_preprocessor_preview
         self.tool_panel.on_score_threshold_changed = self._on_score_threshold_changed
         self.tool_panel.on_angle_range_changed = self._on_angle_range_changed
         self.tool_panel.on_max_matches_changed = self._on_max_matches_changed
@@ -326,6 +341,7 @@ class MeasureApp:
             self.template_view.clear_tools()
             self.tool_panel.clear_tool_list()
             self.result_panel.clear_results()
+            self._refresh_display_if_enhanced()
 
         except Exception as e:
             messagebox.showerror("加载失败", str(e))
@@ -352,6 +368,7 @@ class MeasureApp:
             self._inspection_image_path = filepath
             self._insp_canvas.load_image(img)
             self._status_text.set(f"检测图: {os.path.basename(filepath)} ({img.shape[1]}×{img.shape[0]})")
+            self._refresh_display_if_enhanced()
 
             # Switch to inspection tab
             self._notebook.select(1)
@@ -1442,6 +1459,7 @@ class MeasureApp:
         self.tool_panel.set_template_created(True)
         pass  # toolbar removed, state managed by tool_panel
         self._status_text.set(f"模板已创建: {width:.0f}×{height:.0f} @ {angle_deg:.1f}°")
+        self._refresh_display_if_enhanced()
 
         # Popup notification
         messagebox.showinfo(
@@ -1598,6 +1616,124 @@ class MeasureApp:
     def _on_preprocessor_changed(self, name: str):
         if self._workflow:
             self._status_text.set(f"预处理已切换: {name} (重新创建模板生效)")
+        if self._preview_dialog is not None:
+            if self._preview_dialog.winfo_exists():
+                self._preview_dialog.set_type(name)
+            else:
+                self._preview_dialog = None
+        self._refresh_display_if_enhanced()
+
+    # ------------------------------------------------------------------
+    # Preprocessing preview
+    # ------------------------------------------------------------------
+
+    def _preview_template_patch(self) -> Optional[np.ndarray]:
+        """The straightened template patch the preview should show, if any."""
+        if self._workflow is None:
+            return None
+        alignment = getattr(self._workflow, "_alignment", None)
+        patch = getattr(alignment, "template_image", None)
+        return None if patch is None else np.asarray(patch)
+
+    def _open_preprocessor_preview(self) -> None:
+        """Open (or focus) the non-modal preprocessing preview window."""
+        if self._preview_dialog is not None and self._preview_dialog.winfo_exists():
+            self._preview_dialog.lift()
+            self._preview_dialog.focus_set()
+            return
+
+        patch = self._preview_template_patch()
+        if patch is None and self._inspection_image is None:
+            messagebox.showinfo(
+                "预处理预览",
+                "请先加载参考图并创建模板，或加载检测图后再预览。",
+            )
+            return
+
+        initial = "raw"
+        if self._workflow is not None:
+            alignment = getattr(self._workflow, "_alignment", None)
+            point = getattr(alignment, "template_point", None)
+            if point is not None and getattr(point, "preprocessor", None) is not None:
+                initial = point.preprocessor.serialize().get("type", "raw")
+
+        self._preview_dialog = PreprocessorPreviewDialog(
+            self.root,
+            template_patch=patch,
+            inspection_image=self._inspection_image,
+            initial_type=initial,
+        )
+
+    def _on_show_enhanced_toggled(self) -> None:
+        """Mirror (or stop mirroring) preprocessing onto the main canvases."""
+        self._show_enhanced = bool(self._show_enhanced_var.get())
+        self._apply_display_preprocessing()
+
+    def _refresh_display_if_enhanced(self) -> None:
+        """Re-apply the enhanced display and re-point the preview after new inputs."""
+        if self._show_enhanced:
+            self._apply_display_preprocessing()
+        if self._preview_dialog is not None and self._preview_dialog.winfo_exists():
+            self._preview_dialog.set_sources(
+                self._preview_template_patch(), self._inspection_image
+            )
+
+    def _display_preprocessor(self):
+        """Build the preprocessor the main window display is currently using."""
+        from measure.measure_template import (
+            CannyPreprocessor,
+            CLAHEPreprocessor,
+            RawPreprocessor,
+            SobelPreprocessor,
+            ThresholdPreprocessor,
+        )
+
+        if not self._show_enhanced:
+            return RawPreprocessor()
+
+        preproc_map = {
+            "raw": RawPreprocessor,
+            "canny": lambda: CannyPreprocessor(50.0, 150.0),
+            "sobel": lambda: SobelPreprocessor(3),
+            "clahe": lambda: CLAHEPreprocessor(2.0),
+            "threshold": lambda: ThresholdPreprocessor(128.0),
+        }
+        name = self.tool_panel._preproc_var.get()
+        factory = preproc_map.get(name, RawPreprocessor)
+        return factory()
+
+    def _apply_display_preprocessing(self) -> None:
+        """Re-render the template view and canvases with (or without) enhancement.
+
+        Read-only: nothing here touches the workflow, the ROI, or overlays.  The
+        template patch keeps its shape (preprocessing is per-pixel or
+        neighbourhood-local), so tool coordinates stay valid and
+        ``clear_tools=False`` is safe.
+        """
+        from measure.preview import to_display_uint8
+
+        preprocessor = self._display_preprocessor()
+
+        patch = self._preview_template_patch()
+        if patch is not None:
+            try:
+                enhanced = to_display_uint8(preprocessor(patch))
+                self.template_view.load_template(enhanced, clear_tools=False)
+            except Exception as exc:
+                self._status_text.set(f"模板增强显示失败: {exc}")
+
+        for canvas, image in (
+            (self._ref_canvas, self._reference_image),
+            (self._insp_canvas, self._inspection_image),
+        ):
+            if canvas is None or image is None:
+                continue
+            try:
+                state = canvas.get_view_state()
+                canvas.load_image(to_display_uint8(preprocessor(image)))
+                canvas.set_view_state(state)
+            except Exception as exc:
+                self._status_text.set(f"画布增强显示失败: {exc}")
 
     def _on_score_threshold_changed(self, value: float):
         if self._workflow:
@@ -1673,6 +1809,7 @@ class MeasureApp:
         self._status_text.set(
             f"模板已创建 (多点仿射, {len(points)} 控制点, {w}×{h})"
         )
+        self._refresh_display_if_enhanced()
 
     def get_alignment_state(self) -> dict:
         """Collect alignment mode and control points for project serialization."""

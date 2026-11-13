@@ -249,6 +249,27 @@ def _deserialize_preprocessor(data: Dict[str, Any]) -> Preprocessor:
     return cls.deserialize(data)
 
 
+def preprocessor_from_config(data: Dict[str, Any]) -> Preprocessor:
+    """Public entry point for rebuilding a preprocessor from a config dict.
+
+    Accepts exactly what :meth:`Preprocessor.serialize` produces (the same dict
+    stored in a model manifest's ``alignment.preprocessor``), so callers such as
+    the GUI preview can round-trip a configuration without reaching into the
+    registry or the private deserializer.
+
+    Args:
+        data: Serialized preprocessor dict, e.g.
+            ``{"type": "clahe", "clip_limit": 2.0, "tile_grid_size": [8, 8]}``.
+
+    Returns:
+        The reconstructed :class:`Preprocessor` instance.
+
+    Raises:
+        ValueError: When ``type`` is not registered.
+    """
+    return _deserialize_preprocessor(data)
+
+
 def check_roi_covers_template(roi_xyxy: Tuple[float, float, float, float],
                               click_col: float, click_row: float,
                               template_size: float,
