@@ -6320,6 +6320,127 @@
         }
       }
     },
+    "/api/v2/legacy-v1-project-conversions": {
+      "post": {
+        "tags": [
+          "recipes"
+        ],
+        "summary": "Migrate a saved V1 API project into an executable V2 recipe",
+        "operationId": "legacy-v1-project-conversions",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LegacyV1ConversionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse_LegacyV1ConversionResult_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Gone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted; query the retained operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse_LegacyV1ConversionResult_"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/recipe-validations": {
       "post": {
         "tags": [
@@ -11838,6 +11959,247 @@
         ],
         "title": "LegacyConversionResult"
       },
+      "LegacyV1ConversionRequest": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "sync",
+              "async"
+            ],
+            "title": "Mode",
+            "default": "sync"
+          },
+          "wait_ms": {
+            "type": "integer",
+            "maximum": 60000.0,
+            "minimum": 0.0,
+            "title": "Wait Ms",
+            "default": 10000
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "maximum": 3600000.0,
+            "minimum": 1.0,
+            "title": "Timeout Ms",
+            "default": 60000
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
+          "config": {
+            "$ref": "#/components/schemas/FileReference"
+          },
+          "model_manifest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FileReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FileReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reference_npy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FileReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recipe_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Recipe Id"
+          },
+          "recipe_version": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Recipe Version"
+          },
+          "applicability": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CalibrationApplicability"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "square_size_mm": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Square Size Mm"
+          },
+          "advisory_policy": {
+            "type": "string",
+            "enum": [
+              "accept",
+              "reject"
+            ],
+            "title": "Advisory Policy",
+            "default": "accept"
+          },
+          "output": {
+            "$ref": "#/components/schemas/OutputSpec"
+          },
+          "normalized": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Normalized"
+          },
+          "preparation_diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/CompatibilityDiagnostic"
+            },
+            "type": "array",
+            "title": "Preparation Diagnostics"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "config",
+          "recipe_id",
+          "recipe_version",
+          "output"
+        ],
+        "title": "LegacyV1ConversionRequest",
+        "description": "Explicit V1 project files, upstream identities and output destination."
+      },
+      "LegacyV1ConversionResult": {
+        "properties": {
+          "valid": {
+            "type": "boolean",
+            "title": "Valid"
+          },
+          "resolved_recipe": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Recipe-Output"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "configuration_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Configuration Sha256"
+          },
+          "execution_order": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Execution Order"
+          },
+          "source_project": {
+            "$ref": "#/components/schemas/FileReference"
+          },
+          "assets": {
+            "items": {
+              "$ref": "#/components/schemas/FileReference"
+            },
+            "type": "array",
+            "title": "Assets"
+          },
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/CompatibilityDiagnostic"
+            },
+            "type": "array",
+            "title": "Diagnostics"
+          },
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/FileDescriptor"
+            },
+            "type": "array",
+            "title": "Artifacts"
+          },
+          "manifest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FileDescriptor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "migrated_from": {
+            "type": "string",
+            "const": "v1-api-project",
+            "title": "Migrated From",
+            "default": "v1-api-project"
+          },
+          "source_config": {
+            "$ref": "#/components/schemas/FileReference"
+          },
+          "source_model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FileReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "summary": {
+            "$ref": "#/components/schemas/MigrationSummary"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "valid",
+          "source_project",
+          "source_config",
+          "summary"
+        ],
+        "title": "LegacyV1ConversionResult",
+        "description": "Converted recipe plus V1 source provenance and migration summary."
+      },
       "LengthConversionRequest": {
         "properties": {
           "mode": {
@@ -12427,6 +12789,40 @@
           "applicability"
         ],
         "title": "MetricSetup"
+      },
+      "MigrationSummary": {
+        "properties": {
+          "nodes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Nodes"
+          },
+          "templates": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Templates"
+          },
+          "dropped_physical_units": {
+            "type": "boolean",
+            "title": "Dropped Physical Units",
+            "default": false
+          },
+          "approximations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Approximations"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "nodes",
+          "templates"
+        ],
+        "title": "MigrationSummary",
+        "description": "Counts and explicit approximations for one migrated project."
       },
       "NodeOutcome": {
         "properties": {
@@ -13791,6 +14187,85 @@
           "created_at"
         ],
         "title": "OperationResponse[LegacyConversionResult]"
+      },
+      "OperationResponse_LegacyV1ConversionResult_": {
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "title": "Operation Id"
+          },
+          "operation": {
+            "type": "string",
+            "title": "Operation"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "cancelling",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "timed_out"
+            ],
+            "title": "State"
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LegacyV1ConversionResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "diagnostics": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Diagnostics"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "operation_id",
+          "operation",
+          "state",
+          "trace_id",
+          "created_at"
+        ],
+        "title": "OperationResponse[LegacyV1ConversionResult]"
       },
       "OperationResponse_LengthConversionResult_": {
         "properties": {

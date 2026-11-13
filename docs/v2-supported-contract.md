@@ -6,7 +6,7 @@ shared with the retired V2 API. Start/deploy using [the deployment guide](v2-pro
 The runtime generates OpenAPI and capability schemas from the same executable operation registry.
 For upstream integration, use [the API guide](v2-upstream-api.md),
 [complete field reference](v2-api-reference.md) and [OpenAPI snapshot](v2-openapi.json).
-The [required route manifest](v2-required-routes.json) records the 65 Spec requirements and the
+The [required route manifest](v2-required-routes.json) records the 66 Spec requirements and the
 HTTP discovery acceptance test compares them with actual OpenAPI routes. Presence alone is not
 numerical acceptance; the family suites exercise the resulting observations and file effects.
 
@@ -68,6 +68,7 @@ numerical acceptance; the family suites exercise the resulting observations and 
 | Recipe | POST | `/api/v2/recipe-exports` |
 | Recipe | POST | `/api/v2/recipe-imports` |
 | Recipe | POST | `/api/v2/legacy-project-conversions` |
+| Recipe | POST | `/api/v2/legacy-v1-project-conversions` |
 | Evaluation | POST | `/api/v2/evaluations/ranges` |
 | Evaluation | POST | `/api/v2/evaluations/diameter-variation` |
 | Evaluation | POST | `/api/v2/evaluations/centerline-deviation` |

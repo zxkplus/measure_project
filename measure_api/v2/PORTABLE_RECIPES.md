@@ -93,6 +93,49 @@ validation on representative images.
 recipe and no completed artifacts. `valid: true` returns the validated `resolved_recipe`, assets,
 configuration hash, execution order and a jointly committed template/recipe set.
 
+### V1 API project migration
+
+`POST /legacy-v1-project-conversions` migrates a project saved by the legacy Flask V1 API.
+It accepts explicit files rather than a directory or implicit sibling lookup:
+
+- `config: FileReference` — V1 `config.json`, schema version 1 or 2.
+- `model_manifest: Optional[FileReference]` — V1 model asset `manifest.json`, contract 3.0/3.1.
+  Required whenever measurement nodes exist.
+- `reference` and/or `reference_npy` — at least one teaching image form. Both may be supplied;
+  lossless image pixels are compared with the numeric array.
+- `recipe_id`, `recipe_version`, `output` — required upstream identities and destination.
+- `applicability` and optional `square_size_mm` — required only when physical units are wanted.
+- `advisory_policy` — `accept` (default) proceeds with warnings; `reject` makes any warning
+  blocking before commit.
+
+```json
+{
+  "config": {"root": "legacy", "path": "proj-42/config.json"},
+  "model_manifest": {"root": "legacy", "path": "proj-42/manifest.json"},
+  "reference": {"root": "legacy", "path": "proj-42/reference.png"},
+  "reference_npy": {"root": "legacy", "path": "proj-42/reference.npy"},
+  "recipe_id": "bottle-line",
+  "recipe_version": "v1-migrated-1",
+  "output": {"directory": {"root": "outputs", "path": "migrations/proj-42"}}
+}
+```
+
+Only `single_box` alignment is migrated; `multi_point` and `obb` return blocking diagnostics.
+The ten supported tool types are the same as GUI/core conversion. Tools stay in straightened-patch
+coordinates. Manifest box angles are visually counter-clockwise, so the adapter negates them into
+the V2 clockwise ROI convention before teaching; this is recorded as an informational diagnostic.
+`phase` and `project_name` are not recipe concepts and are dropped.
+
+`reference_npy` is decoded as a non-object two-dimensional uint8 array, bounded by the image pixel
+limit, verified against `manifest.files["reference.npy"]` when declared, and compared with the image
+reference when both are present. If only the numeric reference is supplied, the adapter stages its
+pixels and publishes a committed `reference.png` in the same final transaction as the recipe.
+
+The migration reports node/template counts and approximation codes in `summary`. Reconstructed
+templates, the V2 matching engine, pyramid decimation, square-to-rectangular support changes and
+derived scalar calibration are warnings, not silent conversions. Invalid configuration returns
+`valid: false` with located diagnostics and publishes nothing.
+
 ## Freeze and replay
 
 Every new `/runs` and preview result records `runtime_identity`: actual algorithm version,

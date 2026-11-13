@@ -270,6 +270,11 @@
     "path": "/api/v2/legacy-project-conversions"
   },
   {
+    "family": "Recipe",
+    "method": "POST",
+    "path": "/api/v2/legacy-v1-project-conversions"
+  },
+  {
     "family": "Evaluation",
     "method": "POST",
     "path": "/api/v2/evaluations/ranges"

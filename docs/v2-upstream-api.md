@@ -5,7 +5,7 @@ It describes the implemented FastAPI V2 service, API version `2.0`, recipe/asset
 The HTTP prefix is `/api/v2`. Requests use JSON control parameters and shared-file references;
 images, templates and other large payloads are exchanged through directories on the same node.
 
-The service implements 65 required routes, including 55 calculation operations. Use this guide
+The service implements 66 required routes, including 56 calculation operations. Use this guide
 for integration behavior, the [complete field reference](v2-api-reference.md) for every request,
 response and nested model, and the [OpenAPI snapshot](v2-openapi.json) for client generation.
 The deployed service exposes its actual schemas at `GET /api/v2/openapi.json` and interactive
@@ -112,7 +112,7 @@ header while its operation record still carries the original calculation trace.
 
 ### Shared calculation request fields
 
-The 55 calculation POSTs take a flat object. Add these controls alongside family-specific fields;
+The 56 calculation POSTs take a flat object. Add these controls alongside family-specific fields;
 do not wrap the family payload under `data` or `parameters` at the HTTP boundary.
 
 | Field | Type | Default | Meaning |
@@ -791,7 +791,7 @@ Client-visible latency and total service/container peak memory require separate 
 
 ## API families and further reference
 
-The [complete route and schema catalog](v2-api-reference.md) covers all 65 routes and 222
+The [complete route and schema catalog](v2-api-reference.md) covers all 66 routes and 226
 OpenAPI components. The family guides explain algorithm/domain restrictions beyond schema bounds:
 
 | Family | Integration details |
@@ -807,8 +807,11 @@ OpenAPI components. The family guides explain algorithm/domain restrictions beyo
 
 Legacy conversion is explicit one-way migration using `/legacy-project-conversions`. Supported
 JSON/core-numeric forms produce diagnostics and a validated recipe; unsupported/pickle/ambiguous
-configuration is not silently reconstructed. Check `valid` and blocking diagnostics before saving
-the new upstream version. UI layout, zoom, visibility and selection remain upstream preferences.
+configuration is not silently reconstructed. Projects saved by the legacy Flask V1 API use
+`/legacy-v1-project-conversions` with explicit `config`, `model_manifest` and `reference`/
+`reference_npy` files; only single-box alignment is migrated and the response records approximating
+warnings. Check `valid` and blocking diagnostics before saving the new upstream version. UI layout,
+zoom, visibility and selection remain upstream preferences.
 
 ## Runnable example and document verification
 

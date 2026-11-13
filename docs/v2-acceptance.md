@@ -8,7 +8,7 @@ fixtures, fit residuals or repeated reads of an unchanged image.
 
 ## Contract and upstream workflow
 
-The required-route manifest contains 65 Spec routes. All 65 are implemented; 55 are calculation
+The required-route manifest contains 66 Spec routes. All 66 are implemented; 56 are calculation
 operations with public discovery schemas. Final coverage compares required methods and
 normalized parameter paths against generated OpenAPI, and compares every advertised calculation
 against its executable route and request/result schemas. The route audit covers discovery, files,

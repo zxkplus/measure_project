@@ -9,7 +9,7 @@ stateless FastAPI v2 service, which its own README designates as the
 authoritative contract. The hand-written v1 reference in
 `../api_reference.md` does not describe these routes.
 
-Paths: **63** · Schemas: **222**
+Paths: **64** · Schemas: **226**
 
 ## Endpoints
 
@@ -54,6 +54,7 @@ Paths: **63** · Schemas: **222**
 | `POST` | `/api/v2/image-stitches` | `StitchRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/image-undistortions` | `UndistortionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/legacy-project-conversions` | `LegacyConversionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/legacy-v1-project-conversions` | `LegacyV1ConversionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/measurement-batches` | `MeasurementBatchRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/measurements/circles` | `ImageCircleRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/measurements/edge-pairs` | `PairRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
@@ -82,13 +83,13 @@ Paths: **63** · Schemas: **222**
 ## Schemas
 
 Every v2 request/response schema is defined by the service itself and
-documented in full in `docs/v2-api-reference.md` (4670 lines) plus the raw
+documented in full in `docs/v2-api-reference.md` plus the raw
 `docs/v2-openapi.json`. Only the route index is rendered here — duplicating
-222 schemas into this skill would bury it and drift from his docs.
+226 schemas into this skill would bury it and drift from his docs.
 
 ## Schema index
 
-222 schemas; see `docs/v2-api-reference.md` for every field.
+226 schemas; see `docs/v2-api-reference.md` for every field.
 
 | Schema | Kind | Properties |
 |---|---|---|
@@ -165,6 +166,8 @@ documented in full in `docs/v2-api-reference.md` (4670 lines) plus the raw
 | `ImageStage` | object | 3 |
 | `LegacyConversionRequest` | object | 12 |
 | `LegacyConversionResult` | object | 9 |
+| `LegacyV1ConversionRequest` | object | 16 |
+| `LegacyV1ConversionResult` | object | 13 |
 | `LengthConversionRequest` | object | 8 |
 | `LengthConversionResult` | object | 5 |
 | `Line` | object | 9 |
@@ -177,6 +180,7 @@ documented in full in `docs/v2-api-reference.md` (4670 lines) plus the raw
 | `MeasurementBatchResult` | object | 7 |
 | `MetricSetup-Input` | object | 3 |
 | `MetricSetup-Output` | object | 3 |
+| `MigrationSummary` | object | 4 |
 | `NodeOutcome` | object | 8 |
 | `ObjectPoint` | object | 3 |
 | `OperationResponse_AlignmentResult_` | object | 9 |
@@ -195,6 +199,7 @@ documented in full in `docs/v2-api-reference.md` (4670 lines) plus the raw
 | `OperationResponse_ImageLineResult_` | object | 9 |
 | `OperationResponse_ImageOutputResult_` | object | 9 |
 | `OperationResponse_LegacyConversionResult_` | object | 9 |
+| `OperationResponse_LegacyV1ConversionResult_` | object | 9 |
 | `OperationResponse_LengthConversionResult_` | object | 9 |
 | `OperationResponse_LineFitResult_` | object | 9 |
 | `OperationResponse_MeasurementBatchResult_` | object | 9 |

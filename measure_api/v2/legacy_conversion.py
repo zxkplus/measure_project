@@ -368,6 +368,8 @@ PARAMETERS = {
         "angle_range_half",
         "angle_step",
         "use_subpixel",
+        "pyramid_decimate",
+        "pyramid_max_template_size",
     },
 }
 
@@ -439,30 +441,60 @@ def convert_parameters(kind: str, parameters: dict) -> dict:
     return {}
 
 
-def convert_legacy(
-    request: LegacyConversionRequest, context: CalculationContext
+def convert_normalized(
+    value: Dict[str, Any],
+    reference: Optional[FileReference],
+    recipe_id: str,
+    recipe_version: str,
+    applicability: Optional[CalibrationApplicability],
+    output: OutputSpec,
+    diagnostics: List[CompatibilityDiagnostic],
+    context: CalculationContext,
+    source_project: FileReference,
+    reject_warnings: bool = False,
+    reference_bytes: Optional[bytes] = None,
 ) -> LegacyConversionResult:
-    """Convert supported configuration and assets into one upstream-owned package.
+    """Convert an already-normalized legacy configuration into a portable recipe.
+
+    This is the shared core for GUI project JSON and V1 API project migration.
+    Callers own file reading and normalization; this function maps tools to
+    operations, teaches portable templates, validates the complete recipe and
+    commits the result atomically.
 
     Args:
-        request: Typed explicit legacy project/template files, source bindings and output
-            destination.
+        value: Normalized legacy structure with ``template_view.tools``, ``roi``,
+            ``matching`` and optional ``calibration``.
+        reference: Verified teaching image shared-file reference.
+        recipe_id: Upstream recipe identity supplied by the caller.
+        recipe_version: Upstream recipe version supplied by the caller.
+        applicability: Explicit calibration applicability, when physical units exist.
+        output: Destination for the committed recipe and taught template assets.
+        diagnostics: Preparation diagnostics extended in place by this conversion.
         context: Isolated operation identity, resource limits and verified shared-file
             access.
+        source_project: Original shared-file reference recorded as provenance.
+        reject_warnings: Treat any advisory diagnostic as blocking before commit.
+        reference_bytes: Encoded reference image to stage and publish in the final
+            output, used when only a numeric NPY reference was supplied.
 
     Returns:
         Converted recipe/assets and explicit blocking or advisory compatibility diagnostics.
     """
-    diagnostics = list(request.preparation_diagnostics)
-    value = request.project_data
 
     def failure() -> LegacyConversionResult:
         return LegacyConversionResult(
-            valid=False, source_project=request.project, diagnostics=diagnostics
+            valid=False, source_project=source_project, diagnostics=diagnostics
         )
 
     if any(item.severity == "error" for item in diagnostics):
         return failure()
+    reference_context = context
+    if reference_bytes is not None:
+        reference_context, reference_output = context.stage("conversion-reference")
+        artifacts, _ = ArtifactWriter(
+            reference_context.files, reference_output, reference_context.operation_id
+        ).commit([("reference.png", "reference", "png", reference_bytes)])
+        reference = artifacts[0].file
     template_view = value.get("template_view", {})
     if (
         not isinstance(template_view, dict)
@@ -528,6 +560,10 @@ def convert_legacy(
             "scale_max",
             "scale_step",
             "preprocessing",
+            "coarse_fine",
+            "coarse_angle_step_deg",
+            "pyramid_max_template_size",
+            "pyramid_decimate",
         },
         "alignment": {"mode", "control_points"},
         "calibration": {"scale_mm_per_px", "square_size_mm", "num_corners", "method"},
@@ -663,7 +699,7 @@ def convert_legacy(
                 diagnostic(path + ".params", "unresolved_dependency_or_parameter", str(error))
             )
     calibration = value.get("calibration")
-    if calibration and calibration.get("scale_mm_per_px") and request.applicability is None:
+    if calibration and calibration.get("scale_mm_per_px") and applicability is None:
         diagnostics.append(
             diagnostic(
                 "calibration",
@@ -680,9 +716,9 @@ def convert_legacy(
                     "A positive original board square size is required",
                 )
             )
-        if request.applicability is not None:
-            image, _ = context.files.read_image(request.reference)
-            size = request.applicability.image_size
+        if applicability is not None:
+            image, _ = reference_context.files.read_image(reference)
+            size = applicability.image_size
             if image.shape[:2] != (size.height, size.width):
                 diagnostics.append(
                     diagnostic(
@@ -691,6 +727,14 @@ def convert_legacy(
                         "Applicability must match the teaching image dimensions",
                     )
                 )
+    if reject_warnings and any(item.severity == "warning" for item in diagnostics):
+        diagnostics.append(
+            diagnostic(
+                "advisory_policy",
+                "advisory.rejected",
+                "Warnings are blocking under advisory_policy=reject",
+            )
+        )
     if any(item.severity == "error" for item in diagnostics):
         return failure()
     from measure_api.v2.families.templates import (
@@ -700,6 +744,11 @@ def convert_legacy(
     )
 
     payloads, replacements = [], {}
+    published_reference: Optional[FileReference] = None
+    if reference_bytes is not None:
+        published_reference = output_reference(output, "reference.png", reference_bytes, context)
+        replacements[reference_key(reference)] = published_reference.model_dump(mode="json")
+        payloads.append(("reference.png", "reference", "png", reference_bytes))
 
     def teach(
         name: str,
@@ -707,13 +756,13 @@ def convert_legacy(
         anchor: Optional[dict] = None,
         preprocessing: Optional[dict] = None,
     ) -> FileReference:
-        stage_context, output = context.stage(name)
+        stage_context, stage_output = context.stage(name)
         built = build_template(
             TemplateBuildRequest(
-                image=request.reference,
+                image=reference,
                 roi=roi_value,
                 anchor=anchor,
-                output=output,
+                output=stage_output,
                 preprocessing=preprocessing or {"type": "raw"},
             ),
             stage_context,
@@ -721,15 +770,15 @@ def convert_legacy(
         content, _ = stage_context.files.read_bytes(built.template)
         filename = name + ".npz"
         payloads.append((filename, "template", "npz", content))
-        final = output_reference(request.output, filename, content, context)
+        final = output_reference(output, filename, content, context)
         replacements[reference_key(built.template)] = final.model_dump(mode="json")
         return built.template
 
     try:
         recipe_data = {
-            "id": request.recipe_id,
-            "version": request.recipe_version,
-            "reference": request.reference,
+            "id": recipe_id,
+            "version": recipe_version,
+            "reference": reference,
             "nodes": nodes,
         }
         old_to_patch = np.eye(3)
@@ -775,6 +824,12 @@ def convert_legacy(
                     if name in matching
                 }
             )
+            if "coarse_fine" in matching:
+                search["coarse_fine"] = matching["coarse_fine"]
+            if "coarse_angle_step_deg" in matching:
+                search["coarse_angle_step"] = matching["coarse_angle_step_deg"]
+            if "pyramid_max_template_size" in matching:
+                search["pyramid_max_template_size"] = matching["pyramid_max_template_size"]
             recipe_data["localization"] = {"template": template, "search": search}
             recipe_data["alignment"] = {
                 "width": width,
@@ -789,6 +844,16 @@ def convert_legacy(
                     "warning",
                 )
             )
+            if matching.get("pyramid_decimate"):
+                diagnostics.append(
+                    diagnostic(
+                        "matching.pyramid_decimate",
+                        "matching_engine_changed",
+                        "Pyramid decimation has no exact V2 equivalent; "
+                        "validate NCC on representative images",
+                        "warning",
+                    )
+                )
         for tool, node in zip(tools, nodes):
             if tool["object_type"] != "TemplateMatchPoint":
                 continue
@@ -816,8 +881,21 @@ def convert_legacy(
                     "angle_max": half,
                     "angle_step": p.get("angle_step", 1),
                     "subpixel": p.get("use_subpixel", True),
+                    "pyramid_max_template_size": int(
+                        p.get("pyramid_max_template_size", 400)
+                    ),
                 },
             }
+            if p.get("pyramid_decimate"):
+                diagnostics.append(
+                    diagnostic(
+                        node["id"] + ".pyramid_decimate",
+                        "matching_engine_changed",
+                        "Template-point pyramid decimation has no exact V2 equivalent; "
+                        "validate NCC on representative images",
+                        "warning",
+                    )
+                )
         if calibration and calibration.get("scale_mm_per_px"):
             scale = calibration["scale_mm_per_px"]
             square = calibration.get("square_size_mm", scale)
@@ -826,7 +904,7 @@ def convert_legacy(
                     "value": {
                         "kind": "scalar",
                         "unit": "mm",
-                        "applicability": request.applicability,
+                        "applicability": applicability,
                         "parameters": {
                             "scale_per_px": scale,
                             "square_size": square,
@@ -834,7 +912,7 @@ def convert_legacy(
                         },
                     }
                 },
-                "applicability": request.applicability,
+                "applicability": applicability,
             }
         recipe = Recipe.model_validate(recipe_data)
         # All generated teaching files live beneath the shared private stage root.
@@ -860,26 +938,57 @@ def convert_legacy(
             )
             for ref in prepared.assets
         ]
+        if published_reference is not None:
+            existing = {reference_key(item) for item in final_assets}
+            if reference_key(published_reference) not in existing:
+                final_assets.append(published_reference)
         validated = validate_snapshot(RecipeRequest(recipe=relocated, assets=final_assets))
         payloads.append(
             ("recipe.json", "recipe", "json", canonical(relocated.model_dump(mode="json")))
         )
-        artifacts, manifest = ArtifactWriter(
-            context.files, request.output, context.operation_id
+        artifacts, completion = ArtifactWriter(
+            context.files, output, context.operation_id
         ).commit(payloads)
         return LegacyConversionResult(
             valid=True,
             resolved_recipe=relocated,
             configuration_sha256=validated.configuration_sha256,
             execution_order=validated.execution_order,
-            source_project=request.project,
+            source_project=source_project,
             assets=final_assets,
             diagnostics=diagnostics,
             artifacts=artifacts,
-            manifest=manifest,
+            manifest=completion,
         )
     except (ValueError, KeyError, TypeError, np.linalg.LinAlgError, ServiceError) as error:
         if isinstance(error, ServiceError) and error.code.startswith(("output.", "operation.")):
             raise
         diagnostics.append(diagnostic("recipe", "incompatible_configuration", str(error)))
         return failure()
+
+
+def convert_legacy(
+    request: LegacyConversionRequest, context: CalculationContext
+) -> LegacyConversionResult:
+    """Convert supported configuration and assets into one upstream-owned package.
+
+    Args:
+        request: Typed explicit legacy project/template files, source bindings and output
+            destination.
+        context: Isolated operation identity, resource limits and verified shared-file
+            access.
+
+    Returns:
+        Converted recipe/assets and explicit blocking or advisory compatibility diagnostics.
+    """
+    return convert_normalized(
+        value=request.project_data,
+        reference=request.reference,
+        recipe_id=request.recipe_id,
+        recipe_version=request.recipe_version,
+        applicability=request.applicability,
+        output=request.output,
+        diagnostics=list(request.preparation_diagnostics),
+        context=context,
+        source_project=request.project,
+    )

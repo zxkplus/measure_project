@@ -13,7 +13,7 @@ inspect both state and validity.
 
 ## Route index
 
-65 required routes, including 55 calculation operations.
+66 required routes, including 56 calculation operations.
 Documentation/schema endpoints are served by FastAPI but excluded from its paths list.
 
 | Family | Method | Route | Calculation ID |
@@ -72,6 +72,7 @@ Documentation/schema endpoints are served by FastAPI but excluded from its paths
 | Recipe | POST | [`/api/v2/recipe-exports`](#route-api-v2-recipe-exports) | `recipe-exports` |
 | Recipe | POST | [`/api/v2/recipe-imports`](#route-api-v2-recipe-imports) | `recipe-imports` |
 | Recipe | POST | [`/api/v2/legacy-project-conversions`](#route-api-v2-legacy-project-conversions) | `legacy-project-conversions` |
+| Recipe | POST | [`/api/v2/legacy-v1-project-conversions`](#route-api-v2-legacy-v1-project-conversions) | `legacy-v1-project-conversions` |
 | Evaluation | POST | [`/api/v2/evaluations/ranges`](#route-api-v2-evaluations-ranges) | `evaluations.ranges` |
 | Evaluation | POST | [`/api/v2/evaluations/diameter-variation`](#route-api-v2-evaluations-diameter-variation) | `evaluations.diameter-variation` |
 | Evaluation | POST | [`/api/v2/evaluations/centerline-deviation`](#route-api-v2-evaluations-centerline-deviation) | `evaluations.centerline-deviation` |
@@ -1103,6 +1104,24 @@ Convert supported legacy data without GUI or pickle.
 Calculation ID: `legacy-project-conversions`.
 
 Request: [LegacyConversionRequest](#schema-legacyconversionrequest). Response: [OperationResponse_LegacyConversionResult_](#schema-operationresponse-legacyconversionresult).
+
+Named output ports (for recipe bindings):
+
+```json
+{}
+```
+
+Scheduling, errors and 200/202 behavior follow the shared guide.
+
+<a id="route-api-v2-legacy-v1-project-conversions"></a>
+
+### POST `/api/v2/legacy-v1-project-conversions`
+
+Migrate a saved V1 API project into an executable V2 recipe.
+
+Calculation ID: `legacy-v1-project-conversions`.
+
+Request: [LegacyV1ConversionRequest](#schema-legacyv1conversionrequest). Response: [OperationResponse_LegacyV1ConversionResult_](#schema-operationresponse-legacyv1conversionresult).
 
 Named output ports (for recipe bindings):
 
@@ -2369,6 +2388,53 @@ A declared correction or stitch operation with upstream-supplied parameters.
 | `artifacts` | array of [FileDescriptor](#schema-filedescriptor) | no | `not declared` | — |
 | `manifest` | [FileDescriptor](#schema-filedescriptor) or null | no | `not declared` | — |
 
+<a id="schema-legacyv1conversionrequest"></a>
+
+### LegacyV1ConversionRequest
+
+Explicit V1 project files, upstream identities and output destination.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `mode` | `"sync"`, `"async"` | no | `"sync"` | — |
+| `wait_ms` | integer | no | `10000` | minimum: 0.0; maximum: 60000.0 |
+| `timeout_ms` | integer | no | `60000` | minimum: 1.0; maximum: 3600000.0 |
+| `idempotency_key` | string or null | no | `not declared` | anyOf[0] minLength: 1; anyOf[0] maxLength: 200 |
+| `config` | [FileReference](#schema-filereference) | yes | `not declared` | — |
+| `model_manifest` | [FileReference](#schema-filereference) or null | no | `not declared` | — |
+| `reference` | [FileReference](#schema-filereference) or null | no | `not declared` | — |
+| `reference_npy` | [FileReference](#schema-filereference) or null | no | `not declared` | — |
+| `recipe_id` | string | yes | `not declared` | minLength: 1 |
+| `recipe_version` | string | yes | `not declared` | minLength: 1 |
+| `applicability` | [CalibrationApplicability](#schema-calibrationapplicability) or null | no | `not declared` | — |
+| `square_size_mm` | number or null | no | `not declared` | anyOf[0] exclusiveMinimum: 0.0 |
+| `advisory_policy` | `"accept"`, `"reject"` | no | `"accept"` | — |
+| `output` | [OutputSpec](#schema-outputspec) | yes | `not declared` | — |
+| `normalized` | object | no | `not declared` | — |
+| `preparation_diagnostics` | array of [CompatibilityDiagnostic](#schema-compatibilitydiagnostic) | no | `not declared` | — |
+
+<a id="schema-legacyv1conversionresult"></a>
+
+### LegacyV1ConversionResult
+
+Converted recipe plus V1 source provenance and migration summary.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `valid` | boolean | yes | `not declared` | — |
+| `resolved_recipe` | [Recipe-Output](#schema-recipe-output) or null | no | `not declared` | — |
+| `configuration_sha256` | string or null | no | `not declared` | — |
+| `execution_order` | array of string | no | `not declared` | — |
+| `source_project` | [FileReference](#schema-filereference) | yes | `not declared` | — |
+| `assets` | array of [FileReference](#schema-filereference) | no | `not declared` | — |
+| `diagnostics` | array of [CompatibilityDiagnostic](#schema-compatibilitydiagnostic) | no | `not declared` | — |
+| `artifacts` | array of [FileDescriptor](#schema-filedescriptor) | no | `not declared` | — |
+| `manifest` | [FileDescriptor](#schema-filedescriptor) or null | no | `not declared` | — |
+| `migrated_from` | `"v1-api-project"` | no | `"v1-api-project"` | — |
+| `source_config` | [FileReference](#schema-filereference) | yes | `not declared` | — |
+| `source_model` | [FileReference](#schema-filereference) or null | no | `not declared` | — |
+| `summary` | [MigrationSummary](#schema-migrationsummary) | yes | `not declared` | — |
+
 <a id="schema-lengthconversionrequest"></a>
 
 ### LengthConversionRequest
@@ -2527,6 +2593,19 @@ Individual parameters omit image; this shared image is injected and verified onc
 | `calibration` | [CalibrationInput-Output](#schema-calibrationinput-output) | yes | `not declared` | — |
 | `applicability` | [CalibrationApplicability](#schema-calibrationapplicability) | yes | `not declared` | — |
 | `physical_frame` | string | no | `"physical"` | minLength: 1 |
+
+<a id="schema-migrationsummary"></a>
+
+### MigrationSummary
+
+Counts and explicit approximations for one migrated project.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `nodes` | integer | yes | `not declared` | minimum: 0.0 |
+| `templates` | integer | yes | `not declared` | minimum: 0.0 |
+| `dropped_physical_units` | boolean | no | `false` | — |
+| `approximations` | array of string | no | `not declared` | — |
 
 <a id="schema-nodeoutcome"></a>
 
@@ -2806,6 +2885,22 @@ Physical board coordinate in the declared unit.
 | `state` | `"queued"`, `"running"`, `"cancelling"`, `"succeeded"`, `"failed"`, `"cancelled"`, `"timed_out"` | yes | `not declared` | — |
 | `trace_id` | string | yes | `not declared` | — |
 | `result` | [LegacyConversionResult](#schema-legacyconversionresult) or null | no | `not declared` | — |
+| `error` | [ErrorDetail](#schema-errordetail) or null | no | `not declared` | — |
+| `created_at` | string | yes | `not declared` | — |
+| `completed_at` | string or null | no | `not declared` | — |
+| `diagnostics` | object | no | `not declared` | — |
+
+<a id="schema-operationresponse-legacyv1conversionresult"></a>
+
+### OperationResponse_LegacyV1ConversionResult_
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `operation_id` | string | yes | `not declared` | — |
+| `operation` | string | yes | `not declared` | — |
+| `state` | `"queued"`, `"running"`, `"cancelling"`, `"succeeded"`, `"failed"`, `"cancelled"`, `"timed_out"` | yes | `not declared` | — |
+| `trace_id` | string | yes | `not declared` | — |
+| `result` | [LegacyV1ConversionResult](#schema-legacyv1conversionresult) or null | no | `not declared` | — |
 | `error` | [ErrorDetail](#schema-errordetail) or null | no | `not declared` | — |
 | `created_at` | string | yes | `not declared` | — |
 | `completed_at` | string or null | no | `not declared` | — |
@@ -4558,6 +4653,8 @@ NCC localization controls, angles clockwise and scales dimensionless.
 | `coarse_scale_step` | number | no | `0.1` | exclusiveMinimum: 0.0; maximum: 10.0 |
 | `pyramid_levels` | integer | no | `0` | minimum: 0.0; maximum: 8.0 |
 | `pyramid_max_template_size` | integer | no | `400` | minimum: 8.0; maximum: 32768.0 |
+| `fine_search_policy` | `"neighborhood"`, `"whole"` or null | no | `not declared` | — |
+| `fine_search_expand_px` | integer | no | `24` | minimum: 0.0; maximum: 4096.0 |
 
 <a id="schema-thresholdpreprocessing"></a>
 

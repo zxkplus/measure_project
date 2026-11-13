@@ -16,6 +16,12 @@ from measure_api.v2.legacy_conversion import (
     convert_legacy,
     prepare_conversion,
 )
+from measure_api.v2.legacy_v1 import (
+    LegacyV1ConversionRequest,
+    LegacyV1ConversionResult,
+    convert_v1_project,
+    prepare_v1_conversion,
+)
 from measure_api.v2.registry import Operation
 
 OPERATIONS = [
@@ -54,5 +60,14 @@ OPERATIONS = [
         "Convert supported legacy data without GUI or pickle",
         "recipes",
         prepare=prepare_conversion,
+    ),
+    Operation(
+        "/legacy-v1-project-conversions",
+        LegacyV1ConversionRequest,
+        LegacyV1ConversionResult,
+        convert_v1_project,
+        "Migrate a saved V1 API project into an executable V2 recipe",
+        "recipes",
+        prepare=prepare_v1_conversion,
     ),
 ]
