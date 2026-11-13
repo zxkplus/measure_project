@@ -97,10 +97,11 @@ class _RecordingToolPanel:
 
     def set_matching_params(self, preprocessor_type, score_threshold,
                             angle_range_half, max_matches, overlap=0.3,
-                            angle_step_deg=1.0):
+                            angle_step_deg=1.0, preprocessor=None):
         self.calls.append(("set_matching_params", preprocessor_type,
                            float(score_threshold), float(angle_range_half),
-                           int(max_matches), float(overlap), float(angle_step_deg)))
+                           int(max_matches), float(overlap), float(angle_step_deg),
+                           dict(preprocessor) if preprocessor else None))
 
     def get_alignment_mode(self):
         return "multi_point" if self._alignment_var.get() == "多点仿射" else "single_box"
@@ -352,13 +353,15 @@ class TestLoadProject:
 
         calls = [c for c in app.tool_panel.calls if c[0] == "set_matching_params"]
         assert len(calls) == 1
-        _, preproc, threshold, half_range, max_matches, overlap, step = calls[0]
+        _, preproc, threshold, half_range, max_matches, overlap, step, preproc_cfg = calls[0]
         assert preproc == "raw"
         assert threshold == pytest.approx(0.4)
         assert half_range == pytest.approx(25.0)   # range pair -> half range
         assert max_matches == 3
         assert overlap == pytest.approx(0.25)
         assert step == pytest.approx(1.5)
+        # The whole preprocessor config survives the round-trip, not just its type.
+        assert preproc_cfg["type"] == "raw"
 
     def test_roi_confirmed_flag_still_comes_from_project_json(self, tmp_path,
                                                              taught_workflow):
@@ -398,6 +401,51 @@ class TestLoadProject:
 # ---------------------------------------------------------------------------
 # Backwards compatibility with old project.json files
 # ---------------------------------------------------------------------------
+
+
+class TestPreprocessorConfigRoundTrip:
+    """The manifest's preprocessor block is more than its type string.
+
+    ``clip_limit`` (and the canny/sobel/threshold knobs) decide the template
+    pixels, so dropping them on load made a re-teach silently revert to the
+    built-in defaults.
+    """
+
+    def test_full_config_is_translated_for_the_widgets(self):
+        model = {
+            "matching": {
+                "match_score_threshold": 0.4,
+                "angle_range": [-20.0, 20.0],
+                "angle_step": 1.0,
+                "max_matches": 1,
+                "overlap": 0.2,
+            },
+            "alignment": {
+                "preprocessor": {
+                    "type": "clahe",
+                    "clip_limit": 4.0,
+                    "tile_grid_size": [4, 6],
+                }
+            },
+        }
+
+        translated = ProjectManager._matching_from_model(model)
+
+        assert translated["preprocessor_type"] == "clahe"
+        assert translated["preprocessor"] == {
+            "type": "clahe", "clip_limit": 4.0, "tile_grid_size": [4, 6],
+        }
+
+    def test_missing_preprocessor_block_yields_empty_config(self):
+        model = {
+            "matching": {"match_score_threshold": 0.3, "angle_range": [-10.0, 10.0]},
+            "alignment": {},
+        }
+
+        translated = ProjectManager._matching_from_model(model)
+
+        assert translated["preprocessor_type"] == "raw"
+        assert translated["preprocessor"] == {}
 
 
 class TestLegacyProjectCompatibility:

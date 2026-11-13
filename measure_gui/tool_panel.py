@@ -18,6 +18,12 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 
 from .dialogs import ComposedMeasureDialog
+from measure.preview import (
+    PREPROCESSOR_TYPES,
+    config_from_values,
+    default_configs,
+    describe_config,
+)
 
 
 class ToolPanel(ttk.Frame):
@@ -33,6 +39,7 @@ class ToolPanel(ttk.Frame):
         on_execute: () -> None
         on_preprocessor_changed: (name: str) -> None
         on_open_preprocessor_preview: () -> None
+        on_preprocessor_apply: (config: dict) -> None
         on_score_threshold_changed: (value: float) -> None
         on_angle_range_changed: (value: str) -> None  # '±30', '±45', '±90'
         on_max_matches_changed: (value: int) -> None
@@ -80,6 +87,7 @@ class ToolPanel(ttk.Frame):
         self.on_execute: Optional[Callable] = None
         self.on_preprocessor_changed: Optional[Callable] = None
         self.on_open_preprocessor_preview: Optional[Callable] = None
+        self.on_preprocessor_apply: Optional[Callable] = None
         self.on_score_threshold_changed: Optional[Callable] = None
         self.on_angle_range_changed: Optional[Callable] = None
         self.on_max_matches_changed: Optional[Callable] = None
@@ -188,16 +196,39 @@ class ToolPanel(ttk.Frame):
         preproc_row.pack(fill=tk.X, **pad)
         preproc_combo = ttk.Combobox(
             preproc_row, textvariable=self._preproc_var,
-            values=["raw", "canny", "sobel", "clahe", "threshold"],
+            values=list(PREPROCESSOR_TYPES),
             state="readonly", width=12,
         )
         preproc_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        preproc_combo.bind("<<ComboboxSelected>>",
-                          lambda e: self._fire(self.on_preprocessor_changed,
-                                              self._preproc_var.get()))
+        preproc_combo.bind("<<ComboboxSelected>>", lambda e: self._on_preproc_type_changed())
         ttk.Button(preproc_row, text="预览…", width=7,
                    command=lambda: self._fire(self.on_open_preprocessor_preview)
                    ).pack(side=tk.LEFT, padx=(4, 0))
+
+        # Preprocessor parameters.  These widgets are a *draft*: nothing takes
+        # effect until the operator presses "apply", because the values end up
+        # inside the model (they change the template pixels) and a silent edit
+        # here would invalidate an already-taught template without warning.
+        self._preproc_params_frame = ttk.Frame(self._template_form)
+        self._preproc_params_frame.pack(fill=tk.X, **pad)
+        self._preproc_vars: Dict[str, Any] = {}
+        self._preproc_labels: Dict[str, ttk.Label] = {}
+        self._preproc_drafts: Dict[str, Dict[str, Any]] = {
+            cfg["type"]: dict(cfg) for cfg in default_configs()
+        }
+        self._preproc_committed: Dict[str, Any] = dict(default_configs()[0])
+        self._preproc_status = tk.StringVar(value="")
+
+        apply_row = ttk.Frame(self._template_form)
+        apply_row.pack(fill=tk.X, **pad)
+        self._preproc_apply_btn = ttk.Button(
+            apply_row, text="应用预处理参数", command=self._on_apply_preprocessor,
+        )
+        self._preproc_apply_btn.pack(fill=tk.X)
+        ttk.Label(apply_row, textvariable=self._preproc_status,
+                  wraplength=285, foreground="#8a4b00").pack(anchor=tk.W)
+
+        self._build_preproc_params()
 
         # Match score threshold
         ttk.Label(self._template_form, text="匹配分数阈值").pack(anchor=tk.W, **pad)
@@ -529,12 +560,140 @@ class ToolPanel(ttk.Frame):
         if self.on_tool_visibility_changed:
             self.on_tool_visibility_changed(iid, not current)
 
+    # ------------------------------------------------------------------
+    # Preprocessing parameters (draft -> explicit apply)
+    # ------------------------------------------------------------------
+
+    def _on_preproc_type_changed(self) -> None:
+        """Show the new type's parameters; the committed config is now stale."""
+        self._build_preproc_params()
+        self._mark_preproc_dirty(
+            "预处理类型已切换，点击「应用预处理参数」保存"
+        )
+        self._fire(self.on_preprocessor_changed, self._preproc_var.get())
+
+    def _build_preproc_params(self) -> None:
+        """Rebuild the parameter widgets for the selected type."""
+        for child in self._preproc_params_frame.winfo_children():
+            child.destroy()
+        self._preproc_vars.clear()
+        self._preproc_labels.clear()
+
+        kind = self._preproc_var.get()
+        config = self._preproc_drafts.get(kind, {"type": kind})
+
+        if kind == "raw":
+            ttk.Label(self._preproc_params_frame, text="无参数").pack(anchor=tk.W)
+        elif kind == "canny":
+            self._add_preproc_float("t1", "低阈值", 0.0, 255.0,
+                                    float(config.get("t1", 50.0)))
+            self._add_preproc_float("t2", "高阈值", 0.0, 255.0,
+                                    float(config.get("t2", 150.0)))
+        elif kind == "sobel":
+            self._add_preproc_choice("ksize", "核大小", ["1", "3", "5", "7"],
+                                     str(config.get("ksize", 3)))
+        elif kind == "clahe":
+            self._add_preproc_float("clip_limit", "clip_limit", 0.5, 40.0,
+                                    float(config.get("clip_limit", 2.0)))
+            tile = list(config.get("tile_grid_size", [8, 8]))
+            self._add_preproc_int("tile_x", "tile 宽", 2, 16, int(tile[0]))
+            self._add_preproc_int("tile_y", "tile 高", 2, 16, int(tile[1]))
+        elif kind == "threshold":
+            self._add_preproc_float("threshold", "阈值", 0.0, 255.0,
+                                    float(config.get("threshold", 128.0)))
+            self._add_preproc_choice("mode", "模式", ["binary", "binary_inv"],
+                                     str(config.get("mode", "binary")))
+
+        for key, var in self._preproc_vars.items():
+            # trace callbacks receive (name, index, mode); drop them.
+            var.trace_add("write", lambda *_args: self._mark_preproc_dirty())
+            label = self._preproc_labels.get(key)
+            if label is not None:
+                var.trace_add(
+                    "write",
+                    lambda *_a, v=var, lb=label: lb.config(
+                        text=f"{float(v.get()):.2f}"),
+                )
+
+    def _preproc_row(self, label: str) -> tk.Frame:
+        row = ttk.Frame(self._preproc_params_frame)
+        row.pack(fill=tk.X, pady=1)
+        ttk.Label(row, text=label, width=10).pack(side=tk.LEFT)
+        return row
+
+    def _add_preproc_float(self, key: str, label: str, lo: float, hi: float,
+                           value: float) -> None:
+        row = self._preproc_row(label)
+        value_label = ttk.Label(row, width=6)
+        value_label.pack(side=tk.RIGHT)
+        var = tk.DoubleVar(value=value)
+        self._preproc_vars[key] = var
+        self._preproc_labels[key] = value_label
+
+        def _on_move(raw: str) -> None:
+            value_label.config(text=f"{float(raw):.2f}")
+
+        ttk.Scale(row, from_=lo, to=hi, variable=var, orient=tk.HORIZONTAL,
+                  command=_on_move).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        value_label.config(text=f"{value:.2f}")
+
+    def _add_preproc_int(self, key: str, label: str, lo: int, hi: int,
+                         value: int) -> None:
+        row = self._preproc_row(label)
+        var = tk.IntVar(value=value)
+        self._preproc_vars[key] = var
+        ttk.Spinbox(row, from_=lo, to=hi, width=5,
+                    textvariable=var).pack(side=tk.LEFT)
+
+    def _add_preproc_choice(self, key: str, label: str, values: List[str],
+                            value: str) -> None:
+        row = self._preproc_row(label)
+        var = tk.StringVar(value=value)
+        self._preproc_vars[key] = var
+        ttk.Combobox(row, textvariable=var, values=values, state="readonly",
+                     width=10).pack(side=tk.LEFT)
+
+    def _mark_preproc_dirty(self, message: str = "") -> None:
+        self._preproc_status.set(
+            message or "参数已修改，点击「应用预处理参数」保存"
+        )
+
+    def _current_preproc_config(self) -> Dict[str, Any]:
+        """Assemble the draft config from the current widgets."""
+        values = {key: var.get() for key, var in self._preproc_vars.items()}
+        return config_from_values(self._preproc_var.get(), values)
+
+    def _on_apply_preprocessor(self) -> None:
+        """Commit the draft parameters as the config the next teach will use."""
+        config = self._current_preproc_config()
+        self._preproc_drafts[config["type"]] = dict(config)
+        self._preproc_committed = dict(config)
+        self._preproc_status.set(f"已应用：{describe_config(config)}")
+        self._fire(self.on_preprocessor_apply, dict(config))
+
+    def apply_preprocessor_config(self, config: Dict[str, Any]) -> None:
+        """Restore a committed config (project load) into widgets and state."""
+        kind = config.get("type", "raw")
+        if kind not in PREPROCESSOR_TYPES:
+            kind = "raw"
+            config = {"type": "raw"}
+        self._preproc_drafts[kind] = dict(config)
+        self._preproc_committed = dict(config)
+        self._preproc_var.set(kind)
+        self._build_preproc_params()
+        self._preproc_status.set("")
+
+    def get_preprocessor_config(self) -> Dict[str, Any]:
+        """The committed preprocessor config (what the next teach will use)."""
+        return dict(self._preproc_committed)
+
     def set_matching_params(self, preprocessor_type: str,
                             score_threshold: float,
                             angle_range_half: float,
                             max_matches: int,
                             overlap: float = 0.3,
-                            angle_step_deg: float = 1.0):
+                            angle_step_deg: float = 1.0,
+                            preprocessor: Optional[Dict[str, Any]] = None):
         """Set matching parameter widgets programmatically (for project restore).
 
         Args:
@@ -544,8 +703,20 @@ class ToolPanel(ttk.Frame):
             max_matches: Max number of matches (0 = unlimited).
             overlap: Max allowed IoU overlap in [0, 1] (default 0.3).
             angle_step_deg: Angle step in degrees (default 1.0).
+            preprocessor: Full serialized config from the model manifest. When
+                given, its parameters (clip_limit, thresholds, ...) are restored
+                too; ``preprocessor_type`` alone cannot carry them, which used
+                to make a re-taught template silently revert to the defaults.
         """
-        self._preproc_var.set(preprocessor_type)
+        if preprocessor:
+            self.apply_preprocessor_config(dict(preprocessor))
+        else:
+            # Legacy/partial callers know only the type; commit that type's
+            # built-in defaults so the committed config never disagrees with the
+            # widgets shown to the operator.
+            self._preproc_var.set(preprocessor_type)
+            self._build_preproc_params()
+            self._preproc_committed = self._current_preproc_config()
         self._score_var.set(score_threshold)
         self._angle_var.set(f"±{int(angle_range_half)}°")
         self._max_matches_var.set(max_matches)

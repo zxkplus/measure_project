@@ -360,6 +360,7 @@ class ProjectManager:
                     matching["max_matches"],
                     overlap=matching["overlap"],
                     angle_step_deg=matching["angle_step_deg"],
+                    preprocessor=matching.get("preprocessor"),
                 )
         
             # Restore inspection image if available
@@ -571,6 +572,9 @@ class ProjectManager:
         preprocessor = (model.get("alignment") or {}).get("preprocessor") or {}
         return {
             "preprocessor_type": preprocessor.get("type", "raw"),
+            # The full config, not just the type: clip_limit and thresholds live
+            # here, and dropping them made a re-teach quietly revert to defaults.
+            "preprocessor": dict(preprocessor),
             "match_score_threshold": float(matching.get("match_score_threshold", 0.5)),
             "angle_range_half": max(abs(float(v)) for v in angle_range),
             "angle_step_deg": float(matching.get("angle_step", 1.0)),

@@ -36,7 +36,9 @@ __all__ = [
     "PREPROCESSOR_TYPES",
     "PreviewColumn",
     "PreviewResult",
+    "config_from_values",
     "default_configs",
+    "describe_config",
     "needs_normalization",
     "preview_matrix",
     "preview_pair",
@@ -92,6 +94,81 @@ def default_configs() -> List[Dict[str, Any]]:
         {"type": "clahe", "clip_limit": 2.0, "tile_grid_size": [8, 8]},
         {"type": "threshold", "threshold": 128.0, "mode": "binary"},
     ]
+
+
+def config_from_values(kind: str, values: Dict[str, Any]) -> Dict[str, Any]:
+    """Assemble a serialized preprocessor config from raw widget values.
+
+    The GUI keeps one variable per parameter knob; this is the single place
+    that turns those knobs into the dict the engine's ``serialize()`` produces,
+    so the tool panel and the preview dialog cannot drift apart.
+
+    Args:
+        kind: One of :data:`PREPROCESSOR_TYPES`.
+        values: Widget values keyed by parameter name (``t1``, ``t2``,
+            ``ksize``, ``clip_limit``, ``tile_x``, ``tile_y``, ``threshold``,
+            ``mode``). Missing keys fall back to the built-in defaults.
+
+    Returns:
+        A config dict accepted by
+        :func:`measure.measure_template.preprocessor_from_config`.
+
+    Raises:
+        ValueError: When ``kind`` is not a built-in preprocessor type.
+    """
+    defaults = {cfg["type"]: cfg for cfg in default_configs()}
+    if kind not in defaults:
+        raise ValueError(f"Unknown preprocessor type: {kind!r}")
+
+    base = dict(defaults[kind])
+    if kind == "raw":
+        return base
+    if kind == "canny":
+        return {"type": "canny",
+                "t1": float(values.get("t1", base["t1"])),
+                "t2": float(values.get("t2", base["t2"]))}
+    if kind == "sobel":
+        return {"type": "sobel", "ksize": int(values.get("ksize", base["ksize"]))}
+    if kind == "clahe":
+        tile = list(base["tile_grid_size"])
+        return {
+            "type": "clahe",
+            "clip_limit": float(values.get("clip_limit", base["clip_limit"])),
+            "tile_grid_size": [
+                max(2, int(values.get("tile_x", tile[0]))),
+                max(2, int(values.get("tile_y", tile[1]))),
+            ],
+        }
+    return {
+        "type": "threshold",
+        "threshold": float(values.get("threshold", base["threshold"])),
+        "mode": str(values.get("mode", base["mode"])),
+    }
+
+
+def describe_config(config: Dict[str, Any]) -> str:
+    """One-line human summary of a serialized preprocessor config.
+
+    Args:
+        config: Config dict as produced by
+            :func:`measure.measure_template.Preprocessor.serialize`.
+
+    Returns:
+        A short label such as ``"clahe clip=2 tile=8×8"``.
+    """
+    kind = config.get("type", "raw")
+    if kind == "canny":
+        return f"canny {config.get('t1', 0):.0f}/{config.get('t2', 0):.0f}"
+    if kind == "sobel":
+        return f"sobel k={config.get('ksize', 3)}"
+    if kind == "clahe":
+        tile = list(config.get("tile_grid_size") or [8, 8])
+        return (f"clahe clip={float(config.get('clip_limit', 2.0)):g}"
+                f" tile={tile[0]}×{tile[1]}")
+    if kind == "threshold":
+        return (f"threshold {float(config.get('threshold', 128)):.0f}"
+                f" {config.get('mode', 'binary')}")
+    return "raw"
 
 
 def needs_normalization(image: np.ndarray) -> bool:

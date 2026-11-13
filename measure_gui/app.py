@@ -104,6 +104,12 @@ class MeasureApp:
         self._preview_dialog: Optional[PreprocessorPreviewDialog] = None
         self._show_enhanced: bool = False
 
+        # Preprocessor configuration the next teach and the enhanced display
+        # use.  The tool panel keeps an editable *draft*; only an explicit
+        # "apply" moves it here, because the parameters decide the template
+        # pixels and a silent edit would invalidate a taught template.
+        self._preprocessor_config: Dict[str, Any] = {"type": "raw"}
+
         # File path tracking
         self._reference_image_path: Optional[str] = None
         self._inspection_image_path: Optional[str] = None
@@ -221,6 +227,7 @@ class MeasureApp:
         self.tool_panel.on_execute = self._execute
         self.tool_panel.on_preprocessor_changed = self._on_preprocessor_changed
         self.tool_panel.on_open_preprocessor_preview = self._open_preprocessor_preview
+        self.tool_panel.on_preprocessor_apply = self._on_preprocessor_apply
         self.tool_panel.on_score_threshold_changed = self._on_score_threshold_changed
         self.tool_panel.on_angle_range_changed = self._on_angle_range_changed
         self.tool_panel.on_max_matches_changed = self._on_max_matches_changed
@@ -462,6 +469,9 @@ class MeasureApp:
             if os.path.exists(manifest_path):
                 # Full project load
                 ProjectManager.load_project(parent_dir, self)
+                # The manifest carries the taught preprocessor parameters; adopt
+                # them so a re-teach does not silently revert to the defaults.
+                self._preprocessor_config = self.tool_panel.get_preprocessor_config()
                 self._rebuild_recent_menu()
             else:
                 # Legacy .npz — prompt for migration
@@ -563,6 +573,8 @@ class MeasureApp:
         self._inspection_image = None
         self._reference_image_path = None
         self._inspection_image_path = None
+        self._preprocessor_config = {"type": "raw"}
+        self.tool_panel.apply_preprocessor_config({"type": "raw"})
         self._ref_canvas.reset_roi()
         self.template_view.clear_tools()
         self.tool_panel.clear_tool_list()
@@ -1374,24 +1386,9 @@ class MeasureApp:
         if self._workflow is None:
             self._workflow = MultiTargetWorkflow()
 
-        # Apply preprocessor selection
-        from measure.measure_template import (
-            CannyPreprocessor,
-            CLAHEPreprocessor,
-            RawPreprocessor,
-            SobelPreprocessor,
-            ThresholdPreprocessor,
-        )
-
-        preproc_map = {
-            "raw": RawPreprocessor(),
-            "canny": CannyPreprocessor(50.0, 150.0),
-            "sobel": SobelPreprocessor(3),
-            "clahe": CLAHEPreprocessor(2.0),
-            "threshold": ThresholdPreprocessor(128.0),
-        }
-        preproc_name = self.tool_panel._preproc_var.get()
-        preprocessor = preproc_map.get(preproc_name, RawPreprocessor())
+        # Apply the applied preprocessor config (parameters included, not just the
+        # type -- the parameters decide the template pixels).
+        preprocessor = self._build_display_and_teach_preprocessor()
 
         # Set alignment strategy based on mode.
         #
@@ -1462,6 +1459,9 @@ class MeasureApp:
         self._refresh_display_if_enhanced()
 
         # Popup notification
+        from measure.preview import describe_config
+
+        preproc_name = describe_config(self._preprocessor_config)
         messagebox.showinfo(
             "模板创建完成",
             f"模板已成功创建！\n\n"
@@ -1627,6 +1627,27 @@ class MeasureApp:
     # Preprocessing preview
     # ------------------------------------------------------------------
 
+    def _on_preprocessor_apply(self, config: Dict[str, Any]) -> None:
+        """Commit the tool panel's drafted preprocessor config.
+
+        Saving here does not rebuild the template on its own: re-teaching would
+        discard the measurement tools, and the operator asked for an explicit
+        save, not an implicit one.  The model picks the config up the next time
+        a template is created, and a taught model saves it into the manifest.
+        """
+        self._preprocessor_config = dict(config)
+        taught = (self._workflow is not None
+                  and bool(getattr(self._workflow, "is_taught", False)))
+        if taught:
+            self._status_text.set(
+                "预处理参数已保存；重新创建模板后生效（当前模板仍用旧参数）"
+            )
+        else:
+            self._status_text.set("预处理参数已保存；创建模板时生效")
+        if self._preview_dialog is not None and self._preview_dialog.winfo_exists():
+            self._preview_dialog.set_committed(dict(config))
+        self._refresh_display_if_enhanced()
+
     def _preview_template_patch(self) -> Optional[np.ndarray]:
         """The straightened template patch the preview should show, if any."""
         if self._workflow is None:
@@ -1662,6 +1683,7 @@ class MeasureApp:
             template_patch=patch,
             inspection_image=self._inspection_image,
             initial_type=initial,
+            initial_config=dict(self._preprocessor_config),
         )
 
     def _on_show_enhanced_toggled(self) -> None:
@@ -1678,29 +1700,23 @@ class MeasureApp:
                 self._preview_template_patch(), self._inspection_image
             )
 
+    def _build_display_and_teach_preprocessor(self):
+        """Instantiate the applied preprocessor config.
+
+        Single source for the "enhanced display" and the teach paths, so the
+        preview, the canvas and the saved model all use the same parameters.
+        """
+        from measure.measure_template import preprocessor_from_config
+
+        return preprocessor_from_config(dict(self._preprocessor_config))
+
     def _display_preprocessor(self):
         """Build the preprocessor the main window display is currently using."""
-        from measure.measure_template import (
-            CannyPreprocessor,
-            CLAHEPreprocessor,
-            RawPreprocessor,
-            SobelPreprocessor,
-            ThresholdPreprocessor,
-        )
+        from measure.measure_template import RawPreprocessor
 
         if not self._show_enhanced:
             return RawPreprocessor()
-
-        preproc_map = {
-            "raw": RawPreprocessor,
-            "canny": lambda: CannyPreprocessor(50.0, 150.0),
-            "sobel": lambda: SobelPreprocessor(3),
-            "clahe": lambda: CLAHEPreprocessor(2.0),
-            "threshold": lambda: ThresholdPreprocessor(128.0),
-        }
-        name = self.tool_panel._preproc_var.get()
-        factory = preproc_map.get(name, RawPreprocessor)
-        return factory()
+        return self._build_display_and_teach_preprocessor()
 
     def _apply_display_preprocessing(self) -> None:
         """Re-render the template view and canvases with (or without) enhancement.
@@ -1774,18 +1790,7 @@ class MeasureApp:
         if self._workflow is None:
             self._workflow = MultiTargetWorkflow()
 
-        from measure.measure_template import (
-            CannyPreprocessor, CLAHEPreprocessor, RawPreprocessor,
-            SobelPreprocessor, ThresholdPreprocessor,
-        )
-        preproc_map = {
-            "raw": RawPreprocessor(), "canny": CannyPreprocessor(50.0, 150.0),
-            "sobel": SobelPreprocessor(3), "clahe": CLAHEPreprocessor(2.0),
-            "threshold": ThresholdPreprocessor(128.0),
-        }
-        preprocessor = preproc_map.get(
-            self.tool_panel._preproc_var.get(), RawPreprocessor()
-        )
+        preprocessor = self._build_display_and_teach_preprocessor()
 
         alignment.teach(self._reference_image, preprocessor)
         self._workflow.alignment = alignment

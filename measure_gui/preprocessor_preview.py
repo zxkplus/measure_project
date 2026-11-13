@@ -19,6 +19,7 @@ from measure.measure_template import preprocessor_from_config
 from measure.preview import (
     PREPROCESSOR_TYPES,
     PreviewColumn,
+    config_from_values,
     default_configs,
     preview_matrix,
     preview_pair,
@@ -191,6 +192,7 @@ class PreprocessorPreviewDialog(tk.Toplevel):
         template_patch: Optional[np.ndarray] = None,
         inspection_image: Optional[np.ndarray] = None,
         initial_type: str = "raw",
+        initial_config: Optional[Dict[str, Any]] = None,
         on_type_changed: Optional[Any] = None,
     ) -> None:
         super().__init__(parent)
@@ -206,6 +208,9 @@ class PreprocessorPreviewDialog(tk.Toplevel):
         self._configs: Dict[str, Dict[str, Any]] = {
             cfg["type"]: dict(cfg) for cfg in default_configs()
         }
+        if initial_config and initial_config.get("type") in PREPROCESSOR_TYPES:
+            self._configs[initial_config["type"]] = dict(initial_config)
+            initial_type = initial_config["type"]
         self._vars: Dict[str, Any] = {}
         self._views: Dict[str, _ImageView] = {}
         self._after_id: Optional[str] = None
@@ -369,25 +374,23 @@ class PreprocessorPreviewDialog(tk.Toplevel):
 
     def _current_config(self) -> Dict[str, Any]:
         kind = self._type_var.get()
-        if kind == "raw":
-            return {"type": "raw"}
-        if kind == "canny":
-            return {"type": "canny", "t1": float(self._vars["t1"].get()),
-                    "t2": float(self._vars["t2"].get())}
-        if kind == "sobel":
-            return {"type": "sobel", "ksize": int(self._vars["ksize"].get())}
-        if kind == "clahe":
-            return {
-                "type": "clahe",
-                "clip_limit": float(self._vars["clip_limit"].get()),
-                "tile_grid_size": [max(2, int(self._vars["tile_x"].get())),
-                                   max(2, int(self._vars["tile_y"].get()))],
-            }
-        if kind == "threshold":
-            return {"type": "threshold",
-                    "threshold": float(self._vars["threshold"].get()),
-                    "mode": str(self._vars["mode"].get())}
-        return {"type": kind}
+        values = {key: var.get() for key, var in self._vars.items()}
+        return config_from_values(kind, values)
+
+    def set_committed(self, config: Dict[str, Any]) -> None:
+        """Adopt the config the main window just applied.
+
+        Keeps the preview aligned with what would actually be taught, without
+        writing anything back.
+        """
+        kind = config.get("type")
+        if kind not in PREPROCESSOR_TYPES:
+            return
+        self._configs[kind] = dict(config)
+        if self._type_var.get() != kind:
+            self._type_var.set(kind)
+        self._build_param_controls()
+        self._schedule_refresh()
 
     def _schedule_refresh(self) -> None:
         if self._after_id is not None:
