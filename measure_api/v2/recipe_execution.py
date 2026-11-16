@@ -34,6 +34,7 @@ from measure_api.v2.recipe_models import (
     BatchOutcome,
 )
 from measure_api.v2.registry import CalculationContext
+from measure_api.v2.timing import span, timed
 from measure_api.v2.versions import runtime_identity
 
 
@@ -270,6 +271,7 @@ def execute_nodes(
     image: FileReference,
     context: CalculationContext,
     mapper: Optional[SampleMapper] = None,
+    target_id: str = "",
 ) -> List[NodeOutcome]:
     """Execute deterministic dependencies with fresh outcomes scoped to one target.
 
@@ -281,6 +283,7 @@ def execute_nodes(
         context: Isolated operation identity, resource limits and verified shared-file
             access.
         mapper: Optional mapping chain for recovering samples before pixel/physical fitting.
+        target_id: Current target identity retained in operation timing.
 
     Returns:
         Fresh ordered node outcomes with separate pixel and physical observations.
@@ -290,93 +293,97 @@ def execute_nodes(
     for identity in order:
         node = nodes[identity]
         operation = lookup(node.operation)
-        try:
-            values = dict(node.parameters)
-            if "image" in operation.request_model.model_fields:
-                values["image"] = image
-                values["frame"] = recipe.source_frame
-            for name, supplied in node.inputs.items():
-                resolved = [
-                    read_port(
-                        outcomes[binding.node], binding, lookup(nodes[binding.node].operation)
-                    )
-                    for binding in bindings(supplied)
-                ]
-                values[name] = resolved if isinstance(supplied, list) else resolved[0]
-            request = operation.request_model.model_validate(values)
-            data = operation.result_model.model_validate(operation.execute(request, context))
-            dumped = data.model_dump(mode="json")
-            pixel, physical = dumped, None
-            if mapper is not None and "image" in operation.request_model.model_fields:
-                pixel = mapper.convert(dumped, operation.operation_id)
-                if mapper.asset is not None:
-                    physical = mapper.convert(dumped, operation.operation_id, True)
-            explicit_physical = node.space == "physical" or any(
-                b.space == "physical" for value in node.inputs.values() for b in bindings(value)
-            )
-            if explicit_physical and "image" not in operation.request_model.model_fields:
-                pixel, physical = None, dumped
-            elif mapper is not None and mapper.asset is not None and node.inputs:
-                physical_values = dict(node.parameters)
+        with span(node.operation, "node", node_id=identity, target_id=target_id, space=node.space) as node_timing:
+            try:
+                values = dict(node.parameters)
+                if "image" in operation.request_model.model_fields:
+                    values["image"] = image
+                    values["frame"] = recipe.source_frame
                 for name, supplied in node.inputs.items():
                     resolved = [
                         read_port(
-                            outcomes[b.node],
-                            b.model_copy(update={"space": "physical"}),
-                            lookup(nodes[b.node].operation),
+                            outcomes[binding.node], binding, lookup(nodes[binding.node].operation)
                         )
-                        for b in bindings(supplied)
+                        for binding in bindings(supplied)
                     ]
-                    physical_values[name] = resolved if isinstance(supplied, list) else resolved[0]
-                if operation.family == "evaluations":
-                    if node.parameters.get("unit", "px") != mapper.asset.unit:
-                        physical_values = None
-                if physical_values is not None:
-                    child = operation.request_model.model_validate(physical_values)
-                    physical = operation.result_model.model_validate(
-                        operation.execute(child, context)
-                    ).model_dump(mode="json")
-            authoritative = physical if explicit_physical else pixel
-            outcomes[identity] = NodeOutcome(
-                id=identity,
-                operation=operation.operation_id,
-                state="succeeded",
-                valid=authoritative.get("valid", True),
-                result=authoritative,
-                pixel_result=pixel,
-                physical_result=physical,
-            )
-        except Exception as error:
-            blocked = any(
-                outcomes[b.node].state != "succeeded"
-                for supplied in node.inputs.values()
-                for b in bindings(supplied)
-            )
-            invalid = {
-                "valid": False,
-                "reason": "failed_dependency" if blocked else str(error),
-                "frame": recipe.source_frame,
-                "unit": "px",
-            }
-            physical_invalid = None
-            if mapper is not None and mapper.asset is not None:
-                physical_invalid = {
-                    **invalid,
-                    "frame": recipe.metric.physical_frame,
-                    "unit": mapper.asset.unit,
+                    values[name] = resolved if isinstance(supplied, list) else resolved[0]
+                request = operation.request_model.model_validate(values)
+                data = operation.result_model.model_validate(operation.execute(request, context))
+                dumped = data.model_dump(mode="json")
+                pixel, physical = dumped, None
+                if mapper is not None and "image" in operation.request_model.model_fields:
+                    pixel = mapper.convert(dumped, operation.operation_id)
+                    if mapper.asset is not None:
+                        physical = mapper.convert(dumped, operation.operation_id, True)
+                explicit_physical = node.space == "physical" or any(
+                    b.space == "physical" for value in node.inputs.values() for b in bindings(value)
+                )
+                if explicit_physical and "image" not in operation.request_model.model_fields:
+                    pixel, physical = None, dumped
+                elif mapper is not None and mapper.asset is not None and node.inputs:
+                    physical_values = dict(node.parameters)
+                    for name, supplied in node.inputs.items():
+                        resolved = [
+                            read_port(
+                                outcomes[b.node],
+                                b.model_copy(update={"space": "physical"}),
+                                lookup(nodes[b.node].operation),
+                            )
+                            for b in bindings(supplied)
+                        ]
+                        physical_values[name] = resolved if isinstance(supplied, list) else resolved[0]
+                    if operation.family == "evaluations":
+                        if node.parameters.get("unit", "px") != mapper.asset.unit:
+                            physical_values = None
+                    if physical_values is not None:
+                        child = operation.request_model.model_validate(physical_values)
+                        with span(node.operation, node_id=identity, space="physical"):
+                            physical = operation.result_model.model_validate(
+                                operation.execute(child, context)
+                            ).model_dump(mode="json")
+                authoritative = physical if explicit_physical else pixel
+                outcomes[identity] = NodeOutcome(
+                    id=identity,
+                    operation=operation.operation_id,
+                    state="succeeded",
+                    valid=authoritative.get("valid", True),
+                    result=authoritative,
+                    pixel_result=pixel,
+                    physical_result=physical,
+                )
+            except Exception as error:
+                node_timing["node_state"] = "failed"
+                blocked = any(
+                    outcomes[b.node].state != "succeeded"
+                    for supplied in node.inputs.values()
+                    for b in bindings(supplied)
+                )
+                invalid = {
+                    "valid": False,
+                    "reason": "failed_dependency" if blocked else str(error),
+                    "frame": recipe.source_frame,
+                    "unit": "px",
                 }
-            outcomes[identity] = NodeOutcome(
-                id=identity,
-                operation=operation.operation_id,
-                state="blocked" if blocked else "failed",
-                valid=False,
-                pixel_result=invalid,
-                physical_result=physical_invalid,
-                error={"code": getattr(error, "code", "recipe.node_failed"), "message": str(error)},
-            )
+                physical_invalid = None
+                if mapper is not None and mapper.asset is not None:
+                    physical_invalid = {
+                        **invalid,
+                        "frame": recipe.metric.physical_frame,
+                        "unit": mapper.asset.unit,
+                    }
+                outcomes[identity] = NodeOutcome(
+                    id=identity,
+                    operation=operation.operation_id,
+                    state="blocked" if blocked else "failed",
+                    valid=False,
+                    pixel_result=invalid,
+                    physical_result=physical_invalid,
+                    error={"code": getattr(error, "code", "recipe.node_failed"), "message": str(error)},
+                )
     return list(outcomes.values())
 
 
+@timed("image_stages")
 def execute_stages(
     recipe: Recipe,
     image: FileReference,
@@ -464,6 +471,7 @@ def execute_stages(
     return current, active, inverse, canvas, inverse_chain, provenance, sources, payloads
 
 
+@timed("localization")
 def localized_targets(recipe: Recipe, image: FileReference, context: CalculationContext) -> list:
     """Return only target-local poses; absence remains an explicit no_targets outcome.
 
@@ -493,6 +501,7 @@ def localized_targets(recipe: Recipe, image: FileReference, context: Calculation
     return [(None, np.eye(3))]
 
 
+@timed("target_alignment")
 def align_target(
     recipe: Recipe,
     image: FileReference,
@@ -570,6 +579,7 @@ def align_target(
     return result.image, child, np.array(result.metric_mapping.matrix), result
 
 
+@timed("output_evaluation")
 def target_summary(recipe: Recipe, nodes: List[NodeOutcome], preview: bool) -> tuple:
     by_id = {node.id: node for node in nodes}
     valid = all(
@@ -668,68 +678,69 @@ def execute_run(request: RunRequest, context: CalculationContext) -> RunResult:
     for index, (matched, mapping) in enumerate(targets):
         target_started = time.monotonic()
         identity = "target-" + str(index + 1)
-        try:
-            target_image, target_context, metric_matrix, alignment = align_target(
-                recipe, image, mapping, active, prefix + "-" + identity
-            )
-            if target_image is None:
+        with span("target", "target", target_id=identity):
+            try:
+                target_image, target_context, metric_matrix, alignment = align_target(
+                    recipe, image, mapping, active, prefix + "-" + identity
+                )
+                if target_image is None:
+                    results.append(
+                        TargetOutcome(
+                            target_id=identity,
+                            valid=False,
+                            evaluation_status="not_evaluated",
+                            reason=alignment.reason,
+                            alignment={
+                                "valid": False,
+                                "controls": [c.model_dump() for c in alignment.controls],
+                            },
+                        )
+                    )
+                    continue
+                mapper = SampleMapper(recipe, target_context, metric_matrix, inverse, canvas)
+                nodes = execute_nodes(recipe, order, target_image, target_context, mapper, identity)
+                valid, conformity = target_summary(recipe, nodes, preview)
+                diagnostic = None
+                if alignment is not None:
+                    diagnostic = {
+                        "valid": alignment.valid,
+                        "used_fallback": alignment.used_fallback,
+                        "controls": [c.model_dump(mode="json") for c in alignment.controls],
+                        "correction": (
+                            alignment.correction.model_dump(mode="json")
+                            if alignment.correction
+                            else None
+                        ),
+                    }
+                metric_mapping = public_mapping(metric_matrix, "aligned")
+                localization = None
+                if matched is not None:
+                    frame = provenance[-1]["metadata"]["frame"] if provenance else recipe.source_frame
+                    matched["mapping"]["destination_frame"] = frame
+                    matched["support_mapping"]["destination_frame"] = frame
+                    localization = {"frame": frame, "match": matched}
+                results.append(
+                    TargetOutcome(
+                        target_id=identity,
+                        valid=valid,
+                        evaluation_status=conformity,
+                        nodes=nodes,
+                        mapping=public_mapping(mapping, "reference") if matched is not None else None,
+                        localization=localization,
+                        metric_mapping=metric_mapping,
+                        physical_mapping=mapper.physical_mapping(),
+                        alignment=diagnostic,
+                    )
+                )
+            except Exception as error:
                 results.append(
                     TargetOutcome(
                         target_id=identity,
                         valid=False,
                         evaluation_status="not_evaluated",
-                        reason=alignment.reason,
-                        alignment={
-                            "valid": False,
-                            "controls": [c.model_dump() for c in alignment.controls],
-                        },
+                        reason=str(error),
                     )
                 )
-                continue
-            mapper = SampleMapper(recipe, target_context, metric_matrix, inverse, canvas)
-            nodes = execute_nodes(recipe, order, target_image, target_context, mapper)
-            valid, conformity = target_summary(recipe, nodes, preview)
-            diagnostic = None
-            if alignment is not None:
-                diagnostic = {
-                    "valid": alignment.valid,
-                    "used_fallback": alignment.used_fallback,
-                    "controls": [c.model_dump(mode="json") for c in alignment.controls],
-                    "correction": (
-                        alignment.correction.model_dump(mode="json")
-                        if alignment.correction
-                        else None
-                    ),
-                }
-            metric_mapping = public_mapping(metric_matrix, "aligned")
-            localization = None
-            if matched is not None:
-                frame = provenance[-1]["metadata"]["frame"] if provenance else recipe.source_frame
-                matched["mapping"]["destination_frame"] = frame
-                matched["support_mapping"]["destination_frame"] = frame
-                localization = {"frame": frame, "match": matched}
-            results.append(
-                TargetOutcome(
-                    target_id=identity,
-                    valid=valid,
-                    evaluation_status=conformity,
-                    nodes=nodes,
-                    mapping=public_mapping(mapping, "reference") if matched is not None else None,
-                    localization=localization,
-                    metric_mapping=metric_mapping,
-                    physical_mapping=mapper.physical_mapping(),
-                    alignment=diagnostic,
-                )
-            )
-        except Exception as error:
-            results.append(
-                TargetOutcome(
-                    target_id=identity,
-                    valid=False,
-                    evaluation_status="not_evaluated",
-                    reason=str(error),
-                )
-            )
         timings[identity + "_ms"] = (time.monotonic() - target_started) * 1000
     count = len(results)
     policy = recipe.target_policy

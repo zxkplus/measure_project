@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from measure_api.v2.timing import timed, span
+
 import hashlib
 import io
 import struct
@@ -99,6 +101,7 @@ class SharedFiles:
                 raise ServiceError("file.output_forbidden", "Shared root does not permit outputs")
         return candidate
 
+    @timed("file_read_verify")
     def read_bytes(self, reference: FileReference) -> Tuple[bytes, FileReference]:
         """Read and hash one stable input, detecting rewritten or unsupported files.
 
@@ -136,6 +139,7 @@ class SharedFiles:
         self.cache_stats["verified_bytes"] += len(data)
         return data, reference.model_copy(update={"sha256": digest})
 
+    @timed("image_decode_cache")
     def read_image(self, reference: FileReference) -> Tuple[np.ndarray, FileReference]:
         """Decode only supported 8-bit gray or three-channel PNG/JPEG images.
 
@@ -175,6 +179,7 @@ class SharedFiles:
             raise ServiceError("image.too_large", "Image exceeds configured pixel limit")
         return self.image_cache.put(key, image), verified
 
+    @timed("grayscale")
     def read_gray(self, reference: FileReference) -> np.ndarray:
         """Reuse a task-local grayscale array after rechecking the input content."""
         image, verified = self.read_image(reference)
@@ -367,6 +372,7 @@ class ArtifactWriter:
         self.output = output
         self.operation_id = operation_id
 
+    @timed("artifacts_commit")
     def commit(
         self, payloads: List[Tuple[str, str, str, bytes]],
     ) -> Tuple[List[FileDescriptor], FileDescriptor]:

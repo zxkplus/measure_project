@@ -7,6 +7,7 @@ and [the supported contract](../../docs/v2-supported-contract.md) for all famili
 Upstream integrators should start with [the integration API guide](../../docs/v2-upstream-api.md),
 then use [the full field reference](../../docs/v2-api-reference.md) and
 [OpenAPI snapshot](../../docs/v2-openapi.json) for implementation and client generation.
+See [operation timing diagnostics](TIMING.md) for internal stage timing, completeness and limits.
 
 ## Runtime
 

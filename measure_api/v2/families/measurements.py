@@ -1,5 +1,8 @@
 """Independent image probes with explicit pixel coordinates and observation validity."""
 
+from measure_api.v2.timing import timed, span as timing_span
+
+
 import io
 from typing import List, Literal, Optional
 
@@ -189,6 +192,7 @@ def extract_profile(request: ProfileRequest, context: CalculationContext) -> Pro
     )
 
 
+@timed("edge_detection")
 def measure_edges(request: ProbeRequest, context: CalculationContext) -> EdgeResult:
     """Detect signed subpixel boundaries and select after edge detection.
 
@@ -245,6 +249,7 @@ class PairResult(Observation):
     center_distances: List[float] = Field(default_factory=list)
 
 
+@timed("edge_pairs")
 def measure_pairs(request: PairRequest, context: CalculationContext) -> PairResult:
     """Pair complete detected boundaries before first/last selection.
 
@@ -375,19 +380,20 @@ def measure_line(request: ImageLineRequest, context: CalculationContext) -> Imag
     image = read_gray(request, context)
     edges = []
     successful = 0
-    for fraction in np.linspace(0, 1, request.probe_count):
-        center = Point(x=start.x + fraction * vector[0], y=start.y + fraction * vector[1])
-        candidates = _probe_edges(request, center, angle, image, context)
-        if candidates:
-            successful += 1
-            if request.selection == 'nearest':
-                candidates = [min(candidates, key=lambda e: (
-                    (e.point.x - center.x) ** 2 + (e.point.y - center.y) ** 2))]
-            elif request.selection == 'first':
-                candidates = candidates[:1]
-            elif request.selection == 'last':
-                candidates = candidates[-1:]
-            edges.extend(candidates)
+    with timing_span("sampling_edges"):
+        for fraction in np.linspace(0, 1, request.probe_count):
+            center = Point(x=start.x + fraction * vector[0], y=start.y + fraction * vector[1])
+            candidates = _probe_edges(request, center, angle, image, context)
+            if candidates:
+                successful += 1
+                if request.selection == 'nearest':
+                    candidates = [min(candidates, key=lambda e: (
+                        (e.point.x - center.x) ** 2 + (e.point.y - center.y) ** 2))]
+                elif request.selection == 'first':
+                    candidates = candidates[:1]
+                elif request.selection == 'last':
+                    candidates = candidates[-1:]
+                edges.extend(candidates)
     fitted = fit_line(
         PointFitRequest(points=[e.point for e in edges], frame=request.frame), context,
     )
@@ -417,28 +423,29 @@ def measure_circle(request: ImageCircleRequest, context: CalculationContext) -> 
     edges = []
     successful = 0
     angles = request.start_angle_degrees + np.linspace(0, span, request.probe_count, endpoint=False)
-    for angle in angles:
-        phi = np.deg2rad(angle)
-        center = Point(x=request.center.x + request.radius * np.cos(phi),
-                       y=request.center.y + request.radius * np.sin(phi))
-        candidates = _probe_edges(request, center, angle + 180, image, context)
-        candidates = [e for e in candidates if (
-            (request.radius_min is None or np.hypot(e.point.x - request.center.x,
-                                                    e.point.y - request.center.y)
-             >= request.radius_min)
-            and (request.radius_max is None or np.hypot(e.point.x - request.center.x,
+    with timing_span("sampling_edges"):
+        for angle in angles:
+            phi = np.deg2rad(angle)
+            center = Point(x=request.center.x + request.radius * np.cos(phi),
+                           y=request.center.y + request.radius * np.sin(phi))
+            candidates = _probe_edges(request, center, angle + 180, image, context)
+            candidates = [e for e in candidates if (
+                (request.radius_min is None or np.hypot(e.point.x - request.center.x,
                                                         e.point.y - request.center.y)
-                 <= request.radius_max))]
-        if candidates:
-            successful += 1
-            if request.selection == 'nearest':
-                candidates = [min(candidates, key=lambda e: abs(np.hypot(
-                    e.point.x - request.center.x, e.point.y - request.center.y) - request.radius))]
-            elif request.selection == 'first':
-                candidates = candidates[:1]
-            elif request.selection == 'last':
-                candidates = candidates[-1:]
-            edges.extend(candidates)
+                 >= request.radius_min)
+                and (request.radius_max is None or np.hypot(e.point.x - request.center.x,
+                                                            e.point.y - request.center.y)
+                     <= request.radius_max))]
+            if candidates:
+                successful += 1
+                if request.selection == 'nearest':
+                    candidates = [min(candidates, key=lambda e: abs(np.hypot(
+                        e.point.x - request.center.x, e.point.y - request.center.y) - request.radius))]
+                elif request.selection == 'first':
+                    candidates = candidates[:1]
+                elif request.selection == 'last':
+                    candidates = candidates[-1:]
+                edges.extend(candidates)
     fitted = fit_circle(
         PointFitRequest(points=[e.point for e in edges], frame=request.frame), context,
     )
