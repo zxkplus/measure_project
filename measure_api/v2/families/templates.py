@@ -429,6 +429,9 @@ def _scan(search: np.ndarray, pixels: np.ndarray, options: TemplateSearch,
     h, w = variant.shape[:2]
     if not _has_texture(variant):
         return []
+    # A full support mask is ordinary NCC; OpenCV's masked path is much slower.
+    if np.all(mask):
+        mask = None
     scores = cv2.matchTemplate(search.astype(np.float32), variant,
                                cv2.TM_CCOEFF_NORMED, mask=mask)
     # Masked NCC can divide by zero on constant backgrounds. They are invalid candidates.
