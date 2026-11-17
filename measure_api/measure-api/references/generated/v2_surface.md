@@ -9,7 +9,7 @@ stateless FastAPI v2 service, which its own README designates as the
 authoritative contract. The hand-written v1 reference in
 `../api_reference.md` does not describe these routes.
 
-Paths: **67** · Schemas: **233**
+Paths: **68** · Schemas: **237**
 
 ## Endpoints
 
@@ -19,6 +19,7 @@ Paths: **67** · Schemas: **233**
 | `POST` | `/api/v2/alignments/rigid` | `RigidAlignmentRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/calibrate/offset` | `GantryOffsetRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/calibrate/vision` | `GantryVisionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibrate/vision-points` | `GantryVisionPointsRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/calibration-exports` | `CalibrationExportRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/calibration-features/checkerboard-corners` | `CheckerboardRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/calibration-features/dot-grids` | `DotGridRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
@@ -92,7 +93,7 @@ documented in full in `docs/v2-api-reference.md` (4670 lines) plus the raw
 
 ## Schema index
 
-233 schemas; see `docs/v2-api-reference.md` for every field.
+237 schemas; see `docs/v2-api-reference.md` for every field.
 
 | Schema | Kind | Properties |
 |---|---|---|
@@ -157,6 +158,9 @@ documented in full in `docs/v2-api-reference.md` (4670 lines) plus the raw
 | `GantryMatrixResult` | object | 1 |
 | `GantryOffsetRequest` | object | 5 |
 | `GantryOffsetSample` | object | 2 |
+| `GantryVisionPointResidual` | object | 2 |
+| `GantryVisionPointsRequest` | object | 8 |
+| `GantryVisionPointsResult` | object | 8 |
 | `GantryVisionRequest` | object | 6 |
 | `GeometryTransformRequest` | object | 6 |
 | `GeometryTransformResult` | object | 4 |
@@ -201,6 +205,7 @@ documented in full in `docs/v2-api-reference.md` (4670 lines) plus the raw
 | `OperationResponse_EvaluationResult_` | object | 9 |
 | `OperationResponse_GantryLocateResult_` | object | 9 |
 | `OperationResponse_GantryMatrixResult_` | object | 9 |
+| `OperationResponse_GantryVisionPointsResult_` | object | 9 |
 | `OperationResponse_GeometryTransformResult_` | object | 9 |
 | `OperationResponse_ImageCircleResult_` | object | 9 |
 | `OperationResponse_ImageInspectionResult_` | object | 9 |

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import math
 from typing import Annotated, List, Optional
 
 from pydantic import Field, model_validator
 
 from measure.pick_api import GantryPick, PickError, offset_homogeneous_matrix
-from measure.robot_calibration import CalibrationError, OffsetSample
+from measure.robot_calibration import CalibrationError, OffsetSample, fit_image_to_robot
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.models import CalculationRequest, FileReference, StrictModel
 from measure_api.v2.registry import CalculationContext, Operation
@@ -35,6 +36,80 @@ class GantryVisionRequest(CalculationRequest):
         if len(self.images) != len(self.robot_points):
             raise ValueError("images and robot_points must have the same length")
         return self
+
+
+class GantryVisionPointsRequest(CalculationRequest):
+    """Original-image pixel centres paired with actual flange XY, without image detection."""
+
+    image_points: List[XY] = Field(min_length=4)
+    robot_points: List[XY] = Field(min_length=4)
+    image_size: Annotated[List[int], Field(min_length=2, max_length=2)]
+    calib_z: float
+
+    @model_validator(mode="after")
+    def check_points(self) -> GantryVisionPointsRequest:
+        """Validate finite, in-frame correspondences and capture height."""
+        if len(self.image_points) != len(self.robot_points):
+            raise ValueError("image_points and robot_points must have the same length")
+        if min(self.image_size) <= 1:
+            raise ValueError("image_size must exceed one pixel in each dimension")
+        values = [
+            value
+            for points in (self.image_points, self.robot_points)
+            for point in points
+            for value in point
+        ] + [self.calib_z]
+        if not all(math.isfinite(v) for v in values):
+            raise ValueError("coordinates and calib_z must be finite")
+        width, height = self.image_size
+        if any(
+            not (0 <= u <= width - 1 and 0 <= v <= height - 1)
+            for u, v in self.image_points
+        ):
+            raise ValueError("image_points must lie in the original image")
+        return self
+
+
+class GantryVisionPointResidual(StrictModel):
+    """Residual of one correspondence; robot distances use controller units."""
+
+    residual_px: float
+    residual_mm: float
+
+
+class GantryVisionPointsResult(StrictModel):
+    """Candidate affine and quality diagnostics; upstream explicitly applies it."""
+
+    matrix: Matrix3x3
+    valid: bool
+    warnings: List[str]
+    residuals: List[GantryVisionPointResidual]
+    rms_px: float
+    max_px: float
+    rms_mm: float
+    max_mm: float
+
+
+def calibrate_vision_points(
+    request: GantryVisionPointsRequest, context: CalculationContext,
+) -> GantryVisionPointsResult:
+    """Fit the shared affine solver using the supplied centres without redetection."""
+    try:
+        calibration = fit_image_to_robot(
+            request.image_points, request.robot_points, image_size=request.image_size,
+            calib_z=request.calib_z, robust=False,
+        )
+    except (CalibrationError, ValueError) as error:
+        raise ServiceError("pick.calibration_failed", str(error)) from error
+    return GantryVisionPointsResult(
+        matrix=calibration.matrix.tolist(), valid=calibration.valid,
+        warnings=calibration.warnings,
+        residuals=[GantryVisionPointResidual(
+            residual_px=sample.residual_px, residual_mm=sample.residual_mm,
+        ) for sample in calibration.samples],
+        rms_px=calibration.rms_px, max_px=calibration.max_px,
+        rms_mm=calibration.rms_mm, max_mm=calibration.max_mm,
+    )
 
 
 class GantryOffsetSample(StrictModel):
@@ -159,6 +234,9 @@ def locate(request: GantryLocateRequest, context: CalculationContext) -> GantryL
 
 
 OPERATIONS = [
+    Operation("/calibrate/vision-points", GantryVisionPointsRequest, GantryVisionPointsResult,
+              calibrate_vision_points, "Fit vision affine from taught pixel centres",
+              "gantry_pick", {"matrix": "matrix"}),
     Operation("/calibrate/vision", GantryVisionRequest, GantryMatrixResult, calibrate_vision,
               "Compute gantry vision calibration from shared images", "gantry_pick",
               {"matrix": "matrix"}),

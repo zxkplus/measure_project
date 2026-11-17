@@ -2932,6 +2932,127 @@
         }
       }
     },
+    "/api/v2/calibrate/vision-points": {
+      "post": {
+        "tags": [
+          "gantry_pick"
+        ],
+        "summary": "Fit vision affine from taught pixel centres",
+        "operationId": "calibrate.vision-points",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GantryVisionPointsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse_GantryVisionPointsResult_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Gone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted; query the retained operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse_GantryVisionPointsResult_"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/calibrate/vision": {
       "post": {
         "tags": [
@@ -11332,6 +11453,181 @@
         "title": "GantryOffsetSample",
         "description": "Placed-target and camera-centred flange poses in the same controller unit."
       },
+      "GantryVisionPointResidual": {
+        "properties": {
+          "residual_px": {
+            "type": "number",
+            "title": "Residual Px"
+          },
+          "residual_mm": {
+            "type": "number",
+            "title": "Residual Mm"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "residual_px",
+          "residual_mm"
+        ],
+        "title": "GantryVisionPointResidual",
+        "description": "Residual of one correspondence; robot distances use controller units."
+      },
+      "GantryVisionPointsRequest": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "sync",
+              "async"
+            ],
+            "title": "Mode",
+            "default": "sync"
+          },
+          "wait_ms": {
+            "type": "integer",
+            "maximum": 60000.0,
+            "minimum": 0.0,
+            "title": "Wait Ms",
+            "default": 10000
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "maximum": 3600000.0,
+            "minimum": 1.0,
+            "title": "Timeout Ms",
+            "default": 60000
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
+          "image_points": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array",
+              "maxItems": 2,
+              "minItems": 2
+            },
+            "type": "array",
+            "minItems": 4,
+            "title": "Image Points"
+          },
+          "robot_points": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array",
+              "maxItems": 2,
+              "minItems": 2
+            },
+            "type": "array",
+            "minItems": 4,
+            "title": "Robot Points"
+          },
+          "image_size": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "maxItems": 2,
+            "minItems": 2,
+            "title": "Image Size"
+          },
+          "calib_z": {
+            "type": "number",
+            "title": "Calib Z"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "image_points",
+          "robot_points",
+          "image_size",
+          "calib_z"
+        ],
+        "title": "GantryVisionPointsRequest",
+        "description": "Original-image pixel centres paired with actual flange XY, without image detection."
+      },
+      "GantryVisionPointsResult": {
+        "properties": {
+          "matrix": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array",
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "type": "array",
+            "maxItems": 3,
+            "minItems": 3,
+            "title": "Matrix"
+          },
+          "valid": {
+            "type": "boolean",
+            "title": "Valid"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          },
+          "residuals": {
+            "items": {
+              "$ref": "#/components/schemas/GantryVisionPointResidual"
+            },
+            "type": "array",
+            "title": "Residuals"
+          },
+          "rms_px": {
+            "type": "number",
+            "title": "Rms Px"
+          },
+          "max_px": {
+            "type": "number",
+            "title": "Max Px"
+          },
+          "rms_mm": {
+            "type": "number",
+            "title": "Rms Mm"
+          },
+          "max_mm": {
+            "type": "number",
+            "title": "Max Mm"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "matrix",
+          "valid",
+          "warnings",
+          "residuals",
+          "rms_px",
+          "max_px",
+          "rms_mm",
+          "max_mm"
+        ],
+        "title": "GantryVisionPointsResult",
+        "description": "Candidate affine and quality diagnostics; upstream explicitly applies it."
+      },
       "GantryVisionRequest": {
         "properties": {
           "mode": {
@@ -14270,6 +14566,85 @@
           "created_at"
         ],
         "title": "OperationResponse[GantryMatrixResult]"
+      },
+      "OperationResponse_GantryVisionPointsResult_": {
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "title": "Operation Id"
+          },
+          "operation": {
+            "type": "string",
+            "title": "Operation"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "cancelling",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "timed_out"
+            ],
+            "title": "State"
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GantryVisionPointsResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "diagnostics": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Diagnostics"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "operation_id",
+          "operation",
+          "state",
+          "trace_id",
+          "created_at"
+        ],
+        "title": "OperationResponse[GantryVisionPointsResult]"
       },
       "OperationResponse_GeometryTransformResult_": {
         "properties": {

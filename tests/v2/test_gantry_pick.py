@@ -266,3 +266,66 @@ def test_gantry_operations_are_discovered_and_typed_in_the_existing_v2_app(servi
     assert matrix_schema["items"]["minItems"] == matrix_schema["items"]["maxItems"] == 3
     assert client.get("/api/v2/health/ready").status_code == 200
     assert client.post("/api/v1/locate", json={}).status_code == 404
+
+
+def test_vision_points_use_supplied_centres_without_image_detection(service):
+    from measure.robot_calibration import fit_image_to_robot
+    client, _ = service
+    payload = {
+        "image_points": CORNERS,
+        "robot_points": vision_payload()["robot_points"],
+        "image_size": [640, 480], "calib_z": 30,
+    }
+    result = calculate(client, "/calibrate/vision-points", payload)["result"]
+    expected = fit_image_to_robot(
+        CORNERS, payload["robot_points"], image_size=[640, 480], calib_z=30,
+        robust=False,
+    )
+    assert result["valid"]
+    assert np.allclose(result["matrix"], expected.matrix, atol=1e-10)
+    assert result["rms_px"] < 1e-8
+    assert len(result["residuals"]) == 4
+    assert all(r["residual_mm"] < 1e-8 for r in result["residuals"])
+    changed = dict(payload, image_points=[(u + 2, v - 3) for u, v in CORNERS])
+    other = calculate(client, "/calibrate/vision-points", changed)["result"]
+    assert not np.allclose(result["matrix"], other["matrix"])
+
+
+@pytest.mark.parametrize("patch", [
+    {"image_points": [[10, 10]] * 3},
+    {"robot_points": [[0, 0]] * 5},
+    {"image_size": [1, 480]},
+    {"image_points": [[-1, 0]] * 4},
+    {"calib_z": "NaN"},
+])
+def test_vision_points_reject_invalid_input(service, patch):
+    client, _ = service
+    payload = {"image_points": CORNERS, "robot_points": vision_payload()["robot_points"],
+               "image_size": [640, 480], "calib_z": 30, **patch}
+    response = client.post("/api/v2/calibrate/vision-points", json=payload)
+    assert response.status_code == 422
+
+
+def test_vision_points_reject_collinear_robot_motion(service):
+    client, _ = service
+    response = client.post("/api/v2/calibrate/vision-points", json={
+        "image_points": CORNERS, "robot_points": [[i, i] for i in range(4)],
+        "image_size": [640, 480], "calib_z": 30,
+    })
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "pick.calibration_failed"
+
+
+def test_vision_points_return_rejected_quality_as_candidate_diagnostics(service):
+    client, _ = service
+    robot_points = vision_payload()["robot_points"]
+    robot_points[-1][1] += 2
+    result = calculate(client, "/calibrate/vision-points", {
+        "image_points": CORNERS, "robot_points": robot_points,
+        "image_size": [640, 480], "calib_z": 30,
+    })["result"]
+    assert result["valid"] is False
+    assert result["warnings"]
+    assert result["rms_px"] > 1
+    assert len(result["residuals"]) == 4
+    assert np.isfinite(result["matrix"]).all()

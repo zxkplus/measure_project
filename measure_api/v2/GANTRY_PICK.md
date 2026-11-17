@@ -1,11 +1,12 @@
 # Gantry pick operations in V2
 
-The existing V2 application serves all three operations through its normal calculation
+The existing V2 application serves all four operations through its normal calculation
 registry and prewarmed worker pool. Start V2 as usual; no additional FastAPI application,
 process owner or listening port is required.
 
 | Method | Path | Calculation ID | Result |
 |---|---|---|---|
+| POST | `/api/v2/calibrate/vision-points` | `calibrate.vision-points` | candidate `matrix`, quality and per-point residuals |
 | POST | `/api/v2/calibrate/vision` | `calibrate.vision` | `matrix`: 3x3 vision affine |
 | POST | `/api/v2/calibrate/offset` | `calibrate.offset` | `matrix`: 3x3 XY translation |
 | POST | `/api/v2/locate` | `locate` | `camera_center_xy`, optional `gripper_xy` |
@@ -59,6 +60,35 @@ The matrix is row-major `V = [[A, b], [0, 1]]`. Its upper-left 2x2 `A` maps pixe
 displacements to flange displacements. The translation column `b` belongs to the
 calibration target position and is retained for audit; location uses only `A`.
 Store the complete `result.matrix` as the `vision_matrix` for later calls.
+
+## Vision calibration from taught circle centres
+
+Use `/api/v2/calibrate/vision-points` after upstream template matching and circle
+fitting. This operation consumes the supplied centres directly and does not run
+the default circle locator or discard samples through robust fitting.
+
+```json
+{
+  "image_points": [[100, 100], [540, 100], [100, 380], [540, 380]],
+  "robot_points": [[89.025, 193.025], [111.025, 193.025], [89.025, 207.025], [111.025, 207.025]],
+  "image_size": [640, 480],
+  "calib_z": 30
+}
+```
+
+Coordinates must be finite, the two point lists must have equal length of at least
+four, and each pixel centre must lie in the original image. `image_size` is
+`[width, height]`, both greater than one; `calib_z` records the common capture plane.
+The caller must ensure a single camera, resolution, height and stationary target.
+
+The result contains `matrix`, `valid`, `warnings`, ordered `residuals` with
+`residual_px` and `residual_mm`, plus `rms_px`, `max_px`, `rms_mm`, `max_mm`.
+Robot residuals use controller units (normally mm). A solvable fit failing the
+shared quality gate returns a **successful candidate calculation with
+`valid: false`** and diagnostics; it must not be applied. Degenerate or singular
+points produce `pick.calibration_failed`. Unlike the old image route, quality
+rejection is inspectable in the candidate result. Independent centring verification
+and explicit persistence remain the caller's responsibility.
 
 ## Gripper offset calibration
 
@@ -134,7 +164,7 @@ The shared circle locator uses a default radius range of 6–3000 px.
 
 ## Scheduling, errors and diagnostics
 
-These are native V2 calculations, not direct `{ok, matrix}` responses. All three
+These are native V2 calculations, not direct `{ok, matrix}` responses. All four
 accept `mode`, `wait_ms`, `timeout_ms` and `idempotency_key`. HTTP 200 returns the
 normal `OperationResponse` with a typed `result`. Async work or wait expiry returns
 HTTP 202 with a `Location` header and an `operation_id`; query
@@ -142,8 +172,8 @@ HTTP 202 with a `Location` header and an `operation_id`; query
 
 File references are pinned to SHA-256 during preparation and reverified on use.
 The existing caller-scoped idempotency, deadlines, cancellation, worker replacement,
-retained results, `X-Trace-Id` and operation diagnostics apply to all three routes.
-No output directory or writable image root is required. These three calculations
+retained results, `X-Trace-Id` and operation diagnostics apply to all four routes.
+No output directory or writable image root is required. These four calculations
 do not create standalone `pick_runs` artifacts or use its global debug switch;
 query `/api/v2/operations/{operation_id}/diagnostics` for V2 lifecycle diagnostics.
 
