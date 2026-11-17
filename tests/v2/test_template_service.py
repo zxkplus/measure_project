@@ -229,3 +229,32 @@ def test_rotated_teaching_support_composes_reference_mapping_without_anchor_drif
     assert result["valid"]
     assert result["matches"][0]["anchor"] == pytest.approx({"x": 70, "y": 50}, abs=0.2)
     assert np.array(result["matches"][0]["mapping"]["matrix"]) == pytest.approx(np.eye(3), abs=0.2)
+
+
+@pytest.mark.parametrize("angle", [0, 19])
+def test_full_support_skips_masked_ncc_and_rotated_support_keeps_mask(angle, monkeypatch):
+    """Keep exact matching poses while avoiding the full-mask correlation cost."""
+    from measure_api.v2.families.templates import TemplateSearch, _scan
+
+    patch = np.random.default_rng(123).integers(20, 230, (20, 60), dtype=np.uint8)
+    theta = np.deg2rad(angle)
+    transform = np.array([[np.cos(theta), -np.sin(theta), 100],
+                          [np.sin(theta), np.cos(theta), 70]], np.float64)
+    image = cv2.warpAffine(patch, transform, (240, 160))
+    match_template = cv2.matchTemplate
+    masks = []
+
+    def record_match(*args, **kwargs):
+        masks.append(kwargs.get("mask"))
+        return match_template(*args, **kwargs)
+
+    monkeypatch.setattr(cv2, "matchTemplate", record_match)
+    matches = _scan(image, patch, TemplateSearch(score_threshold=0.9), angle, 1)
+    assert matches
+    score, _, _, pose = max(matches, key=lambda match: match[0])
+    assert score > 0.99
+    assert pose[:2, 2] == pytest.approx([100, 70], abs=0.1)
+    if angle == 0:
+        assert masks and all(mask is None for mask in masks)
+    else:
+        assert masks and all(mask is not None and np.any(mask == 0) for mask in masks)
