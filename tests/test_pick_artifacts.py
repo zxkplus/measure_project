@@ -129,3 +129,37 @@ def test_zip_run_contains_manifest(tmp_path):
     assert "manifest.json" in names
     assert "inputs.json" in names
     assert "result.json" in names
+
+
+def test_run_recorder_without_images_writes_points(tmp_path):
+    """A coordinate-only run stores points.json and no image files."""
+    recorder = RunRecorder(tmp_path, "vision", {"image_size": [640, 480]})
+    recorder.add_points(
+        [
+            {"index": 0, "u": 100.0, "v": 100.0, "x": 10.0, "y": 20.0,
+             "residual_px": 0.1},
+            {"index": 1, "u": 540.0, "v": 380.0, "x": 30.0, "y": 40.0,
+             "residual_px": 0.2},
+        ]
+    )
+    manifest = recorder.finish({"matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]})
+
+    run_dir = tmp_path / manifest["run_id"]
+    assert manifest["points"] == "points.json"
+    assert manifest["images"] == []
+    assert manifest["overview"] is None
+    assert not (run_dir / "images").exists()
+    assert not (run_dir / "overview.jpg").exists()
+    points = json.loads((run_dir / "points.json").read_text(encoding="utf-8"))
+    assert [row["u"] for row in points] == [100.0, 540.0]
+
+    readme = (run_dir / "README.txt").read_text(encoding="utf-8")
+    assert "points.json" in readme
+    assert "images/" not in readme
+
+    with zipfile.ZipFile(zip_run(run_dir)) as bundle:
+        assert "points.json" in set(bundle.namelist())
+
+    summaries = list_runs(tmp_path)
+    assert summaries[0]["overview"] is None
+    assert summaries[0]["annotated"] is None

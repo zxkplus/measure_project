@@ -95,6 +95,9 @@ DEFAULT_MAX_RMS_PX = 3.0
 DEFAULT_MAX_CONDITION = 50.0
 DEFAULT_CENTER_TOLERANCE_PX = 5.0
 DEFAULT_VERIFY_TOLERANCE_PX = 5.0
+# Maximum accepted per-axis spread of the place-minus-centre samples, in
+# robot units (normally mm).  Wider means the samples disagree.
+DEFAULT_OFFSET_TOLERANCE = 0.5
 
 
 class CalibrationError(RuntimeError):
@@ -1083,6 +1086,7 @@ class CameraGripperOffset:
         samples: Sequence[OffsetSample],
         *,
         center_tolerance_px: float = DEFAULT_CENTER_TOLERANCE_PX,
+        offset_tolerance: float = DEFAULT_OFFSET_TOLERANCE,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> "CameraGripperOffset":
         """Aggregate offset samples into a reusable correction.
@@ -1090,6 +1094,9 @@ class CameraGripperOffset:
         Args:
             samples: One or more :class:`OffsetSample` values.
             center_tolerance_px: Maximum accepted centring residual.
+            offset_tolerance: Maximum accepted per-axis sample spread.  A
+                wider spread means the samples disagree (for example a pose
+                recorded twice without moving), so the mean must not be used.
             metadata: Free-form metadata.
 
         Raises:
@@ -1119,7 +1126,8 @@ class CameraGripperOffset:
         max_error = float(np.max(center_errors))
         if max_error > center_tolerance_px:
             _warn(warnings, "centring_error_high")
-        if len(offsets) > 1 and float(np.max(std)) > 0.5:
+        spread = float(np.max(std))
+        if len(offsets) > 1 and spread > float(offset_tolerance):
             _warn(warnings, "offset_inconsistent")
         low_confidence = [s for s in samples if s.confidence and s.confidence < 0.5]
         if low_confidence:
@@ -1132,7 +1140,14 @@ class CameraGripperOffset:
         obj.mean_center_error_px = mean_error
         obj.max_center_error_px = max_error
         obj.center_tolerance_px = float(center_tolerance_px)
-        obj.valid = bool(max_error <= center_tolerance_px and np.all(np.isfinite(mean)))
+        # A wide spread is a hard failure, not a warning: averaging samples
+        # that disagree by tens of millimetres yields a plausible-looking but
+        # wrong grasp correction.
+        obj.valid = bool(
+            max_error <= center_tolerance_px
+            and spread <= float(offset_tolerance)
+            and np.all(np.isfinite(mean))
+        )
         obj.warnings = warnings
         obj.metadata = dict(metadata or {})
         return obj
@@ -1213,13 +1228,16 @@ def combine_offsets(
     offsets: Sequence[CameraGripperOffset],
     *,
     center_tolerance_px: float = DEFAULT_CENTER_TOLERANCE_PX,
+    offset_tolerance: float = DEFAULT_OFFSET_TOLERANCE,
 ) -> CameraGripperOffset:
     """Merge several offset calibrations into one (mean + spread)."""
     samples: List[OffsetSample] = []
     for offset in offsets:
         samples.extend(offset.samples)
     return CameraGripperOffset.from_samples(
-        samples, center_tolerance_px=center_tolerance_px
+        samples,
+        center_tolerance_px=center_tolerance_px,
+        offset_tolerance=offset_tolerance,
     )
 
 

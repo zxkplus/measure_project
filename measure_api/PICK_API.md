@@ -3,8 +3,12 @@
 Stateless HTTP service for a three-axis gantry.  Each calibration call returns
 one 3x3 homogeneous matrix; the calling software stores both matrices and sends
 them back to `/locate`.  The service computes XY only and never talks to a
-robot/PLC; Z is deliberately ignored.  The default locator accepts circles with a
-radius of 6–3000 px (large enough for a 5 MP bottle mouth).
+robot/PLC; Z is deliberately ignored.
+
+The service **never receives an image**.  Target detection belongs to the
+caller — the v1 measurement API, the v2 `measurements.circles` operation, or the
+equipment's own recipe — which passes the sub-pixel centre in as `(u, v)`.
+Every request is `application/json`.
 
 > 面向同事的完整流程、现场操作和排错说明见
 > [`PICK_MODULE_GUIDE.md`](PICK_MODULE_GUIDE.md)。
@@ -17,8 +21,8 @@ python -m measure_api.pick_server
 uvicorn --factory measure_api.pick_server:create_app --host 127.0.0.1 --port 8100
 ```
 
-Dependencies: `fastapi`, `uvicorn`, `python-multipart` (plus the existing
-`numpy`/`opencv` engine dependencies).
+Dependencies: `fastapi`, `uvicorn` (plus the existing `numpy`/`opencv` engine
+dependencies).
 
 Environment variables:
 
@@ -26,7 +30,7 @@ Environment variables:
 |---|---|---|
 | `PICK_RUNS_DIR` | `data/pick_runs` | debug run root |
 | `PICK_DEBUG` | `0` | start with the global debug switch on |
-| `PICK_ANNOTATED_MAX_PX` | `2000` | annotated source long edge |
+| `PICK_ANNOTATED_MAX_PX` | `2000` | annotated long edge, legacy image runs only |
 | `PICK_LOCATE_KEEP_DAYS` | `2` | locate run retention |
 | `PICK_LOCATE_KEEP_MAX` | `500` | locate run retention |
 | `PICK_CALIBRATION_KEEP_DAYS` | `90` | vision/offset run retention |
@@ -35,7 +39,19 @@ Environment variables:
 | `PICK_HOST` / `PICK_PORT` | `127.0.0.1` / `8100` | bind address |
 
 There is no server-side recipe file and no `/status` endpoint: the software
-owns the two matrices.
+owns the two matrices and the detector.
+
+## Coordinate conventions
+
+| Name | Type | Meaning |
+|---|---|---|
+| image point | `[u, v]` | `u = column`, `v = row`, pixels, sub-pixel allowed |
+| `image_size` | `[width, height]` | the frame the points were measured on |
+| robot pose/point | `[x, y]` | controller units (normally mm); a trailing Z is accepted and ignored |
+
+Every image point is validated against `image_size`.  A point outside
+`[0, W-1] × [0, H-1]` is rejected with `400 point_out_of_image`, which also
+catches a caller that sends `(row, col)` instead of `(col, row)`.
 
 ## Matrix conventions
 
@@ -53,14 +69,16 @@ V = [[a00, a01, b0],
 
 ```text
 A = V[:2, :2]
-camera_center_xy = robot_pose + A @ (image_centre - target_uv)
+camera_center_xy = robot_pose + A @ (image_centre - image_uv)
 ```
 
 `b` is specific to the calibration target position and is **not** used by
 `/locate`; it is kept for storage/audit.
 
-The image centre is fixed to `((W-1)/2, (H-1)/2)`.  Changing resolution,
-cropping or scaling invalidates the matrix.
+The image centre is `((W-1)/2, (H-1)/2)`, so `image_size` must match the frames
+the matrix was calibrated on.  Changing resolution, cropping or scaling
+invalidates the matrix — `/calibrate/vision` echoes `image_size` and
+`principal_point` so the caller can store them next to the matrix.
 
 ### Offset matrix
 
@@ -78,18 +96,26 @@ gripper_xy = camera_center_xy + (dx, dy)
 
 ### `POST /api/v1/calibrate/vision`
 
-`multipart/form-data`:
+`application/json`:
 
-| Field | Type | Meaning |
-|---|---|---|
-| `images` | file, 4+ | same-size frames; order matches points |
-| `robot_points` | JSON string | `[[x, y], ...]`, one per image |
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `image_size` | `[w, h]` | yes | frame size the points were measured on |
+| `image_points` | `[[u, v], ...]` | yes | 4 or more detected centres, in `robot_points` order |
+| `robot_points` | `[[x, y], ...]` | yes | same length; a trailing Z is accepted |
+| `principal_point` | `[u0, v0]` | no | defaults to the image centre |
+| `confidences` | `[float, ...]` | no | per-point detector confidence |
 
 ```bash
 curl -X POST http://127.0.0.1:8100/api/v1/calibrate/vision \
-  -F "images=@LL.jpg" -F "images=@LT.jpg" \
-  -F "images=@RB.jpg" -F "images=@RT.jpg" \
-  -F 'robot_points=[[10.228,308.451],[26.428,309.193],[5.638,345.111],[22.058,346.681]]'
+  -H 'content-type: application/json' \
+  -d '{
+        "image_size": [5472, 3648],
+        "image_points": [[2458.040, 2279.497], [3206.108, 1334.445],
+                         [3308.557, 2183.056], [2356.346, 1431.227]],
+        "robot_points": [[10.928, 321.647], [20.928, 331.647],
+                         [10.928, 331.647], [20.928, 321.647]]
+      }'
 ```
 
 Response:
@@ -98,12 +124,21 @@ Response:
 {
   "ok": true,
   "matrix": [
-    [-0.00126349, -0.01169656, 40.699445],
-    [ 0.01166881, -0.00132630, 297.676806],
-    [ 0.0,         0.0,         1.0]
-  ]
+    [-0.001321362642334, -0.011627365736710, 40.681749989616],
+    [ 0.011604128501497, -0.001396038632585, 296.3037814102695],
+    [ 0.0,                0.0,                1.0]
+  ],
+  "rms_px": 0.207,
+  "rms_mm": 0.00242,
+  "principal_point": [2735.5, 1823.5],
+  "image_size": [5472, 3648],
+  "warnings": ["low_image_coverage"]
 }
 ```
+
+`rms_px` / `rms_mm` / `warnings` are the only quality signal now that the
+service sees no image: store them next to the matrix, and re-calibrate when
+`rms_px` grows.  A fit that fails the quality gate is `422 calibration_invalid`.
 
 ### `POST /api/v1/calibrate/offset`
 
@@ -120,43 +155,62 @@ Response:
     [1.0, 0.0, 8.0],
     [0.0, 1.0, 4.0],
     [0.0, 0.0, 1.0]
-  ]
+  ],
+  "offset_xy": [8.0, 4.0],
+  "std_xy": [0.0, 0.0],
+  "num_samples": 1,
+  "warnings": []
 }
 ```
 
+`offset_xy` is the mean of `place_pose - center_pose`.  Samples that disagree
+by more than 0.5 mm per axis (`std_xy`) are rejected with
+`422 offset_invalid` — averaging them would produce a plausible but wrong
+grasp correction.
+
 ### `POST /api/v1/locate`
 
-`multipart/form-data`:
+`application/json`:
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `image` | file | yes | current frame |
-| `robot_pose` | JSON string | yes | flange `[x, y]` at capture time |
-| `vision_matrix` | JSON string | yes | 3x3 from `/calibrate/vision` |
-| `offset_matrix` | JSON string | no | 3x3 from `/calibrate/offset` |
+| `image_size` | `[w, h]` | yes | must match the calibration frames |
+| `image_uv` | `[u, v]` | yes | detected target centre |
+| `robot_pose` | `[x, y]` | yes | flange XY at capture time |
+| `vision_matrix` | 3x3 | yes | from `/calibrate/vision` |
+| `offset_matrix` | 3x3 | no | from `/calibrate/offset` |
+| `radius_px` | float | no | echoed into the debug run only |
 
 ```bash
-V='[[-0.00126349,-0.01169656,40.699445],[0.01166881,-0.00132630,297.676806],[0,0,1]]'
-O='[[1,0,8],[0,1,4],[0,0,1]]'
-
 curl -X POST http://127.0.0.1:8100/api/v1/locate \
-  -F "image=@shot.jpg" \
-  -F 'robot_pose=[90.0,180.0]' \
-  -F "vision_matrix=$V" \
-  -F "offset_matrix=$O"
+  -H 'content-type: application/json' \
+  -d '{
+        "image_size": [5472, 3648],
+        "image_uv": [2836.937, 1806.012],
+        "robot_pose": [15.928, 326.647],
+        "vision_matrix": [[-0.001321362642334, -0.011627365736710, 40.681749989616],
+                          [ 0.011604128501497, -0.001396038632585, 296.3037814102695],
+                          [ 0, 0, 1]],
+        "offset_matrix": [[1, 0, 123.67973454793294],
+                          [0, 1, 1.4771626790364583],
+                          [0, 0, 1]]
+      }'
 ```
 
 ```json
 {
   "ok": true,
-  "camera_center_xy": [90.975, 181.975],
-  "gripper_xy": [98.975, 185.975]
+  "camera_center_xy": [15.8587, 325.4455],
+  "gripper_xy": [139.5384, 326.9227],
+  "delta_xy": [-0.0693, -1.2015]
 }
 ```
 
 - `offset_matrix` omitted: `gripper_xy` is `null`.
-- `vision_matrix` required; a bad/singular matrix is `400 bad_matrix`.
-- Target not found / low confidence: `422`.
+- `delta_xy` is `A @ (image_centre - image_uv)`: the relative move that puts
+  the target at the image centre.
+- A bad/singular matrix is `400 bad_matrix`; a point outside the frame is
+  `400 point_out_of_image`.
 - The response never includes Z.
 
 ## Debug switch
@@ -178,15 +232,15 @@ PUT /api/v1/debug   {"enabled": true}
 ```text
 data/pick_runs/<run_id>/
 ├── manifest.json
-├── inputs.json            # includes the matrices used by /locate
-├── result.json            # matrix/coordinates + diagnostics
-├── README.txt
-├── overview.jpg           # vision only
-└── images/
-    ├── 00_original.jpg
-    ├── 00_annotated.jpg
-    └── ...
+├── inputs.json            # image_size, points, poses, matrices
+├── result.json            # matrix/coordinates + per-sample diagnostics
+├── points.json            # vision only: u, v, x, y, residual_px per point
+└── README.txt
 ```
+
+Runs carry no images: the service no longer decodes frames.  Runs written by
+older versions (with `images/` and `overview.jpg`) still list and archive
+correctly, and `pick_replay` handles both generations.
 
 No `recipe_snapshot.json`: there is no server-side recipe.
 
@@ -195,7 +249,7 @@ No `recipe_snapshot.json`: there is no server-side recipe.
 | `GET` | `/api/v1/runs?limit=20` | recent runs |
 | `GET` | `/api/v1/runs/{run_id}` | manifest |
 | `GET` | `/api/v1/runs/{run_id}/archive` | ZIP for reproduction |
-| `GET` | `/files/{run_id}/...` | original/annotated images and JSON |
+| `GET` | `/files/{run_id}/...` | artifact JSON (legacy runs also serve images) |
 
 ## Replay
 
@@ -203,17 +257,23 @@ No `recipe_snapshot.json`: there is no server-side recipe.
 python -m measure.pick_replay data/pick_runs/<run_id>
 ```
 
-The CLI re-runs detection/calibration and compares the matrix or coordinates
-with `result.json`.
+The CLI re-runs the math and compares the matrix or coordinates with
+`result.json`.  Coordinate runs replay from `inputs.json` alone; legacy image
+runs re-run the circle locator first.
 
 ## Errors
 
 ```json
-{"ok": false, "error": "no_target", "message": "circle not found in image"}
+{"ok": false, "error": "point_out_of_image", "message": "..."}
 ```
 
-| HTTP | Meaning |
-|---|---|
-| 400 | malformed request, count mismatch, bad/singular matrix |
-| 422 | unreadable image, no target, low confidence, invalid calibration |
-| 500 | unexpected failure |
+| HTTP | `error` | Meaning |
+|---|---|---|
+| 400 | `bad_request` | missing/invalid field, fewer than 4 points, bad `image_size` |
+| 400 | `point_count_mismatch` | `image_points` and `robot_points` differ in length |
+| 400 | `point_out_of_image` | a point lies outside `image_size` (often a row/col swap) |
+| 400 | `bad_matrix` | matrix not 3x3, wrong last row, singular, or offset not a translation |
+| 422 | `calibration_failed` | degenerate correspondences (collinear or singular) |
+| 422 | `calibration_invalid` | fit quality gate failed; see `rms_px` and `warnings` |
+| 422 | `offset_invalid` | no samples, or samples disagree beyond `std_xy` |
+| 500 | `internal_error` | unexpected failure |

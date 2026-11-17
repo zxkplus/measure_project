@@ -11,7 +11,10 @@ or::
 The service exposes three stateless business calls, a global debug switch and
 read-only run artifact endpoints.  Calibration returns one 3x3 homogeneous
 matrix per step; the caller stores both matrices and sends them back to
-``/locate``.  The service never talks to a robot.
+``/locate``.  The service never talks to a robot and never decodes an image:
+target detection belongs to the caller (the v1 measurement API, the v2
+``measurements.circles`` operation, or the equipment's own recipe), which
+passes the sub-pixel centre in as ``(u, v)``.  Every request is JSON.
 """
 
 from __future__ import annotations
@@ -23,10 +26,10 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-from fastapi import FastAPI, File, Form, Query, Request, UploadFile
+from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -37,23 +40,23 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from measure.pick_api import (
     GantryPick,
     PickError,
+    check_image_point,
+    image_size_pair,
     offset_homogeneous_matrix,
 )
 from measure.pick_artifacts import (
     RunRecorder,
     cleanup_runs,
-    decode_image,
     list_runs,
     read_manifest,
-    sha256_bytes,
     validate_run_id,
     zip_run,
 )
 from measure.robot_calibration import (
     CalibrationError,
     CameraGripperOffset,
+    ImageRobotCalibration,
     OffsetSample,
-    fit_image_to_robot,
 )
 
 logger = logging.getLogger("measure_api.pick")
@@ -142,6 +145,27 @@ class OffsetRequest(BaseModel):
     """Offset calibration request."""
 
     samples: List[PoseSampleModel] = Field(..., min_length=1)
+
+
+class VisionRequest(BaseModel):
+    """Vision calibration request: detected centres plus flange poses."""
+
+    image_size: List[float]
+    image_points: List[List[float]]
+    robot_points: List[List[float]]
+    principal_point: Optional[List[float]] = None
+    confidences: Optional[List[float]] = None
+
+
+class LocateRequest(BaseModel):
+    """Locate request: one detected centre plus the stored matrices."""
+
+    image_size: List[float]
+    image_uv: List[float]
+    robot_pose: List[float]
+    vision_matrix: List[List[float]]
+    offset_matrix: Optional[List[List[float]]] = None
+    radius_px: Optional[float] = None
 
 
 class DebugRequest(BaseModel):
@@ -242,30 +266,6 @@ class PickService:
             for index, value in enumerate(robot_points)
         ]
 
-    def _record_vision_images(
-        self,
-        recorder: RunRecorder,
-        images: Sequence[Tuple[str, bytes]],
-        points: Sequence[Tuple[float, float]],
-        decoded: Sequence[Optional[np.ndarray]],
-        detections: Sequence[Optional[Any]],
-        *,
-        note: Optional[str] = None,
-    ) -> None:
-        for index, (filename, data) in enumerate(images):
-            image = decoded[index] if index < len(decoded) else None
-            detection = detections[index] if index < len(detections) else None
-            recorder.add_image(
-                index,
-                filename,
-                data,
-                image,
-                detection,
-                robot_xy=points[index] if index < len(points) else None,
-                note=note,
-                error=note if image is None else None,
-            )
-
     def _fail(
         self,
         recorder: Optional[RunRecorder],
@@ -274,15 +274,12 @@ class PickService:
         status: int,
         result: Dict[str, Any],
         *,
-        artifact: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Publish a failed debug run (when enabled) and raise a stable error."""
         details: Dict[str, Any] = dict(extra or {})
         if recorder is not None:
             try:
-                if artifact == "overview":
-                    recorder.build_overview()
                 manifest = recorder.finish(
                     result,
                     status="failed",
@@ -308,23 +305,49 @@ class PickService:
 
     # -- vision calibration ---------------------------------------------
 
-    def calibrate_vision(
-        self,
-        images: Sequence[Tuple[str, bytes]],
+    @staticmethod
+    def _point_rows(
+        calibration: ImageRobotCalibration,
+        image_points: Sequence[Sequence[float]],
         robot_points: Sequence[Sequence[float]],
-        *,
-        debug: bool,
+    ) -> List[Dict[str, Any]]:
+        """Build the per-point table stored as ``points.json``."""
+        rows: List[Dict[str, Any]] = []
+        for index, sample in enumerate(calibration.samples):
+            rows.append(
+                {
+                    "index": index,
+                    "u": float(image_points[index][0]),
+                    "v": float(image_points[index][1]),
+                    "x": float(robot_points[index][0]),
+                    "y": float(robot_points[index][1]),
+                    "residual_px": float(sample.residual_px),
+                    "residual_mm": float(sample.residual_mm),
+                    "inlier": bool(sample.inlier),
+                }
+            )
+        return rows
+
+    def calibrate_vision(
+        self, body: VisionRequest, *, debug: bool
     ) -> Dict[str, Any]:
-        """Return the fitted 3x3 vision matrix."""
-        if len(images) < 4:
-            raise PickError("bad_request", "at least 4 images are required", 400)
-        if len(images) != len(robot_points):
+        """Fit the 3x3 vision matrix from image points and flange poses."""
+        size = image_size_pair(body.image_size)
+        image_points = [
+            check_image_point(point, size, f"image_points[{index}]")
+            for index, point in enumerate(body.image_points)
+        ]
+        robot_points = [
+            self._parse_xy(point, f"robot_points[{index}]")
+            for index, point in enumerate(body.robot_points)
+        ]
+        if len(image_points) != len(robot_points):
             raise PickError(
-                "image_count_mismatch",
-                f"{len(images)} images but {len(robot_points)} robot points",
+                "point_count_mismatch",
+                f"{len(image_points)} image points but "
+                f"{len(robot_points)} robot points",
                 400,
             )
-        points = self._parse_points(robot_points)
 
         recorder: Optional[RunRecorder] = None
         if debug:
@@ -332,94 +355,20 @@ class PickService:
                 self.settings.runs_dir,
                 "vision",
                 {
-                    "robot_points": [[x, y] for x, y in points],
-                    "images": [
-                        {
-                            "filename": filename,
-                            "sha256": sha256_bytes(data),
-                            "bytes": len(data),
-                        }
-                        for filename, data in images
-                    ],
+                    "image_size": [size[0], size[1]],
+                    "image_points": [[u, v] for u, v in image_points],
+                    "robot_points": [[x, y] for x, y in robot_points],
+                    "principal_point": body.principal_point,
                 },
-                annotated_max_px=self.settings.annotated_max_px,
-            )
-
-        decoded: List[Optional[np.ndarray]] = [
-            decode_image(data) for _, data in images
-        ]
-        bad = [index for index, image in enumerate(decoded) if image is None]
-        if bad:
-            if recorder is not None:
-                self._record_vision_images(
-                    recorder, images, points, decoded, [None] * len(images),
-                    note=f"aborted: image[{bad[0]}] is unreadable",
-                )
-            self._fail(
-                recorder,
-                "image_unreadable",
-                f"image[{bad[0]}] cannot be decoded",
-                422,
-                {"valid": False},
-                artifact="overview",
-            )
-
-        sizes = {
-            (int(image.shape[1]), int(image.shape[0]))
-            for image in decoded
-            if image is not None
-        }
-        if len(sizes) != 1:
-            if recorder is not None:
-                self._record_vision_images(
-                    recorder, images, points, decoded, [None] * len(images),
-                    note="aborted: image sizes differ",
-                )
-            self._fail(
-                recorder,
-                "image_size_mismatch",
-                f"calibration images have different sizes: {sorted(sizes)}",
-                422,
-                {"valid": False},
-                artifact="overview",
-            )
-        width, height = next(iter(sizes))
-
-        detections = [self.pick.locator.find(image) for image in decoded]
-        invalid = [
-            index
-            for index, detection in enumerate(detections)
-            if not detection.valid
-        ]
-        if invalid:
-            if recorder is not None:
-                self._record_vision_images(
-                    recorder, images, points, decoded, detections,
-                    note=f"target missing in image[{invalid[0]}]",
-                )
-            self._fail(
-                recorder,
-                "no_target",
-                f"image[{invalid[0]}]: target not found "
-                f"({detections[invalid[0]].reason or 'no_target'})",
-                422,
-                {"valid": False},
-                artifact="overview",
-                extra={"image_index": invalid[0]},
-            )
-
-        if recorder is not None:
-            self._record_vision_images(
-                recorder, images, points, decoded, detections
             )
 
         try:
-            calibration = fit_image_to_robot(
-                [detection.center for detection in detections],
-                points,
-                image_size=(width, height),
-                confidences=[detection.confidence for detection in detections],
-                metadata={"source": "pick_api"},
+            calibration = self.pick.calibrate_vision(
+                image_points,
+                robot_points,
+                image_size=size,
+                principal_point=body.principal_point,
+                confidences=body.confidences,
             )
         except CalibrationError as exc:
             self._fail(
@@ -428,20 +377,19 @@ class PickService:
                 str(exc),
                 422,
                 {"valid": False},
-                artifact="overview",
             )
+            raise  # pragma: no cover - _fail always raises
 
+        rows = self._point_rows(calibration, image_points, robot_points)
         if not calibration.valid:
             if recorder is not None:
-                for index, sample in enumerate(calibration.samples):
-                    recorder.set_residual(index, sample.residual_px)
+                recorder.add_points(rows)
             self._fail(
                 recorder,
                 "calibration_invalid",
                 f"rms {calibration.rms_px:.3f} px exceeds the quality gate",
                 422,
                 {"valid": False},
-                artifact="overview",
                 extra={
                     "rms_px": float(calibration.rms_px),
                     "warnings": list(calibration.warnings),
@@ -450,25 +398,27 @@ class PickService:
 
         matrix = np.asarray(calibration.matrix, dtype=float)
         if recorder is not None:
-            for index, sample in enumerate(calibration.samples):
-                recorder.set_residual(index, sample.residual_px)
-            recorder.build_overview()
-
+            recorder.add_points(rows)
+        principal = [float(value) for value in calibration.principal_point]
         debug_result: Dict[str, Any] = {
             "matrix": matrix.tolist(),
             "rms_px": float(calibration.rms_px),
             "rms_mm": float(calibration.rms_mm),
             "num_points": len(calibration.samples),
-            "principal_point": [float(value) for value in calibration.principal_point],
-            "image_size": None
-            if calibration.image_size is None
-            else [int(value) for value in calibration.image_size],
+            "principal_point": principal,
+            "image_size": [size[0], size[1]],
             "warnings": list(calibration.warnings),
+            "samples": [sample.as_dict() for sample in calibration.samples],
         }
         manifest = self._finish_success(recorder, debug_result)
         response: Dict[str, Any] = {
             "ok": True,
             "matrix": matrix.tolist(),
+            "rms_px": float(calibration.rms_px),
+            "rms_mm": float(calibration.rms_mm),
+            "principal_point": principal,
+            "image_size": [size[0], size[1]],
+            "warnings": list(calibration.warnings),
         }
         if manifest is not None:
             response["run_id"] = manifest["run_id"]
@@ -478,22 +428,22 @@ class PickService:
 
     def calibrate_offset(
         self,
-        samples: Sequence[Mapping[str, Sequence[float]]],
+        body: OffsetRequest,
         *,
         debug: bool,
     ) -> Dict[str, Any]:
         """Return the fitted 3x3 pure-translation offset matrix."""
-        if not samples:
+        if not body.samples:
             raise PickError("bad_request", "samples must not be empty", 400)
 
         built: List[OffsetSample] = []
         raw: List[Dict[str, List[float]]] = []
-        for index, sample in enumerate(samples):
+        for index, sample in enumerate(body.samples):
             place = self._parse_xy(
-                sample.get("place_pose", []), f"samples[{index}].place_pose"
+                sample.place_pose, f"samples[{index}].place_pose"
             )
             centre = self._parse_xy(
-                sample.get("center_pose", []), f"samples[{index}].center_pose"
+                sample.center_pose, f"samples[{index}].center_pose"
             )
             built.append(OffsetSample(place_pose=place, center_pose=centre))
             raw.append(
@@ -509,7 +459,6 @@ class PickService:
                 self.settings.runs_dir,
                 "offset",
                 {"samples": raw},
-                annotated_max_px=self.settings.annotated_max_px,
             )
 
         try:
@@ -523,6 +472,7 @@ class PickService:
                 {"valid": False},
                 extra={"warnings": [str(exc)]},
             )
+            raise  # pragma: no cover - _fail always raises
 
         if not offset.valid:
             self._fail(
@@ -541,11 +491,16 @@ class PickService:
             "std_xy": [float(value) for value in offset.std_xy],
             "num_samples": len(offset.samples),
             "warnings": list(offset.warnings),
+            "samples": [sample.as_dict() for sample in offset.samples],
         }
         manifest = self._finish_success(recorder, debug_result)
         response: Dict[str, Any] = {
             "ok": True,
             "matrix": matrix.tolist(),
+            "offset_xy": [float(value) for value in offset.offset_xy],
+            "std_xy": [float(value) for value in offset.std_xy],
+            "num_samples": len(offset.samples),
+            "warnings": list(offset.warnings),
         }
         if manifest is not None:
             response["run_id"] = manifest["run_id"]
@@ -553,19 +508,11 @@ class PickService:
 
     # -- locate ----------------------------------------------------------
 
-    def locate(
-        self,
-        image_bytes: bytes,
-        filename: str,
-        robot_pose: Sequence[float],
-        vision_matrix: Sequence[Sequence[float]],
-        offset_matrix: Optional[Sequence[Sequence[float]]],
-        *,
-        debug: bool,
-    ) -> Dict[str, Any]:
-        """Locate the target and return camera-centred and gripper XY."""
-        pose = self._parse_xy(robot_pose, "robot_pose")
-        image = decode_image(image_bytes)
+    def locate(self, body: LocateRequest, *, debug: bool) -> Dict[str, Any]:
+        """Return camera-centred and gripper XY for one detected point."""
+        size = image_size_pair(body.image_size)
+        pose = self._parse_xy(body.robot_pose, "robot_pose")
+        point = check_image_point(body.image_uv, size, "image_uv")
 
         recorder: Optional[RunRecorder] = None
         if debug:
@@ -573,97 +520,34 @@ class PickService:
                 self.settings.runs_dir,
                 "locate",
                 {
+                    "image_size": [size[0], size[1]],
+                    "image_uv": [point[0], point[1]],
                     "robot_pose": [pose[0], pose[1]],
-                    "vision_matrix": vision_matrix,
-                    "offset_matrix": offset_matrix,
-                    "image": {
-                        "filename": filename,
-                        "sha256": sha256_bytes(image_bytes),
-                        "bytes": len(image_bytes),
-                    },
+                    "vision_matrix": body.vision_matrix,
+                    "offset_matrix": body.offset_matrix,
+                    "radius_px": body.radius_px,
                 },
-                annotated_max_px=self.settings.annotated_max_px,
-            )
-
-        if image is None:
-            if recorder is not None:
-                recorder.add_image(
-                    0, filename, image_bytes, None, None,
-                    name="image", robot_xy=pose, note="image unreadable",
-                    error="image_unreadable",
-                )
-            self._fail(
-                recorder,
-                "image_unreadable",
-                "image cannot be decoded",
-                422,
-                {"valid": False},
-                artifact="annotated",
             )
 
         try:
             location = self.pick.locate(
-                image, pose, vision_matrix, offset_matrix
+                point,
+                pose,
+                body.vision_matrix,
+                body.offset_matrix,
+                image_size=size,
+                radius_px=body.radius_px,
             )
         except PickError as exc:
-            if recorder is not None:
-                recorder.add_image(
-                    0, filename, image_bytes, image, None,
-                    name="image", robot_xy=pose, note=exc.message,
-                    error=exc.code,
-                )
-                self._fail(
-                    recorder,
-                    exc.code,
-                    exc.message,
-                    exc.status,
-                    {"valid": False, "reason": exc.code},
-                    artifact="annotated",
-                    extra=exc.details,
-                )
-            raise
-
-        if not location.valid:
-            if recorder is not None:
-                recorder.add_image(
-                    0, filename, image_bytes, image, location.detection,
-                    name="image", robot_xy=pose,
-                    note=location.reason, error=location.reason,
-                )
             self._fail(
                 recorder,
-                location.reason,
-                f"target not found ({location.reason})",
-                422,
-                location.as_dict(),
-                artifact="annotated",
-                extra={"confidence": float(location.confidence)},
+                exc.code,
+                exc.message,
+                exc.status,
+                {"valid": False, "reason": exc.code},
+                extra=exc.details,
             )
-
-        if recorder is not None:
-            height, width = image.shape[:2]
-            extra_lines = [
-                f"camera=({location.camera_center_xy[0]:.3f}, "
-                f"{location.camera_center_xy[1]:.3f})",
-                "grip=("
-                + (
-                    f"{location.gripper_xy[0]:.3f}, {location.gripper_xy[1]:.3f}"
-                    if location.gripper_xy is not None
-                    else "N/A"
-                )
-                + ")",
-            ]
-            recorder.add_image(
-                0,
-                filename,
-                image_bytes,
-                image,
-                location.detection,
-                name="image",
-                robot_xy=pose,
-                principal_point=((width - 1) * 0.5, (height - 1) * 0.5),
-                extra_lines=extra_lines,
-            )
+            raise  # pragma: no cover - _fail always raises
 
         manifest = self._finish_success(recorder, location.as_dict())
         response: Dict[str, Any] = {
@@ -677,6 +561,10 @@ class PickService:
             else [
                 float(location.gripper_xy[0]),
                 float(location.gripper_xy[1]),
+            ],
+            "delta_xy": [
+                float(location.delta_xy[0]),
+                float(location.delta_xy[1]),
             ],
         }
         if manifest is not None:
@@ -702,33 +590,6 @@ def _error_payload(error: PickError) -> Dict[str, Any]:
     }
     payload.update(error.details)
     return payload
-
-
-def _read_upload(upload: UploadFile) -> bytes:
-    """Read an uploaded file synchronously (the routes run in a thread pool)."""
-    return upload.file.read()
-
-
-def _filename(upload: UploadFile, fallback: str) -> str:
-    name = upload.filename
-    return name if name else fallback
-
-
-def _parse_matrix_field(value: str, name: str) -> List[List[float]]:
-    try:
-        matrix = json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise PickError(
-            "bad_matrix", f"{name} is not valid JSON: {exc}", 400
-        ) from exc
-    if not isinstance(matrix, list):
-        raise PickError("bad_matrix", f"{name} must be a 3x3 array", 400)
-    return matrix
-
-
-# ---------------------------------------------------------------------------
-# App factory
-# ---------------------------------------------------------------------------
 
 
 def create_app(settings: Optional[PickSettings] = None) -> FastAPI:
@@ -823,71 +684,18 @@ def create_app(settings: Optional[PickSettings] = None) -> FastAPI:
     # -- calibration -----------------------------------------------------
 
     @app.post(f"{PREFIX}/calibrate/vision")
-    def calibrate_vision(
-        images: List[UploadFile] = File(...),
-        robot_points: str = Form(...),
-    ) -> Dict[str, Any]:
-        try:
-            points = json.loads(robot_points)
-        except json.JSONDecodeError as exc:
-            raise PickError(
-                "bad_request", f"robot_points is not valid JSON: {exc}", 400
-            ) from exc
-        if not isinstance(points, list):
-            raise PickError("bad_request", "robot_points must be an array", 400)
-        payload = [
-            (_filename(upload, f"image_{index}.jpg"), _read_upload(upload))
-            for index, upload in enumerate(images)
-        ]
-        return service.calibrate_vision(
-            payload, points, debug=service.debug.enabled
-        )
+    def calibrate_vision(body: VisionRequest) -> Dict[str, Any]:
+        return service.calibrate_vision(body, debug=service.debug.enabled)
 
     @app.post(f"{PREFIX}/calibrate/offset")
     def calibrate_offset(body: OffsetRequest) -> Dict[str, Any]:
-        samples = [
-            {
-                "place_pose": item.place_pose,
-                "center_pose": item.center_pose,
-            }
-            for item in body.samples
-        ]
-        return service.calibrate_offset(
-            samples, debug=service.debug.enabled
-        )
+        return service.calibrate_offset(body, debug=service.debug.enabled)
 
     # -- locate ----------------------------------------------------------
 
     @app.post(f"{PREFIX}/locate")
-    def locate(
-        image: UploadFile = File(...),
-        robot_pose: str = Form(...),
-        vision_matrix: str = Form(...),
-        offset_matrix: Optional[str] = Form(None),
-    ) -> Dict[str, Any]:
-        try:
-            pose = json.loads(robot_pose)
-        except json.JSONDecodeError as exc:
-            raise PickError(
-                "bad_request", f"robot_pose is not valid JSON: {exc}", 400
-            ) from exc
-        if not isinstance(pose, list):
-            raise PickError("bad_request", "robot_pose must be an array", 400)
-
-        vision = _parse_matrix_field(vision_matrix, "vision_matrix")
-        offset = (
-            None
-            if offset_matrix is None or offset_matrix.strip() in {"", "null"}
-            else _parse_matrix_field(offset_matrix, "offset_matrix")
-        )
-        return service.locate(
-            _read_upload(image),
-            _filename(image, "image.jpg"),
-            pose,
-            vision,
-            offset,
-            debug=service.debug.enabled,
-        )
+    def locate(body: LocateRequest) -> Dict[str, Any]:
+        return service.locate(body, debug=service.debug.enabled)
 
     # -- runs ------------------------------------------------------------
 

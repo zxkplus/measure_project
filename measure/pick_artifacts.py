@@ -371,12 +371,25 @@ class RunRecorder:
         self.temp_dir = self.runs_dir / f".{self.run_id}.tmp"
         if self.final_dir.exists() or self.temp_dir.exists():
             raise RuntimeError(f"run already exists: {self.run_id}")
-        (self.temp_dir / "images").mkdir(parents=True)
+        self.temp_dir.mkdir(parents=True)
 
         self.inputs: Dict[str, Any] = dict(inputs)
         self.images: List[Dict[str, Any]] = []
+        self.points: List[Dict[str, Any]] = []
         self._annotated: List[np.ndarray] = []
         self.overview_rel: Optional[str] = None
+
+    def add_points(self, rows: Sequence[Dict[str, Any]]) -> None:
+        """Record the point table of a run that has no images.
+
+        Args:
+            rows: One dictionary per correspondence, already JSON-safe
+                (for example ``{"index": 0, "u": ..., "v": ..., "x": ...,
+                "y": ..., "residual_px": ...}``).
+        """
+        if self._finished:
+            raise RuntimeError("run is already finished")
+        self.points = [dict(row) for row in rows]
 
     def add_image(
         self,
@@ -503,6 +516,10 @@ class RunRecorder:
 
         write_json(self.temp_dir / "inputs.json", self.inputs)
         write_json(self.temp_dir / "result.json", result)
+        points_rel: Optional[str] = None
+        if self.points:
+            points_rel = "points.json"
+            write_json(self.temp_dir / points_rel, to_jsonable(self.points))
 
         manifest = {
             "schema": SCHEMA,
@@ -515,6 +532,7 @@ class RunRecorder:
             "error": to_jsonable(error),
             "inputs": "inputs.json",
             "result": "result.json",
+            "points": points_rel,
             "overview": self.overview_rel,
             "images": to_jsonable(self.images),
             "environment": environment_info(),
@@ -530,11 +548,19 @@ class RunRecorder:
             "  manifest.json          run metadata and file index",
             "  inputs.json            original request inputs",
             "  result.json            full algorithm output",
-            "  images/                original and annotated images",
-            "  overview.jpg           contact sheet (vision calibration)",
-            "",
-            "Replay: python -m measure.pick_replay <path-to-this-run>",
         ]
+        if points_rel is not None:
+            lines.append("  points.json            per-point table (image and robot)")
+        if self.images:
+            lines.append("  images/                original and annotated images")
+        if self.overview_rel is not None:
+            lines.append("  overview.jpg           contact sheet (vision calibration)")
+        lines.extend(
+            [
+                "",
+                "Replay: python -m measure.pick_replay <path-to-this-run>",
+            ]
+        )
         if readme:
             lines.extend(["", readme])
         (self.temp_dir / "README.txt").write_text(

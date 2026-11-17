@@ -77,18 +77,25 @@ integrating with the equipment software.  The colleague-facing walkthrough
 (workflow, field semantics, troubleshooting) is
 [`measure_api/PICK_MODULE_GUIDE.md`](measure_api/PICK_MODULE_GUIDE.md).
 
-- Business calls: `POST /api/v1/calibrate/vision` (4+ images + robot points)
-  and `POST /api/v1/calibrate/offset` (place/centre pose samples) each return
-  one 3x3 homogeneous matrix; `POST /api/v1/locate` takes the image, current
-  flange XY, `vision_matrix` and optional `offset_matrix` and returns
-  `camera_center_xy` / `gripper_xy`.
-- XY only; Z is ignored. The service never talks to the robot/PLC.
+- All three business calls are `application/json` and take **no image**: target
+  detection belongs to the caller (v1 measurement API, v2
+  `measurements.circles`, or the equipment's own recipe), which passes the
+  sub-pixel centre as `(u, v)`.
+- `POST /api/v1/calibrate/vision` takes `image_size` + `image_points` +
+  `robot_points` and returns the 3x3 matrix plus `rms_px`/`rms_mm`/`warnings`;
+  `POST /api/v1/calibrate/offset` takes place/centre pose samples and returns a
+  pure-translation matrix plus `std_xy`; `POST /api/v1/locate` takes
+  `image_uv`, `image_size`, the current flange XY and both matrices and returns
+  `camera_center_xy` / `gripper_xy` / `delta_xy`.
+- Points are validated against `image_size` (`400 point_out_of_image`), which
+  catches a `(row, col)` swap. XY only; Z is ignored. The service never talks
+  to the robot/PLC.
 - The service is stateless: no `pick_recipe.json` and no `/status`. The
   software stores both matrices and passes them back to `/locate`.
 - Global debug switch: `GET/PUT /api/v1/debug`. Debug **on** writes a
-  self-contained `data/pick_runs/<run_id>/` with original images, annotated
-  images (circle + centre + labels), `inputs.json`, `result.json`,
-  `manifest.json` and `overview.jpg`; debug **off** writes no per-call files.
+  self-contained `data/pick_runs/<run_id>/` with `inputs.json`, `result.json`,
+  `manifest.json` and, for vision runs, `points.json`; debug **off** writes no
+  per-call files.
 - Read artifacts with `GET /api/v1/runs`, `GET /api/v1/runs/{id}`,
   `GET /api/v1/runs/{id}/archive` and `/files/{id}/...`.
 - Run with `python -m measure_api.pick_server` (default `127.0.0.1:8100`);

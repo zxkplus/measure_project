@@ -22,14 +22,16 @@
 
 软件保存这两个矩阵，定位时把它们和当前法兰 XY 一起传给 `/locate`。服务端**不保存配方**，不直接和机器人/PLC 通信，也不处理 Z。
 
+**服务端不找圆，也不收图。** 圆心由软件自己的找圆工具给出（v1 测量接口、v2 `measurements.circles`、或设备自带配方），本模块只接收 `(u, v)` 与图像宽高，全部接口都是 JSON。
+
 ---
 
 ## 1. 系统组成
 
 | 文件 | 作用 |
 |---|---|
-| `measure/pick_api.py` | 纯计算核心：`GantryPick`、`TargetLocation`、矩阵校验 |
-| `measure/pick_artifacts.py` | debug run 目录、标注图、manifest、ZIP、保留清理 |
+| `measure/pick_api.py` | 纯计算核心：`GantryPick`、`TargetLocation`、矩阵校验（不含找圆） |
+| `measure/pick_artifacts.py` | debug run 目录、点表、manifest、ZIP、保留清理 |
 | `measure_api/pick_server.py` | FastAPI 服务：3 个业务接口 + debug 开关 + 产物读取 |
 | `measure/pick_replay.py` | 离线复现 CLI |
 | `measure_api/PICK_API.md` | 精简接口契约 |
@@ -51,7 +53,8 @@
 | 机械坐标 | `(X, Y)`，单位与控制器一致，通常 mm |
 | Z 轴 | **完全忽略**；请求带 3 个数也只取前两个 |
 | 图像中心 | `((W-1)/2, (H-1)/2)`，标定和定位共用 |
-| 目标 | 圆形目标；默认半径 6–3000 px；一张图一个目标（最高置信度） |
+| 找圆 | **由调用方负责**；服务只收圆心 `(u, v)` 与 `image_size` |
+| 点校验 | 点必须落在 `[0,W-1]×[0,H-1]` 内，越界按 `400 point_out_of_image` 拒绝 |
 | 分辨率 | 矩阵只在标定分辨率下有效；换分辨率/裁剪要重标 |
 
 ### 2.2 视觉矩阵
@@ -93,18 +96,19 @@ gripper_xy = camera_center_xy + (dx, dy)
 
 ```mermaid
 flowchart TD
-    A[启动服务] --> B[视觉标定<br/>4+ 张图 + 机械点]
-    B --> C{质量合格?}
-    C -- 否 --> B
-    C -- 是 --> D[保存 vision_matrix]
-    D --> E[偏移标定<br/>place_pose + center_pose]
-    E --> F{质量合格?}
-    F -- 否 --> E
-    F -- 是 --> G[保存 offset_matrix]
-    G --> H[运行时<br/>拍图 + 当前 XY]
-    H --> I[POST /locate<br/>vision_matrix + offset_matrix]
-    I --> J[camera_center_xy / gripper_xy]
-    J --> K[软件移动龙门 / 抓取]
+    A[启动服务] --> B[4+ 张图<br/>软件自己找圆]
+    B --> C[视觉标定<br/>image_points + robot_points + image_size]
+    C --> D{质量合格?}
+    D -- 否 --> B
+    D -- 是 --> E[保存 vision_matrix + image_size]
+    E --> F[偏移标定<br/>place_pose + center_pose]
+    F --> G{std_xy 合格?}
+    G -- 否 --> F
+    G -- 是 --> H[保存 offset_matrix]
+    H --> I[运行时<br/>拍图 + 找圆 + 当前 XY]
+    I --> J[POST /locate<br/>image_uv + image_size + 两个矩阵]
+    J --> K[camera_center_xy / gripper_xy]
+    K --> L[软件移动龙门 / 抓取]
 ```
 
 ### 3.1 视觉标定
@@ -112,9 +116,9 @@ flowchart TD
 1. 标定圆固定在工位上，不要动；
 2. 移动相机，让标定圆出现在画面四角（建议 4 角 + 中心，共 5 点；产线建议 7~9 点）；
 3. 每个位置拍一张图，记录当时的法兰 XY；
-4. 调 `/calibrate/vision`，保存返回的 `matrix`；
-5. 质量不合格时接口返回 422，不会给矩阵；debug 打开时看 `overview` 排查；
-6. 重新拍，直到拿到矩阵。
+4. **用软件自己的找圆工具**在每张图上取圆心 `(u, v)`，同时记下图像宽高；
+5. 调 `/calibrate/vision`，保存返回的 `matrix`、`image_size`、`rms_px`；
+6. 质量不合格时接口返回 422，不会给矩阵；重新拍，直到拿到矩阵。
 
 ### 3.2 偏移标定
 
@@ -135,9 +139,9 @@ gripper_xy = camera_center_xy + offset_xy
 
 ### 3.3 运行时定位
 
-1. 软件拍照；
+1. 软件拍照，用找圆工具拿到圆心 `(u, v)`；
 2. 读拍照时的法兰 `(X, Y)`；
-3. 带上保存的两个矩阵调 `/locate`；
+3. 带上 `image_uv`、`image_size` 和保存的两个矩阵调 `/locate`；
 4. 拿 `gripper_xy` 直接抓，或先移动到 `camera_center_xy` 再看一次；
 5. Z 轴由软件自己控制。
 
@@ -156,20 +160,26 @@ move_to(resp["gripper_xy"])
 
 ## 4. 接口 1：视觉标定
 
-`POST /api/v1/calibrate/vision`，`multipart/form-data`：
+`POST /api/v1/calibrate/vision`，JSON：
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `images` | 文件，重复 4+ 次 | 是 | 同尺寸；顺序与点位一一对应 |
-| `robot_points` | JSON 字符串 | 是 | `[[x,y], ...]`，数量与 images 相同 |
+| `image_size` | `[w, h]` | 是 | 取点时的图像宽高 |
+| `image_points` | `[[u,v], ...]` | 是 | 找圆结果，4 个以上，顺序与机械点一一对应 |
+| `robot_points` | `[[x,y], ...]` | 是 | 与 `image_points` 等长；带 Z 也只取 XY |
+| `principal_point` | `[u0,v0]` | 否 | 默认图像中心 |
+| `confidences` | `[...]` | 否 | 与点数等长，只进诊断 |
 
 ```bash
 curl -X POST http://127.0.0.1:8100/api/v1/calibrate/vision \
-  -F "images=@LL.jpg" \
-  -F "images=@LT.jpg" \
-  -F "images=@RB.jpg" \
-  -F "images=@RT.jpg" \
-  -F 'robot_points=[[10.228,308.451],[26.428,309.193],[5.638,345.111],[22.058,346.681]]'
+  -H 'content-type: application/json' \
+  -d '{
+        "image_size": [5472, 3648],
+        "image_points": [[2458.040, 2279.497], [3206.108, 1334.445],
+                         [3308.557, 2183.056], [2356.346, 1431.227]],
+        "robot_points": [[10.928, 321.647], [20.928, 331.647],
+                         [10.928, 331.647], [20.928, 321.647]]
+      }'
 ```
 
 响应：
@@ -178,17 +188,24 @@ curl -X POST http://127.0.0.1:8100/api/v1/calibrate/vision \
 {
   "ok": true,
   "matrix": [
-    [-0.00126349, -0.01169656, 40.699445],
-    [ 0.01166881, -0.00132630, 297.676806],
-    [ 0.0,         0.0,         1.0]
-  ]
+    [-0.001321362642334, -0.011627365736710, 40.681749989616],
+    [ 0.011604128501497, -0.001396038632585, 296.3037814102695],
+    [ 0.0,                0.0,                1.0]
+  ],
+  "rms_px": 0.207,
+  "rms_mm": 0.00242,
+  "principal_point": [2735.5, 1823.5],
+  "image_size": [5472, 3648],
+  "warnings": ["low_image_coverage"]
 }
 ```
 
+- 服务看不到图，`rms_px` / `rms_mm` / `warnings` 是唯一的质量信号，请和矩阵一起存；
 - 标定质量不合格：422 `calibration_invalid`，不返回矩阵；
-- 某张图找不到圆：422 `no_target`，带 `image_index`；
-- 图片数/点位数不一致：400；
-- debug 开时只额外返回 `run_id`，不返回 `rms`、`warnings`、图片 URL 等。需要看图时用 `/runs/{run_id}` 或 `/files/{run_id}/...`。
+- 机械点共线/退化：422 `calibration_failed`；
+- 点数不等：400 `point_count_mismatch`；少于 4 点：400 `bad_request`；
+- 坐标越界：400 `point_out_of_image`（多半是把 `(row, col)` 当成了 `(u, v)`）；
+- debug 开时只额外返回 `run_id`。
 
 ---
 
@@ -213,38 +230,50 @@ curl -X POST http://127.0.0.1:8100/api/v1/calibrate/vision \
     [1.0, 0.0, 8.0],
     [0.0, 1.0, 4.0],
     [0.0, 0.0, 1.0]
-  ]
+  ],
+  "offset_xy": [8.0, 4.0],
+  "std_xy": [0.0, 0.0],
+  "num_samples": 1,
+  "warnings": []
 }
 ```
 
 - `samples` 至少 1 组，建议 3~5 组；
 - `place_pose`：夹爪放下目标时的法兰 XY；
 - `center_pose`：相机对准目标时的法兰 XY；
-- 质量不合格：422 `offset_invalid`，不返回矩阵；
+- 样本互相矛盾（每轴 `std_xy` 超过 0.5 mm）：422 `offset_invalid`，不返回矩阵。
+  典型场景是把「没有真正移动」的 place/center 占位样本混进来，均值会偏几十毫米；
 - debug 开时只额外返回 `run_id`。
 
 ---
 
 ## 6. 接口 3：定位
 
-`POST /api/v1/locate`，`multipart/form-data`：
+`POST /api/v1/locate`，JSON：
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `image` | 文件 | 是 | 当前图 |
-| `robot_pose` | JSON 字符串 | 是 | 拍照时法兰 `[x,y]` |
-| `vision_matrix` | JSON 字符串 | 是 | 视觉标定返回的 3×3 矩阵 |
-| `offset_matrix` | JSON 字符串 | 否 | 偏移标定返回的 3×3 矩阵 |
+| `image_size` | `[w, h]` | 是 | 必须和标定时一致 |
+| `image_uv` | `[u, v]` | 是 | 找圆结果 |
+| `robot_pose` | `[x, y]` | 是 | 拍照时法兰 XY |
+| `vision_matrix` | 3×3 | 是 | 视觉标定返回的矩阵 |
+| `offset_matrix` | 3×3 | 否 | 偏移标定返回的矩阵 |
+| `radius_px` | float | 否 | 只写进 debug 产物，便于对账 |
 
 ```bash
-V='[[-0.00126349,-0.01169656,40.699445],[0.01166881,-0.00132630,297.676806],[0,0,1]]'
-O='[[1,0,8],[0,1,4],[0,0,1]]'
-
 curl -X POST http://127.0.0.1:8100/api/v1/locate \
-  -F "image=@shot.jpg" \
-  -F 'robot_pose=[90.0,180.0]' \
-  -F "vision_matrix=$V" \
-  -F "offset_matrix=$O"
+  -H 'content-type: application/json' \
+  -d '{
+        "image_size": [5472, 3648],
+        "image_uv": [2836.937, 1806.012],
+        "robot_pose": [15.928, 326.647],
+        "vision_matrix": [[-0.001321362642334, -0.011627365736710, 40.681749989616],
+                          [ 0.011604128501497, -0.001396038632585, 296.3037814102695],
+                          [0, 0, 1]],
+        "offset_matrix": [[1, 0, 123.67973454793294],
+                          [0, 1, 1.4771626790364583],
+                          [0, 0, 1]]
+      }'
 ```
 
 响应：
@@ -252,15 +281,17 @@ curl -X POST http://127.0.0.1:8100/api/v1/locate \
 ```json
 {
   "ok": true,
-  "camera_center_xy": [90.975, 181.975],
-  "gripper_xy": [98.975, 185.975]
+  "camera_center_xy": [15.8587, 325.4455],
+  "gripper_xy": [139.5384, 326.9227],
+  "delta_xy": [-0.0693, -1.2015]
 }
 ```
 
+- `delta_xy = A @ (image_centre - image_uv)`，就是要走的相对量，可以直接下发；
 - 不传 `offset_matrix`：`gripper_xy` 为 `null`，`camera_center_xy` 仍可用；
 - 矩阵不是 3×3、最后一行不对、奇异、偏移矩阵含旋转：400 `bad_matrix`；
-- 找不到圆：422 `no_target`；
-- 置信度低：422 `low_confidence`；
+- 点越界：400 `point_out_of_image`；
+- 找不到圆不再是本接口的错误：找圆失败由软件自己处理；
 - debug 开时只额外返回 `run_id`。
 
 ---
@@ -279,37 +310,28 @@ PUT /api/v1/debug   {"enabled": true}
 - 响应只多一个 `run_id`，不返回图片 URL；
 - 开关只在内存，重启回到 `PICK_DEBUG`。
 
-run 目录：
+run 目录（不含图片）：
 
 ```text
 data/pick_runs/<run_id>/
 ├── manifest.json          # run 元信息、文件索引、环境版本
-├── inputs.json            # 原始入参；定位时含两个矩阵
+├── inputs.json            # 原始入参：image_size、点、位姿、两个矩阵
 ├── result.json            # 矩阵/坐标 + 诊断
-├── README.txt
-├── overview.jpg           # 视觉标定拼图
-└── images/
-    ├── 00_original.jpg
-    ├── 00_annotated.jpg
-    └── ...
+├── points.json            # 视觉标定：每个点的 u,v,x,y,残差
+└── README.txt
 ```
 
-标注图：
-
-- 绿圈：检测圆；红十字：圆心；
-- 底部黑色信息栏：`uv`、半径、置信度、机械 XY；
-- 定位图额外画蓝十字（图像中心）和“中心 → 圆心”箭头；
-- 检测失败标 `NO TARGET`；
-- 原图原样保存。
+服务不再解码图片，所以没有 `images/` 和 `overview.jpg`。旧版本留下的带图 run 仍然
+能列表、能打包、也能用 `pick_replay` 复现。
 
 读取：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/api/v1/runs?limit=20` | 最近 run |
-| `GET` | `/api/v1/runs/{run_id}` | manifest，含图片相对路径 |
+| `GET` | `/api/v1/runs/{run_id}` | manifest，含点表/文件索引 |
 | `GET` | `/api/v1/runs/{run_id}/archive` | 下载 ZIP |
-| `GET` | `/files/{run_id}/...` | 原图/标注图/JSON |
+| `GET` | `/files/{run_id}/...` | 产物 JSON（旧 run 仍可读图片） |
 
 复现：
 
@@ -317,7 +339,7 @@ data/pick_runs/<run_id>/
 python -m measure.pick_replay data/pick_runs/<run_id>
 ```
 
-CLI 会重新找圆/拟合/定位，并和 `result.json` 对比矩阵或坐标。
+CLI 会用 `inputs.json` 里的坐标重算矩阵/坐标，并和 `result.json` 对比；旧的带图 run 会先重新找圆。
 
 ---
 
@@ -337,7 +359,7 @@ CLI 会重新找圆/拟合/定位，并和 `result.json` 对比矩阵或坐标�
 
 | 来源 | 量级 | 说明 |
 |---|---|---|
-| 圆心检测 | 0.03~0.2 px | 亚像素 + 置信度门控 |
+| 圆心检测 | 0.03~2 px | **由调用方的找圆工具决定**，本模块不做门控 |
 | 仿射拟合 | 0.05~0.3 px | 建议 7~9 点、覆盖全视野 |
 | 镜头畸变 | 1~5 px（边缘） | 先做内参去畸变，或缩小视野 |
 | 相机倾斜 | 0.05~0.2 mm | 倾斜时严格来说是单应，仿射只是局部近似 |
@@ -358,14 +380,20 @@ CLI 会重新找圆/拟合/定位，并和 `result.json` 对比矩阵或坐标�
 
 ## 9. 常见问题
 
-**Q：为什么标定接口没有返回 `rms` / `warnings`？**<br>
-A：业务响应只保留矩阵。质量不合格会直接 422；需要看诊断/标注图时打开 debug，用 `run_id` 查产物。
+**Q：怎么判断这次标定好不好？**<br>
+A：看响应里的 `rms_px` / `rms_mm` / `warnings`。`rms_px` 明显变大就重标；质量不合格直接 422。debug 打开时可用 `run_id` 查 `points.json` 看每个点的残差。
 
 **Q：为什么视觉矩阵的 `b` 和定位结果对不上？**<br>
 A：`/locate` 只用左上 2×2 的 `A`，`b` 只对本次标定目标位置成立，不能跨位置当绝对坐标。
 
 **Q：`gripper_xy` 为什么是 `null`？**<br>
 A：没传 `offset_matrix`。偏移标定完成后把矩阵一起传入即可。
+
+**Q：为什么接口不再收图？**<br>
+A：找圆是设备侧已有能力（v1、v2 或自家配方），放进服务会造成两份找圆逻辑和两套调参。现在服务只做矩阵与坐标换算，找圆失败由软件自己判。
+
+**Q：圆心传 `(row, col)` 会怎样？**<br>
+A：多半被 `400 point_out_of_image` 拦下；如果图像恰好接近正方形，可能漏过并算出错误矩阵，所以必须按 `(u, v) = (col, row)` 传。
 
 **Q：换分辨率/裁剪后结果不对？**<br>
 A：矩阵只在标定分辨率下有效；重新标定。
@@ -410,8 +438,9 @@ python -m measure.pick_replay data/pick_runs/<run_id>
 
 ## 11. 上线前检查清单
 
-- [ ] 视觉标定拿到 3×3 矩阵，4 个角都在图上找到正确圆；
-- [ ] 偏移标定拿到 3×3 矩阵，多次标定平移列稳定；
+- [ ] 软件找圆可用，并统一按 `(u, v) = (col, row)` 传坐标；
+- [ ] 视觉标定拿到 3×3 矩阵，`rms_px` 在 0.5 px 以内；
+- [ ] 偏移标定拿到 3×3 矩阵，`std_xy` 在 0.5 mm 以内；
 - [ ] 用新图调 `/locate`，`gripper_xy` 与手动测量一致；
 - [ ] 软件已保存两套矩阵并能正确传参；
 - [ ] 生产时 `GET /debug` 为 `false`；

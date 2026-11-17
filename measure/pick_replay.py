@@ -4,10 +4,16 @@ Usage::
 
     python -m measure.pick_replay data/pick_runs/20261106-150834-vision-a1b2c3
 
-The run directory is self-contained: original images, request inputs, the
-original matrices and the original result.  Replay re-runs detection and
-compares the new matrix / coordinates with ``result.json``.  No HTTP service
-and no robot are required.
+A run directory is self-contained: the request inputs, the original matrices
+and the original result.  Replay re-runs the math and compares the new matrix /
+coordinates with ``result.json``.  No HTTP service and no robot are required.
+
+Two generations of run exist:
+
+* coordinate runs (current) carry ``image_points`` / ``image_uv`` plus
+  ``points.json`` and store no images; replay is pure arithmetic;
+* image runs (older) carry ``images/``; replay re-runs the circle locator
+  first, using the library helpers that the HTTP layer no longer exposes.
 """
 
 from __future__ import annotations
@@ -70,18 +76,32 @@ def _compare(
 def _replay_vision(
     run_dir: Path, inputs: Dict[str, Any], result: Dict[str, Any]
 ) -> bool:
-    points = inputs.get("robot_points")
-    if not isinstance(points, list) or len(points) < 4:
+    robot_points = inputs.get("robot_points")
+    if not isinstance(robot_points, list) or len(robot_points) < 4:
         print("FAIL vision: inputs.json has no robot_points")
         return False
-    manifest = read_manifest(run_dir)
-    images = manifest.get("images") or []
-    if len(images) != len(points):
-        print("FAIL vision: image count does not match robot points")
-        return False
+    image_size = inputs.get("image_size")
+    image_points = inputs.get("image_points")
 
-    frames = [_load_image(run_dir / entry["original"]) for entry in images]
-    calibration = GantryPick().calibrate_vision(frames, points)
+    if image_points is not None and image_size is not None:
+        calibration = GantryPick().calibrate_vision(
+            image_points,
+            robot_points,
+            image_size=image_size,
+            principal_point=inputs.get("principal_point"),
+            confidences=inputs.get("confidences"),
+        )
+    else:
+        # Legacy run: the frames are archived, so re-run the locator.
+        manifest = read_manifest(run_dir)
+        images = manifest.get("images") or []
+        if len(images) != len(robot_points):
+            print("FAIL vision: image count does not match robot points")
+            return False
+        frames = [_load_image(run_dir / entry["original"]) for entry in images]
+        calibration = GantryPick().calibrate_vision_from_images(
+            frames, robot_points
+        )
     print(
         f"  replay: valid={calibration.valid} "
         f"rms_px={calibration.rms_px:.6f}"
@@ -125,15 +145,6 @@ def _replay_offset(inputs: Dict[str, Any], result: Dict[str, Any]) -> bool:
 def _replay_locate(
     run_dir: Path, inputs: Dict[str, Any], result: Dict[str, Any]
 ) -> bool:
-    image_info = inputs.get("image") or {}
-    original = image_info.get("original") or "images/00_original"
-    image_path = run_dir / original
-    if not image_path.is_file():
-        manifest = read_manifest(run_dir)
-        entry = (manifest.get("images") or [{}])[0]
-        image_path = run_dir / entry.get("original", original)
-    image = _load_image(image_path)
-
     pose = inputs.get("robot_pose") or []
     if len(pose) < 2:
         print("FAIL locate: inputs.json has no robot_pose")
@@ -144,12 +155,30 @@ def _replay_locate(
         print("FAIL locate: inputs.json has no vision_matrix")
         return False
 
-    location = GantryPick().locate(
-        image,
-        (float(pose[0]), float(pose[1])),
-        vision,
-        offset,
-    )
+    if inputs.get("image_uv") is not None and inputs.get("image_size") is not None:
+        location = GantryPick().locate(
+            inputs["image_uv"],
+            (float(pose[0]), float(pose[1])),
+            vision,
+            offset,
+            image_size=inputs["image_size"],
+            radius_px=inputs.get("radius_px"),
+        )
+    else:
+        # Legacy run: re-run the locator on the archived frame.
+        image_info = inputs.get("image") or {}
+        original = image_info.get("original") or "images/00_original"
+        image_path = run_dir / original
+        if not image_path.is_file():
+            manifest = read_manifest(run_dir)
+            entry = (manifest.get("images") or [{}])[0]
+            image_path = run_dir / entry.get("original", original)
+        location = GantryPick().locate_image(
+            _load_image(image_path),
+            (float(pose[0]), float(pose[1])),
+            vision,
+            offset,
+        )
     print(
         f"  replay: valid={location.valid} camera={location.camera_center_xy} "
         f"gripper={location.gripper_xy}"
@@ -178,6 +207,11 @@ def replay(run_dir: Path) -> bool:
     result = _read_json(run_dir / manifest.get("result", "result.json"))
     run_type = manifest.get("type")
     print(f"Replaying {run_dir.name} ({run_type}, status={manifest.get('status')})")
+    if manifest.get("status") == "failed":
+        error = manifest.get("error") or {}
+        print(f"  failed run: {error.get('code')}: {error.get('message')}")
+        print("PASS (failed runs carry no matrix to compare)")
+        return True
     if run_type == "vision":
         return _replay_vision(run_dir, inputs, result)
     if run_type == "offset":
