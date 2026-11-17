@@ -1,5 +1,7 @@
 """Frame-safe atomic geometry composition and supplied-point fits."""
 
+from measure_api.v2.timing import timed
+
 from typing import List, Optional
 
 import numpy as np
@@ -52,6 +54,7 @@ def fit_diagnostics(data: dict, requested: int = 0, successful: int = 0) -> FitD
     )
 
 
+@timed("line_fit")
 def fit_line(request: PointFitRequest, context: CalculationContext) -> LineFitResult:
     """Fit distinct supplied xy points; degeneracy is an invalid observation.
 
@@ -83,6 +86,7 @@ def fit_line(request: PointFitRequest, context: CalculationContext) -> LineFitRe
     )
 
 
+@timed("circle_fit")
 def fit_circle(request: PointFitRequest, context: CalculationContext) -> CircleFitResult:
     """Fit a circle, rejecting collinear points and nonpositive radii.
 

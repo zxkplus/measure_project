@@ -21,6 +21,7 @@ from measure_api.v2.preprocessing import (
     Preprocessing, RawPreprocessing, apply_preprocessing, display_preview,
 )
 from measure_api.v2.registry import CalculationContext, Operation
+from measure_api.v2.timing import span, timed
 from measure_api.v2.families.images import RotatedROI, encode_png, roi_to_patch_matrix
 
 
@@ -82,6 +83,7 @@ def _has_texture(pixels: np.ndarray) -> bool:
     return bool(np.sum(deviation**2) > 1e-12)
 
 
+@timed("template_build")
 def build_template(
     request: TemplateBuildRequest, context: CalculationContext,
 ) -> TemplateBuildResult:
@@ -145,6 +147,7 @@ class TemplateInspectionResult(StrictModel):
     template: FileReference
 
 
+@timed("template_load")
 def load_template(
     reference: FileReference, context: CalculationContext,
 ) -> Tuple[np.ndarray, TemplateMetadata, FileReference]:
@@ -441,6 +444,7 @@ def _scan(search: np.ndarray, pixels: np.ndarray, options: TemplateSearch,
     return result
 
 
+@timed("match_suppression")
 def _suppress(candidates: list, pixels: np.ndarray, options: TemplateSearch) -> list:
     h, w = pixels.shape[:2]
     kept = []
@@ -563,6 +567,7 @@ def _fine_window(search: np.ndarray, pixels: np.ndarray, center: tuple,
     return refined, (x0, y0, x1, y1), touches_border
 
 
+@timed("template_match")
 def match_template(
     request: TemplateMatchRequest, context: CalculationContext,
 ) -> TemplateMatchResult:
@@ -613,10 +618,11 @@ def match_template(
     coarse_threshold = min(options.score_threshold, options.coarse_score_threshold) if (
         factor < 1 or options.coarse_fine
     ) else options.score_threshold
-    for angle in _grid(options.angle_min, options.angle_max, astep):
-        for scale in _grid(options.scale_min, options.scale_max, sstep):
-            candidates.extend(_scan(coarse_search, coarse_pixels, options, angle, scale,
-                                    threshold=coarse_threshold))
+    with span("coarse_search"):
+        for angle in _grid(options.angle_min, options.angle_max, astep):
+            for scale in _grid(options.scale_min, options.scale_max, sstep):
+                candidates.extend(_scan(coarse_search, coarse_pixels, options, angle, scale,
+                                        threshold=coarse_threshold))
     if factor < 1:
         resize = np.array([[factor, 0, (factor - 1)/2],
                            [0, factor, (factor - 1)/2], [0, 0, 1]])
@@ -631,36 +637,37 @@ def match_template(
         neighborhoods = _suppress(candidates, pixels, coarse_options)
         policy = options.resolved_fine_policy()
         refined = []
-        for _, angle, scale, matrix in neighborhoods:
-            center = matrix @ [(w-1)/2, (h-1)/2, 1]
-            angles = (_grid(max(options.angle_min, angle-astep),
-                            min(options.angle_max, angle+astep), options.angle_step)
-                      if options.coarse_fine else [angle])
-            scales = (_grid(max(options.scale_min, scale-sstep),
-                            min(options.scale_max, scale+sstep), options.scale_step)
-                      if options.coarse_fine else [scale])
-            if policy == "whole":
-                # Legacy: rescan the whole search area; the pose center only labels it.
-                if not fine_windows:
-                    fine_windows.append({
-                        "angle": angle, "x": 0, "y": 0,
-                        "width": int(search.shape[1]), "height": int(search.shape[0]),
-                    })
-                for fine_angle in angles:
-                    for fine_scale in scales:
-                        refined.extend(_scan(search, pixels, options, fine_angle, fine_scale,
-                                             (0, 0), skipped=skipped_poses))
-                # Variants larger than the search area are clipped here (legacy behaviour).
-                bounded_outside = bounded_outside or bool(skipped_poses)
-                continue
-            local, window, touches_border = _fine_window(
-                search, pixels, center, angles, scales, options, skipped_poses)
-            refined.extend(local)
-            bounded_outside = bounded_outside or touches_border
-            fine_windows.append({
-                "angle": angle, "x": window[0], "y": window[1],
-                "width": window[2] - window[0], "height": window[3] - window[1],
-            })
+        with span("fine_search"):
+            for _, angle, scale, matrix in neighborhoods:
+                center = matrix @ [(w-1)/2, (h-1)/2, 1]
+                angles = (_grid(max(options.angle_min, angle-astep),
+                                min(options.angle_max, angle+astep), options.angle_step)
+                          if options.coarse_fine else [angle])
+                scales = (_grid(max(options.scale_min, scale-sstep),
+                                min(options.scale_max, scale+sstep), options.scale_step)
+                          if options.coarse_fine else [scale])
+                if policy == "whole":
+                    # Legacy: rescan the whole search area; the pose center only labels it.
+                    if not fine_windows:
+                        fine_windows.append({
+                            "angle": angle, "x": 0, "y": 0,
+                            "width": int(search.shape[1]), "height": int(search.shape[0]),
+                        })
+                    for fine_angle in angles:
+                        for fine_scale in scales:
+                            refined.extend(_scan(search, pixels, options, fine_angle, fine_scale,
+                                                 (0, 0), skipped=skipped_poses))
+                    # Variants larger than the search area are clipped here (legacy behaviour).
+                    bounded_outside = bounded_outside or bool(skipped_poses)
+                    continue
+                local, window, touches_border = _fine_window(
+                    search, pixels, center, angles, scales, options, skipped_poses)
+                refined.extend(local)
+                bounded_outside = bounded_outside or touches_border
+                fine_windows.append({
+                    "angle": angle, "x": window[0], "y": window[1],
+                    "width": window[2] - window[0], "height": window[3] - window[1],
+                })
         candidates = refined
     candidates = _suppress(candidates, pixels, options)
     matches = []

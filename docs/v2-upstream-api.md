@@ -5,7 +5,7 @@ It describes the implemented FastAPI V2 service, API version `2.0`, recipe/asset
 The HTTP prefix is `/api/v2`. Requests use JSON control parameters and shared-file references;
 images, templates and other large payloads are exchanged through directories on the same node.
 
-The service implements 66 required routes, including 56 calculation operations. Use this guide
+The service implements 70 required routes, including 61 calculation operations. Use this guide
 for integration behavior, the [complete field reference](v2-api-reference.md) for every request,
 response and nested model, and the [OpenAPI snapshot](v2-openapi.json) for client generation.
 The deployed service exposes its actual schemas at `GET /api/v2/openapi.json` and interactive
@@ -112,7 +112,7 @@ header while its operation record still carries the original calculation trace.
 
 ### Shared calculation request fields
 
-The 56 calculation POSTs take a flat object. Add these controls alongside family-specific fields;
+The calculation POSTs take a flat object. Add these controls alongside family-specific fields;
 do not wrap the family payload under `data` or `parameters` at the HTTP boundary.
 
 | Field | Type | Default | Meaning |
@@ -392,6 +392,42 @@ Default search is translation-only (angle 0°, scale 1). Supply angle/scale rang
 needed. Each match contains score, angle/scale, anchor and reference-to-inspection mapping.
 No match is a domain result with `valid: false`, an empty `matches` list and no stale geometry.
 For single template-point measurement, use `/measurements/template-points` and `max_matches: 1`.
+
+### Import an existing GUI direction template
+
+POST `/api/v2/template-imports` accepts a shared ZIP file reference and an output directory:
+
+```json
+{
+  "package": {"root": "exchange", "path": "incoming/gui-direction.zip"},
+  "output": {"directory": {"root": "outputs", "path": "direction-import"}},
+  "mode": "async",
+  "wait_ms": 0
+}
+```
+
+The ZIP may contain one common parent folder. The supported input is GUI manifest contract
+3.1, `single_box`, GRAY8 `reference.npy`, no measurement objects, one target and fixed scale.
+The importer validates reference shape and SHA-256, bounds ZIP expansion, and reads numeric
+NPY with `allow_pickle=False`. GUI workflow caches are ignored, never deserialized.
+Unsupported models fail with `template_import.invalid` and no final artifact manifest.
+
+The result returns unchanged reference pixels as PNG, a rebuilt native V2 template NPZ,
+its metadata, explicit V2 search parameters, warnings, and a jointly committed artifact set
+(reference, template, preview, original manifest). Preserve the input ZIP as a separate
+upstream asset. This operation does not create a recipe or require a measurement node.
+
+GUI `(row, column)` / `(height, width)` become V2 `(x, y)` / `(width, height)`; dimensions
+are rounded and the GUI counterclockwise box angle is negated for the clockwise V2 ROI.
+V2 template matching uses its native matcher and pyramid controls; it does not reproduce
+legacy v1 scores or cache sampling. Revalidate threshold and cycle time.
+
+For direction correction, match the imported reference and the current image with the same
+template and controls. Use `normalize(current_angle - reference_angle, 360)` as the clockwise
+image delta; the upstream controller applies its calibrated signed mechanical scale.
+Do not add the ROI angle again or assume the reference match angle is zero. Verify a single
+finite target above threshold, matching image dimensions/camera configuration and runtime
+identity before accepting a trial or reusing stored angles. Importing does not command motion.
 
 ### 3. Compute and version scalar calibration
 
@@ -791,7 +827,7 @@ Client-visible latency and total service/container peak memory require separate 
 
 ## API families and further reference
 
-The [complete route and schema catalog](v2-api-reference.md) covers all 66 routes and 226
+The [complete route and schema catalog](v2-api-reference.md) covers all 70 routes and 241
 OpenAPI components. The family guides explain algorithm/domain restrictions beyond schema bounds:
 
 | Family | Integration details |
@@ -800,6 +836,7 @@ OpenAPI components. The family guides explain algorithm/domain restrictions beyo
 | Edges, line/circle fits, composition, independent batches and product rules | [Atomic measurement guide](../measure_api/v2/ATOMIC_MEASUREMENTS.md) |
 | Templates, similarity, rigid/control alignment and transforms | [Template/alignment guide](v2-template-alignment-contract.md) |
 | Scalar/camera calibration | [Calibration guide](../measure_api/v2/CALIBRATIONS.md) |
+| Gantry vision/offset calibration and circular-target location | [Gantry pick guide](../measure_api/v2/GANTRY_PICK.md) |
 | Plane/stereo, origins, stitching and projection | [Plane/stereo guide](../measure_api/v2/PLANE_STEREO.md) |
 | Validation, preview, target-local execution and batches | [Recipe guide](../measure_api/v2/RECIPES.md) |
 | Vector/raster/diagnostics and CSV/JSON | [Result guide](../measure_api/v2/RESULTS.md) |
@@ -868,7 +905,7 @@ python docs/v2/generate_reference.py
 ```
 
 The generator uses the executable FastAPI models/registry without starting workers or reading
-shared assets. The reference snapshot has 63 OpenAPI path entries plus the two automatically served
+shared assets. The reference snapshot has 66 OpenAPI path entries plus the two automatically served
 documentation/schema routes. Numerical/deployment evidence and pending production qualification
 are described in [the acceptance record](v2-acceptance.md). Representative camera captures,
 independent physical truth, capture repeatability and agreed production performance thresholds

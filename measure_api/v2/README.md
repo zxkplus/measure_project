@@ -7,6 +7,7 @@ and [the supported contract](../../docs/v2-supported-contract.md) for all famili
 Upstream integrators should start with [the integration API guide](../../docs/v2-upstream-api.md),
 then use [the full field reference](../../docs/v2-api-reference.md) and
 [OpenAPI snapshot](../../docs/v2-openapi.json) for implementation and client generation.
+See [operation timing diagnostics](TIMING.md) for internal stage timing, completeness and limits.
 
 ## Runtime
 
@@ -175,6 +176,17 @@ Lifecycle acceptance is `python -m pytest tests/v2/test_operation_lifecycle.py`.
 HTTP server processes with explicitly gated OS file publication, worker/service SIGKILL, and restart,
 in addition to synchronous/asynchronous calculation, waiting, queue/memory bounds, verified retry,
 cache eviction, retention expiration and input/output ownership tests.
+
+## Gantry pick calibration and location
+
+The existing V2 application also serves `POST /api/v2/calibrate/vision`,
+`POST /api/v2/calibrate/offset` and `POST /api/v2/locate`. These operations reuse the
+shared `measure.pick_api.GantryPick` engine and the same prewarmed compute pool;
+no additional FastAPI application or port is needed. Images are JSON shared-file
+references, and responses use the normal V2 operation envelope. Calibration returns
+`result.matrix`; location returns `result.camera_center_xy` and `result.gripper_xy`.
+The caller stores both matrices and supplies them on each location call.
+See [GANTRY_PICK.md](GANTRY_PICK.md) for requests, responses and coordinate conventions.
 
 ## Supplied recipes
 

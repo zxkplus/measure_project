@@ -1,6 +1,3 @@
-> Historical analysis of the pre-rewrite project. The V2 deployment contract is superseded by
-> [the FastAPI deployment guide](v2-production-engine.md).
-
 # Current project functionality and measurement flow
 
 Analysis date: 2026-10-05. Evidence is the current source tree, not historical README claims.

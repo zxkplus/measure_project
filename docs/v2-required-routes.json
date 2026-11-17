@@ -47,6 +47,11 @@
   {
     "family": "Templates",
     "method": "POST",
+    "path": "/api/v2/template-imports"
+  },
+  {
+    "family": "Templates",
+    "method": "POST",
     "path": "/api/v2/template-builds"
   },
   {
@@ -188,6 +193,21 @@
     "family": "Features/calibration",
     "method": "POST",
     "path": "/api/v2/calibrations/stereo-rigs"
+  },
+  {
+    "family": "Gantry pick",
+    "method": "POST",
+    "path": "/api/v2/calibrate/vision"
+  },
+  {
+    "family": "Gantry pick",
+    "method": "POST",
+    "path": "/api/v2/calibrate/offset"
+  },
+  {
+    "family": "Gantry pick",
+    "method": "POST",
+    "path": "/api/v2/locate"
   },
   {
     "family": "Calibration utilities",

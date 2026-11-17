@@ -32,7 +32,7 @@ from measure_api.v2.models import CalculationRequest, ServiceSettings
 from measure_api.v2.operation_store import OperationStore
 from measure_api.v2.registry import CalculationContext, operations
 from measure_api.v2.result_diagnostics import operation_diagnostics
-from measure_api.v2.timing import monotonic_now
+from measure_api.v2.timing import Timing, monotonic_now
 from measure_api.v2.worker_pool import WorkerPool, terminate_process
 
 TERMINAL_STATES = {"succeeded", "failed", "cancelled", "timed_out"}
@@ -101,7 +101,8 @@ def configure_worker(settings: ServiceSettings, memory_limit: bool = True) -> No
 
 def worker_job(connection: Connection, name: str, payload: dict, settings_payload: dict,
                identity: str, trace_id: str, guard: CommitGuard,
-               settings: Optional[ServiceSettings] = None) -> bool:
+               settings: Optional[ServiceSettings] = None,
+               timing_origin: Optional[float] = None) -> bool:
     """Validate in isolation, then execute only after HTTP admission confirms identity.
 
     Args:
@@ -114,24 +115,30 @@ def worker_job(connection: Connection, name: str, payload: dict, settings_payloa
         trace_id: Trace identity echoed in the public operation and error envelope.
         guard: Shared deadline, stop flag and death-safe commit lock for publication.
         settings: Already validated deployment settings of the prewarmed worker.
+        timing_origin: Shared OS monotonic start of this operation.
 
     Returns:
         Whether the caller must retire this worker after receiving the outcome.
     """
     started = monotonic_now()
     compute_started = None
+    recorder = Timing(timing_origin, progress=lambda value: connection.send({
+        "phase": "timing", "operation_id": identity, "span": value}))
+    activation = recorder.activate()
+    activation.__enter__()
     try:
-        settings = settings or ServiceSettings.model_validate(settings_payload)
-        configure_worker(settings)
-        operation = operations()[name]
-        setup_ms = (monotonic_now() - started) * 1000
-        preparation_started = monotonic_now()
-        files = SharedFiles(settings, guard)
-        request = operation.request_model.model_validate(payload)
-        if operation.prepare is not None:
-            request = operation.prepare(request, files)
-            request = operation.request_model.model_validate(request)
-        request = files.snapshot_request(request)
+        with recorder.span("preparation", "phase"):
+            settings = settings or ServiceSettings.model_validate(settings_payload)
+            configure_worker(settings)
+            operation = operations()[name]
+            setup_ms = (monotonic_now() - started) * 1000
+            preparation_started = monotonic_now()
+            files = SharedFiles(settings, guard)
+            request = operation.request_model.model_validate(payload)
+            if operation.prepare is not None:
+                request = operation.prepare(request, files)
+                request = operation.request_model.model_validate(request)
+            request = files.snapshot_request(request)
         connection.send({"phase": "prepared", "operation_id": identity,
                          "worker_python_threads": threading.active_count(),
                          "request": request.model_dump(mode="json"),
@@ -145,10 +152,16 @@ def worker_job(connection: Connection, name: str, payload: dict, settings_payloa
             return False
         context = CalculationContext(settings, identity, trace_id, guard)
         compute_started = monotonic_now()
-        result = operation.result_model.model_validate(operation.execute(request, context))
-        outcome = {"ok": True, "result": result.model_dump(mode="json"),
-                   "compute_ms": (monotonic_now() - compute_started) * 1000,
-                   "cache": context.files.cache_stats}
+        with recorder.span("execution", "phase"):
+            executed = operation.execute(request, context)
+            with recorder.span("result_validate"):
+                result = operation.result_model.model_validate(executed)
+            with recorder.span("result_encode"):
+                encoded_result = result.model_dump(mode="json")
+            outcome = {"ok": True, "result": encoded_result,
+                       "compute_ms": (monotonic_now() - compute_started) * 1000,
+                       "cache": context.files.cache_stats}
+        outcome["timing"] = recorder.snapshot()
         context.files.finalize(outcome)
     except ServiceError as error:
         outcome = {"ok": False, "error": error.payload(trace_id), "status": error.status}
@@ -160,8 +173,11 @@ def worker_job(connection: Connection, name: str, payload: dict, settings_payloa
         outcome = {"ok": False, "recycle_worker": True, "error": ServiceError(
             "calculation.failed", "Calculation failed unexpectedly", 500,
         ).payload(trace_id), "status": 500}
+    finally:
+        activation.__exit__(None, None, None)
     if compute_started is not None and "compute_ms" not in outcome:
         outcome["compute_ms"] = (monotonic_now() - compute_started) * 1000
+    outcome["timing"] = recorder.snapshot(complete=True)
     try:
         connection.send({"phase": "finished", "operation_id": identity, **outcome})
     except (BrokenPipeError, EOFError, OSError):
@@ -195,7 +211,7 @@ def worker_main(connection: Connection, settings_payload: dict) -> None:
                 return
             identity = task["identity"]
             recycle = worker_job(connection, task["name"], task["request"], settings_payload,
-                       identity, task["trace_id"], task["guard"], settings)
+                       identity, task["trace_id"], task["guard"], settings, task.get("timing_origin"))
             del task
             gc.collect()
             if recycle:
@@ -292,7 +308,7 @@ class OperationRuntime:
                     record.update(state="succeeded", result=recovered["result"],
                                   completed_at=utc_now())
                     record["diagnostics"].update(operation_diagnostics(recovered["result"]))
-                    for metric in ["compute_ms", "cache"]:
+                    for metric in ["compute_ms", "cache", "timing"]:
                         if metric in recovered:
                             record["diagnostics"][metric] = recovered[metric]
                 else:
@@ -589,7 +605,7 @@ class OperationRuntime:
                 await asyncio.wait_for(asyncio.to_thread(connection.send, {
                     "identity": identity, "trace_id": record["trace_id"],
                     "name": record["operation"], "request": job["request"].model_dump(mode="json"),
-                    "guard": job["guard"],
+                    "guard": job["guard"], "timing_origin": job["started"],
                 }), max(0, job["deadline"] - monotonic_now()))
             except asyncio.TimeoutError:
                 await self._stop(identity, "timed_out", "operation.timed_out")
@@ -618,6 +634,19 @@ class OperationRuntime:
                     if message.get("operation_id") != identity:
                         raise RuntimeError("Worker returned another operation's message")
                     record["diagnostics"]["ipc_receive_ms"] = (monotonic_now()-received) * 1000
+                    if message["phase"] == "timing":
+                        timing = record["diagnostics"].setdefault("timing", {
+                            "schema_version": 1, "status": "partial", "spans": [],
+                            "truncated": False})
+                        value = message["span"]
+                        spans = timing["spans"]
+                        prior = next((i for i, item in enumerate(spans)
+                                      if item["id"] == value["id"]), None)
+                        if prior is not None:
+                            spans[prior] = value
+                        elif len(spans) < 500:
+                            spans.append(value)
+                        continue
                     if message["phase"] == "prepared":
                         record["diagnostics"]["prepared_received_monotonic"] = monotonic_now()
                         binding_started = monotonic_now()
@@ -651,6 +680,8 @@ class OperationRuntime:
                         if not job["prepared"].done():
                             job["prepared"].set_result(True)
                     else:
+                        if "timing" in message:
+                            record["diagnostics"]["timing"] = message["timing"]
                         recovered = self._completed(identity)
                         if recovered is not None:
                             message = recovered
@@ -677,6 +708,8 @@ class OperationRuntime:
                         record["result"] = recovered["result"]
                         record["diagnostics"]["compute_ms"] = recovered["compute_ms"]
                         record["diagnostics"]["cache"] = recovered["cache"]
+                        if "timing" in recovered:
+                            record["diagnostics"]["timing"] = recovered["timing"]
                         await self._finish(identity, "succeeded")
                         break
                     record["diagnostics"]["http_status"] = 503
@@ -697,7 +730,7 @@ class OperationRuntime:
                 recovered = self._completed(identity)
                 if recovered is not None:
                     record["result"] = recovered["result"]
-                    for metric in ["compute_ms", "cache"]:
+                    for metric in ["compute_ms", "cache", "timing"]:
                         if metric in recovered:
                             record["diagnostics"][metric] = recovered[metric]
                     await self._finish(identity, "succeeded")
@@ -763,12 +796,39 @@ class OperationRuntime:
         record["diagnostics"].update(
             operation_diagnostics(record.get("result"), record.get("error"))
         )
+        timing = record["diagnostics"].setdefault("timing", {
+            "schema_version": 1, "status": "partial", "spans": [], "truncated": False})
+        origin = self.jobs.get(identity, {}).get("started")
+        if origin is not None:
+            diagnostics = record["diagnostics"]
+            def interval(name, begin, duration):
+                if begin is not None and duration is not None:
+                    timing["spans"].append({"id": "runtime-" + name, "name": name,
+                        "kind": "phase", "start_ms": max(0.0, begin),
+                        "duration_ms": max(0.0, duration), "state": "succeeded"})
+            queue = diagnostics.get("queue_ms")
+            interval("queue", 0.0, queue)
+            interval("worker_dispatch", queue, diagnostics.get("worker_dispatch_ms"))
+            prepared = diagnostics.get("prepared_received_monotonic")
+            interval("identity_binding", None if prepared is None else (prepared-origin)*1000,
+                     diagnostics.get("identity_binding_ms"))
         record["completed_at"] = utc_now()
         self.metadata[identity]["terminal_at"] = time.time()
         started = monotonic_now()
+        completion = timing["status"]
+        timing["status"] = "partial"
         await self._transition(identity, state)
+        timing["status"] = completion
         record["diagnostics"]["terminal_persist_ms"] = (monotonic_now() - started) * 1000
         record["diagnostics"]["terminal_observable_at"] = utc_now()
+        if origin is not None:
+            interval("terminal_persist", (started-origin)*1000,
+                     record["diagnostics"]["terminal_persist_ms"])
+            timing["total_ms"] = (monotonic_now()-origin)*1000
+        if len(timing["spans"]) > 500:
+            timing["spans"] = timing["spans"][:500]
+            timing["truncated"] = True
+            timing["status"] = "partial"
 
     async def _stop(self, identity: str, state: str, code: str) -> None:
         job = self.jobs.get(identity)

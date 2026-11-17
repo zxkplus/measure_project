@@ -1,5 +1,11 @@
 # Gantry pick HTTP API
 
+The three business operations are also integrated into the existing V2 service at
+`/api/v2/calibrate/vision`, `/api/v2/calibrate/offset` and `/api/v2/locate`.
+Use [the V2 gantry pick contract](v2/GANTRY_PICK.md) for JSON shared-file requests and
+V2 operation responses; no separate service is needed. The standalone compatibility
+service and its multipart/debug API are documented below.
+
 Stateless HTTP service for a three-axis gantry.  Each calibration call returns
 one 3x3 homogeneous matrix; the calling software stores both matrices and sends
 them back to `/locate`.  The service computes XY only and never talks to a

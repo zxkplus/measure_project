@@ -13,7 +13,7 @@ inspect both state and validity.
 
 ## Route index
 
-66 required routes, including 56 calculation operations.
+70 required routes, including 61 calculation operations.
 Documentation/schema endpoints are served by FastAPI but excluded from its paths list.
 
 | Family | Method | Route | Calculation ID |
@@ -27,6 +27,7 @@ Documentation/schema endpoints are served by FastAPI but excluded from its paths
 | Images | POST | [`/api/v2/image-previews`](#route-api-v2-image-previews) | `image-previews` |
 | Images | POST | [`/api/v2/image-preprocessings`](#route-api-v2-image-preprocessings) | `image-preprocessings` |
 | Images | POST | [`/api/v2/image-crops`](#route-api-v2-image-crops) | `image-crops` |
+| Templates | POST | [`/api/v2/template-imports`](#route-api-v2-template-imports) | `template-imports` |
 | Templates | POST | [`/api/v2/template-builds`](#route-api-v2-template-builds) | `template-builds` |
 | Templates | POST | [`/api/v2/template-inspections`](#route-api-v2-template-inspections) | `template-inspections` |
 | Templates | POST | [`/api/v2/template-matches`](#route-api-v2-template-matches) | `template-matches` |
@@ -56,6 +57,9 @@ Documentation/schema endpoints are served by FastAPI but excluded from its paths
 | Features/calibration | POST | [`/api/v2/calibrations/cameras`](#route-api-v2-calibrations-cameras) | `calibrations.cameras` |
 | Features/calibration | POST | [`/api/v2/calibrations/plane-mappings`](#route-api-v2-calibrations-plane-mappings) | `calibrations.plane-mappings` |
 | Features/calibration | POST | [`/api/v2/calibrations/stereo-rigs`](#route-api-v2-calibrations-stereo-rigs) | `calibrations.stereo-rigs` |
+| Gantry pick | POST | [`/api/v2/calibrate/vision`](#route-api-v2-calibrate-vision) | `calibrate.vision` |
+| Gantry pick | POST | [`/api/v2/calibrate/offset`](#route-api-v2-calibrate-offset) | `calibrate.offset` |
+| Gantry pick | POST | [`/api/v2/locate`](#route-api-v2-locate) | `locate` |
 | Calibration utilities | POST | [`/api/v2/calibration-validations`](#route-api-v2-calibration-validations) | `calibration-validations` |
 | Calibration utilities | POST | [`/api/v2/calibration-origin-adjustments`](#route-api-v2-calibration-origin-adjustments) | `calibration-origin-adjustments` |
 | Calibration utilities | POST | [`/api/v2/calibration-inspections`](#route-api-v2-calibration-inspections) | `calibration-inspections` |
@@ -200,6 +204,26 @@ Named output ports (for recipe bindings):
 {
   "image": "image",
   "mapping": "transform"
+}
+```
+
+Scheduling, errors and 200/202 behavior follow the shared guide.
+
+<a id="route-api-v2-template-imports"></a>
+
+### POST `/api/v2/template-imports`
+
+Import a GUI manifest direction template.
+
+Calculation ID: `template-imports`.
+
+Request: [TemplateImportRequest](#schema-templateimportrequest). Response: [OperationResponse_TemplateImportResult_](#schema-operationresponse-templateimportresult).
+
+Named output ports (for recipe bindings):
+
+```json
+{
+  "template": "template_asset"
 }
 ```
 
@@ -800,6 +824,67 @@ Named output ports (for recipe bindings):
 ```json
 {
   "asset": "calibration"
+}
+```
+
+Scheduling, errors and 200/202 behavior follow the shared guide.
+
+<a id="route-api-v2-calibrate-vision"></a>
+
+### POST `/api/v2/calibrate/vision`
+
+Compute gantry vision calibration from shared images.
+
+Calculation ID: `calibrate.vision`.
+
+Request: [GantryVisionRequest](#schema-gantryvisionrequest). Response: [OperationResponse_GantryMatrixResult_](#schema-operationresponse-gantrymatrixresult).
+
+Named output ports (for recipe bindings):
+
+```json
+{
+  "matrix": "matrix"
+}
+```
+
+Scheduling, errors and 200/202 behavior follow the shared guide.
+
+<a id="route-api-v2-calibrate-offset"></a>
+
+### POST `/api/v2/calibrate/offset`
+
+Compute gantry camera-to-gripper offset.
+
+Calculation ID: `calibrate.offset`.
+
+Request: [GantryOffsetRequest](#schema-gantryoffsetrequest). Response: [OperationResponse_GantryMatrixResult_](#schema-operationresponse-gantrymatrixresult).
+
+Named output ports (for recipe bindings):
+
+```json
+{
+  "matrix": "matrix"
+}
+```
+
+Scheduling, errors and 200/202 behavior follow the shared guide.
+
+<a id="route-api-v2-locate"></a>
+
+### POST `/api/v2/locate`
+
+Locate a circular target for camera or gripper centring.
+
+Calculation ID: `locate`.
+
+Request: [GantryLocateRequest](#schema-gantrylocaterequest). Response: [OperationResponse_GantryLocateResult_](#schema-operationresponse-gantrylocateresult).
+
+Named output ports (for recipe bindings):
+
+```json
+{
+  "camera_center_xy": "robot_xy",
+  "gripper_xy": "robot_xy"
 }
 ```
 
@@ -2110,6 +2195,129 @@ Complete verified upstream snapshot; prior IDs are optional provenance only.
 | `tolerance` | number | no | `1e-09` | minimum: 0.0; maximum: 1.0 |
 | `provenance` | object | no | `not declared` | — |
 
+<a id="schema-gantrylocaterequest"></a>
+
+### GantryLocateRequest
+
+Locate a circle using explicit matrices and the flange pose at capture time.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `mode` | `"sync"`, `"async"` | no | `"sync"` | — |
+| `wait_ms` | integer | no | `10000` | minimum: 0.0; maximum: 60000.0 |
+| `timeout_ms` | integer | no | `60000` | minimum: 1.0; maximum: 3600000.0 |
+| `idempotency_key` | string or null | no | `not declared` | anyOf[0] minLength: 1; anyOf[0] maxLength: 200 |
+| `image` | [FileReference](#schema-filereference) | yes | `not declared` | — |
+| `robot_pose` | array of number | yes | `not declared` | minItems: 2; maxItems: 3 |
+| `vision_matrix` | array of array of number | yes | `not declared` | minItems: 3; maxItems: 3 |
+| `offset_matrix` | array of array of number or null | no | `not declared` | anyOf[0] minItems: 3; anyOf[0] maxItems: 3 |
+
+<a id="schema-gantrylocateresult"></a>
+
+### GantryLocateResult
+
+Flange XY poses that centre the camera and optionally the gripper on the target.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `camera_center_xy` | array of number | yes | `not declared` | minItems: 2; maxItems: 2 |
+| `gripper_xy` | array of number or null | no | `not declared` | anyOf[0] minItems: 2; anyOf[0] maxItems: 2 |
+
+<a id="schema-gantrymatrixresult"></a>
+
+### GantryMatrixResult
+
+Upstream-owned row-major 3x3 vision affine or pure-translation offset.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `matrix` | array of array of number | yes | `not declared` | minItems: 3; maxItems: 3 |
+
+<a id="schema-gantryoffsetrequest"></a>
+
+### GantryOffsetRequest
+
+One or more samples of the additive camera-to-gripper XY correction.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `mode` | `"sync"`, `"async"` | no | `"sync"` | — |
+| `wait_ms` | integer | no | `10000` | minimum: 0.0; maximum: 60000.0 |
+| `timeout_ms` | integer | no | `60000` | minimum: 1.0; maximum: 3600000.0 |
+| `idempotency_key` | string or null | no | `not declared` | anyOf[0] minLength: 1; anyOf[0] maxLength: 200 |
+| `samples` | array of [GantryOffsetSample](#schema-gantryoffsetsample) | yes | `not declared` | minItems: 1 |
+
+<a id="schema-gantryoffsetsample"></a>
+
+### GantryOffsetSample
+
+Placed-target and camera-centred flange poses in the same controller unit.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `place_pose` | array of number | yes | `not declared` | minItems: 2; maxItems: 3 |
+| `center_pose` | array of number | yes | `not declared` | minItems: 2; maxItems: 3 |
+
+<a id="schema-gantryvisionpointresidual"></a>
+
+### GantryVisionPointResidual
+
+Residual of one correspondence; robot distances use controller units.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `residual_px` | number | yes | `not declared` | — |
+| `residual_mm` | number | yes | `not declared` | — |
+
+<a id="schema-gantryvisionpointsrequest"></a>
+
+### GantryVisionPointsRequest
+
+Original-image pixel centres paired with actual flange XY, without image detection.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `mode` | `"sync"`, `"async"` | no | `"sync"` | — |
+| `wait_ms` | integer | no | `10000` | minimum: 0.0; maximum: 60000.0 |
+| `timeout_ms` | integer | no | `60000` | minimum: 1.0; maximum: 3600000.0 |
+| `idempotency_key` | string or null | no | `not declared` | anyOf[0] minLength: 1; anyOf[0] maxLength: 200 |
+| `image_points` | array of array of number | yes | `not declared` | minItems: 4 |
+| `robot_points` | array of array of number | yes | `not declared` | minItems: 4 |
+| `image_size` | array of integer | yes | `not declared` | minItems: 2; maxItems: 2 |
+| `calib_z` | number | yes | `not declared` | — |
+
+<a id="schema-gantryvisionpointsresult"></a>
+
+### GantryVisionPointsResult
+
+Candidate affine and quality diagnostics; upstream explicitly applies it.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `matrix` | array of array of number | yes | `not declared` | minItems: 3; maxItems: 3 |
+| `valid` | boolean | yes | `not declared` | — |
+| `warnings` | array of string | yes | `not declared` | — |
+| `residuals` | array of [GantryVisionPointResidual](#schema-gantryvisionpointresidual) | yes | `not declared` | — |
+| `rms_px` | number | yes | `not declared` | — |
+| `max_px` | number | yes | `not declared` | — |
+| `rms_mm` | number | yes | `not declared` | — |
+| `max_mm` | number | yes | `not declared` | — |
+
+<a id="schema-gantryvisionrequest"></a>
+
+### GantryVisionRequest
+
+Same-size shared images paired with flange XY poses; optional Z is ignored.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `mode` | `"sync"`, `"async"` | no | `"sync"` | — |
+| `wait_ms` | integer | no | `10000` | minimum: 0.0; maximum: 60000.0 |
+| `timeout_ms` | integer | no | `60000` | minimum: 1.0; maximum: 3600000.0 |
+| `idempotency_key` | string or null | no | `not declared` | anyOf[0] minLength: 1; anyOf[0] maxLength: 200 |
+| `images` | array of [FileReference](#schema-filereference) | yes | `not declared` | minItems: 4 |
+| `robot_points` | array of array of number | yes | `not declared` | minItems: 4 |
+
 <a id="schema-geometrytransformrequest"></a>
 
 ### GeometryTransformRequest
@@ -2794,6 +3002,54 @@ Physical board coordinate in the declared unit.
 | `completed_at` | string or null | no | `not declared` | — |
 | `diagnostics` | object | no | `not declared` | — |
 
+<a id="schema-operationresponse-gantrylocateresult"></a>
+
+### OperationResponse_GantryLocateResult_
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `operation_id` | string | yes | `not declared` | — |
+| `operation` | string | yes | `not declared` | — |
+| `state` | `"queued"`, `"running"`, `"cancelling"`, `"succeeded"`, `"failed"`, `"cancelled"`, `"timed_out"` | yes | `not declared` | — |
+| `trace_id` | string | yes | `not declared` | — |
+| `result` | [GantryLocateResult](#schema-gantrylocateresult) or null | no | `not declared` | — |
+| `error` | [ErrorDetail](#schema-errordetail) or null | no | `not declared` | — |
+| `created_at` | string | yes | `not declared` | — |
+| `completed_at` | string or null | no | `not declared` | — |
+| `diagnostics` | object | no | `not declared` | — |
+
+<a id="schema-operationresponse-gantrymatrixresult"></a>
+
+### OperationResponse_GantryMatrixResult_
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `operation_id` | string | yes | `not declared` | — |
+| `operation` | string | yes | `not declared` | — |
+| `state` | `"queued"`, `"running"`, `"cancelling"`, `"succeeded"`, `"failed"`, `"cancelled"`, `"timed_out"` | yes | `not declared` | — |
+| `trace_id` | string | yes | `not declared` | — |
+| `result` | [GantryMatrixResult](#schema-gantrymatrixresult) or null | no | `not declared` | — |
+| `error` | [ErrorDetail](#schema-errordetail) or null | no | `not declared` | — |
+| `created_at` | string | yes | `not declared` | — |
+| `completed_at` | string or null | no | `not declared` | — |
+| `diagnostics` | object | no | `not declared` | — |
+
+<a id="schema-operationresponse-gantryvisionpointsresult"></a>
+
+### OperationResponse_GantryVisionPointsResult_
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `operation_id` | string | yes | `not declared` | — |
+| `operation` | string | yes | `not declared` | — |
+| `state` | `"queued"`, `"running"`, `"cancelling"`, `"succeeded"`, `"failed"`, `"cancelled"`, `"timed_out"` | yes | `not declared` | — |
+| `trace_id` | string | yes | `not declared` | — |
+| `result` | [GantryVisionPointsResult](#schema-gantryvisionpointsresult) or null | no | `not declared` | — |
+| `error` | [ErrorDetail](#schema-errordetail) or null | no | `not declared` | — |
+| `created_at` | string | yes | `not declared` | — |
+| `completed_at` | string or null | no | `not declared` | — |
+| `diagnostics` | object | no | `not declared` | — |
+
 <a id="schema-operationresponse-geometrytransformresult"></a>
 
 ### OperationResponse_GeometryTransformResult_
@@ -3205,6 +3461,22 @@ Physical board coordinate in the declared unit.
 | `state` | `"queued"`, `"running"`, `"cancelling"`, `"succeeded"`, `"failed"`, `"cancelled"`, `"timed_out"` | yes | `not declared` | — |
 | `trace_id` | string | yes | `not declared` | — |
 | `result` | [TemplateBuildResult](#schema-templatebuildresult) or null | no | `not declared` | — |
+| `error` | [ErrorDetail](#schema-errordetail) or null | no | `not declared` | — |
+| `created_at` | string | yes | `not declared` | — |
+| `completed_at` | string or null | no | `not declared` | — |
+| `diagnostics` | object | no | `not declared` | — |
+
+<a id="schema-operationresponse-templateimportresult"></a>
+
+### OperationResponse_TemplateImportResult_
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `operation_id` | string | yes | `not declared` | — |
+| `operation` | string | yes | `not declared` | — |
+| `state` | `"queued"`, `"running"`, `"cancelling"`, `"succeeded"`, `"failed"`, `"cancelled"`, `"timed_out"` | yes | `not declared` | — |
+| `trace_id` | string | yes | `not declared` | — |
+| `result` | [TemplateImportResult](#schema-templateimportresult) or null | no | `not declared` | — |
 | `error` | [ErrorDetail](#schema-errordetail) or null | no | `not declared` | — |
 | `created_at` | string | yes | `not declared` | — |
 | `completed_at` | string or null | no | `not declared` | — |
@@ -4487,6 +4759,38 @@ Point port uses the same observation shape as atomic geometry ports.
 | `frame` | string | no | `"source"` | — |
 | `unit` | string | no | `"px"` | — |
 | `point` | [Point](#schema-point) or null | no | `not declared` | — |
+
+<a id="schema-templateimportrequest"></a>
+
+### TemplateImportRequest
+
+Import a bounded GUI model ZIP, without sessions or measurement nodes.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `mode` | `"sync"`, `"async"` | no | `"sync"` | — |
+| `wait_ms` | integer | no | `10000` | minimum: 0.0; maximum: 60000.0 |
+| `timeout_ms` | integer | no | `60000` | minimum: 1.0; maximum: 3600000.0 |
+| `idempotency_key` | string or null | no | `not declared` | anyOf[0] minLength: 1; anyOf[0] maxLength: 200 |
+| `package` | [FileReference](#schema-filereference) | yes | `not declared` | — |
+| `output` | [OutputSpec](#schema-outputspec) | yes | `not declared` | — |
+
+<a id="schema-templateimportresult"></a>
+
+### TemplateImportResult
+
+Native template, unchanged reference pixels and explicit search controls.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `source_package` | [FileReference](#schema-filereference) | yes | `not declared` | — |
+| `reference` | [FileReference](#schema-filereference) | yes | `not declared` | — |
+| `template` | [FileReference](#schema-filereference) | yes | `not declared` | — |
+| `metadata` | [TemplateMetadata](#schema-templatemetadata) | yes | `not declared` | — |
+| `search` | [TemplateSearch](#schema-templatesearch) | yes | `not declared` | — |
+| `warnings` | array of string | no | `not declared` | — |
+| `artifacts` | array of [FileDescriptor](#schema-filedescriptor) | yes | `not declared` | — |
+| `manifest` | [FileDescriptor](#schema-filedescriptor) | yes | `not declared` | — |
 
 <a id="schema-templateinspectionrequest"></a>
 

@@ -9,7 +9,7 @@ stateless FastAPI v2 service, which its own README designates as the
 authoritative contract. The hand-written v1 reference in
 `../api_reference.md` does not describe these routes.
 
-Paths: **64** · Schemas: **226**
+Paths: **69** · Schemas: **241**
 
 ## Endpoints
 
@@ -17,6 +17,9 @@ Paths: **64** · Schemas: **226**
 |---|---|---|---|
 | `POST` | `/api/v2/alignments/control-points` | `ControlAlignmentRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/alignments/rigid` | `RigidAlignmentRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibrate/offset` | `GantryOffsetRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibrate/vision` | `GantryVisionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/calibrate/vision-points` | `GantryVisionPointsRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/calibration-exports` | `CalibrationExportRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/calibration-features/checkerboard-corners` | `CheckerboardRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/calibration-features/dot-grids` | `DotGridRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
@@ -55,6 +58,7 @@ Paths: **64** · Schemas: **226**
 | `POST` | `/api/v2/image-undistortions` | `UndistortionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/legacy-project-conversions` | `LegacyConversionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/legacy-v1-project-conversions` | `LegacyV1ConversionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/locate` | `GantryLocateRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/measurement-batches` | `MeasurementBatchRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/measurements/circles` | `ImageCircleRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/measurements/edge-pairs` | `PairRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
@@ -74,6 +78,7 @@ Paths: **64** · Schemas: **226**
 | `POST` | `/api/v2/run-batches` | `RunBatchRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/runs` | `RunRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/template-builds` | `TemplateBuildRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
+| `POST` | `/api/v2/template-imports` | `TemplateImportRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/template-inspections` | `TemplateInspectionRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `POST` | `/api/v2/template-matches` | `TemplateMatchRequest` | 200, 202, 400, 404, 409, 410, 422, 429, 500, 503 |
 | `GET` | `/api/v2/traces/{trace_id}` | — | 200, 400, 404, 409, 410, 422, 429, 500, 503 |
@@ -85,11 +90,11 @@ Paths: **64** · Schemas: **226**
 Every v2 request/response schema is defined by the service itself and
 documented in full in `docs/v2-api-reference.md` plus the raw
 `docs/v2-openapi.json`. Only the route index is rendered here — duplicating
-226 schemas into this skill would bury it and drift from his docs.
+241 schemas into this skill would bury it and drift from his docs.
 
 ## Schema index
 
-226 schemas; see `docs/v2-api-reference.md` for every field.
+241 schemas; see `docs/v2-api-reference.md` for every field.
 
 | Schema | Kind | Properties |
 |---|---|---|
@@ -149,6 +154,15 @@ documented in full in `docs/v2-api-reference.md` plus the raw
 | `FileReference` | object | 4 |
 | `FitDiagnostics` | object | 7 |
 | `FrozenManifest` | object | 11 |
+| `GantryLocateRequest` | object | 8 |
+| `GantryLocateResult` | object | 2 |
+| `GantryMatrixResult` | object | 1 |
+| `GantryOffsetRequest` | object | 5 |
+| `GantryOffsetSample` | object | 2 |
+| `GantryVisionPointResidual` | object | 2 |
+| `GantryVisionPointsRequest` | object | 8 |
+| `GantryVisionPointsResult` | object | 8 |
+| `GantryVisionRequest` | object | 6 |
 | `GeometryTransformRequest` | object | 6 |
 | `GeometryTransformResult` | object | 4 |
 | `ImageCircleRequest` | object | 22 |
@@ -193,6 +207,9 @@ documented in full in `docs/v2-api-reference.md` plus the raw
 | `OperationResponse_DotGridResult_` | object | 9 |
 | `OperationResponse_EdgeResult_` | object | 9 |
 | `OperationResponse_EvaluationResult_` | object | 9 |
+| `OperationResponse_GantryLocateResult_` | object | 9 |
+| `OperationResponse_GantryMatrixResult_` | object | 9 |
+| `OperationResponse_GantryVisionPointsResult_` | object | 9 |
 | `OperationResponse_GeometryTransformResult_` | object | 9 |
 | `OperationResponse_ImageCircleResult_` | object | 9 |
 | `OperationResponse_ImageInspectionResult_` | object | 9 |
@@ -219,6 +236,7 @@ documented in full in `docs/v2-api-reference.md` plus the raw
 | `OperationResponse_StereoTransformResult_` | object | 9 |
 | `OperationResponse_StitchResult_` | object | 9 |
 | `OperationResponse_TemplateBuildResult_` | object | 9 |
+| `OperationResponse_TemplateImportResult_` | object | 9 |
 | `OperationResponse_TemplateInspectionResult_` | object | 9 |
 | `OperationResponse_TemplateMatchResult_` | object | 9 |
 | `OperationResponse_TemplatePointResult_` | object | 9 |
@@ -302,6 +320,8 @@ documented in full in `docs/v2-api-reference.md` plus the raw
 | `TemplateBuildRequest` | object | 10 |
 | `TemplateBuildResult` | object | 4 |
 | `TemplateFeaturePoint` | object | 5 |
+| `TemplateImportRequest` | object | 6 |
+| `TemplateImportResult` | object | 8 |
 | `TemplateInspectionRequest` | object | 5 |
 | `TemplateInspectionResult` | object | 2 |
 | `TemplateMatch` | object | 8 |

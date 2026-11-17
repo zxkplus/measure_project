@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from measure_api.v2.timing import timed, span
+
 from typing import Annotated, Literal, Union
 
 import cv2
@@ -77,6 +79,7 @@ def to_gray(image: np.ndarray) -> np.ndarray:
     return image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
 
+@timed("preprocessing")
 def apply_preprocessing(image: np.ndarray, options: Preprocessing) -> np.ndarray:
     """Apply the same definition to reference and inspection image data.
 
