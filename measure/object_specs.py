@@ -101,6 +101,7 @@ def _make_fit_circle(label: str, **p) -> FitCircleObject:
         transition=p.get("transition", "all"),
         start_phi=p.get("start_phi", 0.0),
         end_phi=p.get("end_phi", 2 * np.pi),
+        selection=p.get("selection", "nearest"),
     )
 
 
@@ -231,7 +232,7 @@ _SPECS: Tuple[ObjectSpec, ...] = (
         ("center", "radius", "measure_length1", "measure_length2"),
         {"radius_min": None, "radius_max": None, "num_measures": 12,
          "sigma": 1.0, "threshold": 30.0, "transition": "all",
-         "start_phi": 0.0, "end_phi": 2 * np.pi},
+         "selection": "nearest", "start_phi": 0.0, "end_phi": 2 * np.pi},
         (), "circle",
     ),
     ObjectSpec(

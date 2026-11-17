@@ -354,6 +354,7 @@ PARAMETERS = {
         "sigma",
         "threshold",
         "transition",
+        "selection",
         "radius_min",
         "radius_max",
         "start_phi",
@@ -429,6 +430,7 @@ def convert_parameters(kind: str, parameters: dict) -> dict:
     if kind == "FitCircle":
         return {
             **common,
+            "selection": p.get("selection", "nearest"),
             "center": xy(p["center"]),
             "radius": p["radius"],
             "search_half_length": p["measure_length1"],

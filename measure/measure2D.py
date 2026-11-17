@@ -476,12 +476,19 @@ class CircleMeasureObject(_BaseMeasureObject):
             radius_max=60,         # 最大半径
             measure_length1=10,    # 径向半长度
             measure_length2=5,     # 切向半宽度
-            num_measures=16        # 测量点数
+            num_measures=16,       # 测量点数
+            selection='nearest'    # 每个测量框选哪条边缘
         )
         result = circle_obj.measure(image)
         vis_img = circle_obj.visualize(image)
     """
-    
+
+    #: Accepted ``selection`` values.  The radial probe runs from outside the
+    #: expected circle toward its centre, so edges arrive outermost-first:
+    #: ``first`` = outermost, ``last`` = innermost.  Same contract as the v2
+    #: ``measurements.circles`` operation.
+    SELECTIONS = ('nearest', 'first', 'last', 'all')
+
     def __init__(self,
                  center: Tuple[float, float],
                  radius: float,
@@ -494,7 +501,8 @@ class CircleMeasureObject(_BaseMeasureObject):
                  threshold: float = 30.0,
                  transition: str = 'all',
                  start_phi: float = 0.0,
-                 end_phi: float = 2 * np.pi):
+                 end_phi: float = 2 * np.pi,
+                 selection: str = 'nearest'):
         """
         初始化圆测量对象
         
@@ -511,7 +519,17 @@ class CircleMeasureObject(_BaseMeasureObject):
             transition: 边缘类型 'positive'|'negative'|'all'
             start_phi: 起始角度（弧度，默认0）
             end_phi: 结束角度（弧度，默认2π）
+            selection: 每个测量框参与拟合的边缘选择
+                - 'nearest': 最接近预期半径的边缘（默认，兼容旧行为）
+                - 'first': 最外侧边缘（径向扫描的第一个）
+                - 'last': 最内侧边缘（径向扫描的最后一个）
+                - 'all': 落在 [radius_min, radius_max] 内的全部边缘
         """
+        if selection not in self.SELECTIONS:
+            raise ValueError(
+                f"CircleMeasureObject: unsupported selection {selection!r}; "
+                f"expected one of {list(self.SELECTIONS)}"
+            )
         self.center = np.array(center, dtype=np.float64)
         self.radius = radius
         self.measure_length1 = measure_length1
@@ -524,6 +542,7 @@ class CircleMeasureObject(_BaseMeasureObject):
         self.transition = transition
         self.start_phi = start_phi
         self.end_phi = end_phi
+        self.selection = selection
         
         # 存储结果
         self.result: Optional[Dict[str, Any]] = None
@@ -613,16 +632,17 @@ class CircleMeasureObject(_BaseMeasureObject):
                     if self.radius_min <= dist <= self.radius_max:
                         valid_edges.append((c, r, amp, dist))
                 
-                # 选择最接近预期半径的边缘点
-                if valid_edges:
-                    # 按距离预期半径的偏差排序
-                    valid_edges.sort(key=lambda x: abs(x[3] - self.radius))
-                    best_edge = valid_edges[0]
-                    self.edge_points.append((best_edge[0], best_edge[1]))
+                # 按 selection 选出参与拟合的边缘点
+                selected_edges = self._select_edges(valid_edges)
+                if selected_edges:
+                    for edge in selected_edges:
+                        self.edge_points.append((edge[0], edge[1]))
                     
                     self._debug_info[rect['index']] = {
                         'all_edges': [(e[0], e[1], e[2]) for e in valid_edges],
-                        'selected': (best_edge[0], best_edge[1], best_edge[2]),
+                        'selected': (selected_edges[0][0], selected_edges[0][1],
+                                     selected_edges[0][2]),
+                        'selected_count': len(selected_edges),
                         'radial_angle': rect['radial_angle']
                     }
             except Exception as e:
@@ -638,6 +658,32 @@ class CircleMeasureObject(_BaseMeasureObject):
         
         return self.result
     
+    def _select_edges(
+        self, valid_edges: List[Tuple[float, float, float, float]]
+    ) -> List[Tuple[float, float, float, float]]:
+        """Pick the edges of one radial probe that feed the circle fit.
+
+        Args:
+            valid_edges: ``(col, row, amplitude, distance)`` candidates already
+                filtered to ``[radius_min, radius_max]``, in probe order — the
+                probe runs from outside the expected circle toward its centre,
+                so the list is ordered outermost-first (same order the v2
+                ``measurements.circles`` operation relies on).
+
+        Returns:
+            The selected edges, in the order they should become fit samples.
+        """
+        if not valid_edges:
+            return []
+        if self.selection == 'all':
+            return list(valid_edges)
+        if self.selection == 'first':
+            return valid_edges[:1]
+        if self.selection == 'last':
+            return valid_edges[-1:]
+        # 'nearest': the edge closest to the expected radius.
+        return [min(valid_edges, key=lambda edge: abs(edge[3] - self.radius))]
+
     def _fit_circle(self, points: List[Tuple[float, float]]) -> Dict[str, Any]:
         """Fit selected xy samples through the reusable public numeric implementation."""
         return fit_circle_points(points)
@@ -918,6 +964,7 @@ class CircleMeasureObject(_BaseMeasureObject):
             "sigma": self.sigma,
             "threshold": self.threshold,
             "transition": self.transition,
+            "selection": self.selection,
             "start_phi": self.start_phi,
             "end_phi": self.end_phi,
         }
@@ -948,6 +995,7 @@ class CircleMeasureObject(_BaseMeasureObject):
             transition=data.get("transition", "all"),
             start_phi=float(data.get("start_phi", 0.0)),
             end_phi=float(data.get("end_phi", 2 * np.pi)),
+            selection=data.get("selection", "nearest"),
         )
 
 
@@ -1033,7 +1081,8 @@ class MetrologyModel:
                            threshold: float = 30.0,
                            transition: str = 'all',
                            start_phi: float = 0.0,
-                           end_phi: float = 2 * np.pi) -> int:
+                           end_phi: float = 2 * np.pi,
+                           selection: str = 'nearest') -> int:
         """
         添加圆测量对象
 
@@ -1052,7 +1101,8 @@ class MetrologyModel:
             threshold=threshold,
             transition=transition,
             start_phi=start_phi,
-            end_phi=end_phi
+            end_phi=end_phi,
+            selection=selection
         )
         
         idx = self._counter

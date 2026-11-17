@@ -1131,6 +1131,7 @@ class TemplateView(tk.Frame):
             "sigma": 1.0,
             "threshold": 30.0,
             "transition": "all",
+            "selection": "nearest",
             "start_phi": 0.0,
             "end_phi": 2 * np.pi,
         }
@@ -1139,6 +1140,7 @@ class TemplateView(tk.Frame):
             "measure_length1": 20.0, "measure_length2": 10.0,
             "num_measures": 12, "sigma": 1.0,
             "threshold": 30.0, "transition": "all",
+            "selection": "nearest",
         })
 
         if dlg_params is None:

@@ -208,6 +208,12 @@ class FitCircleDialog(BaseParamDialog):
         self._add_float_entry(main, "Threshold (阈值)", "threshold", 30.0, row, 0.0, 255.0); row += 1
         self._add_combo(main, "Transition (边缘方向)", "transition",
                        ["all", "positive", "negative"], "all", row); row += 1
+        # Which edge of each radial probe feeds the fit.  The probe scans from
+        # outside the expected circle inward, so 'first' is the outermost edge
+        # and 'last' the innermost one.  Mirrors the v2 measurements.circles
+        # ``selection`` contract; 'nearest' keeps the legacy behaviour.
+        self._add_combo(main, "Selection (边缘选择)", "selection",
+                       ["nearest", "first", "last", "all"], "nearest", row); row += 1
 
         self._add_buttons(main, row + 1)
 

@@ -1442,6 +1442,7 @@ class FitCircleObject(MeasureObject):
         transition: str = "all",
         start_phi: float = 0.0,
         end_phi: float = 2 * np.pi,
+        selection: str = "nearest",
     ):
         super().__init__(label)
         self._teach_center = (float(center[0]), float(center[1]))
@@ -1456,6 +1457,7 @@ class FitCircleObject(MeasureObject):
         self.sigma = sigma
         self.threshold = threshold
         self.transition = transition
+        self.selection = selection
         self.start_phi = start_phi
         self.end_phi = end_phi
 
@@ -1481,6 +1483,7 @@ class FitCircleObject(MeasureObject):
             transition=self.transition,
             start_phi=self.start_phi,
             end_phi=self.end_phi,
+            selection=self.selection,
         )
         raw = self._cached_obj.measure(image)
         if raw is None:
@@ -1523,6 +1526,7 @@ class FitCircleObject(MeasureObject):
             "sigma": self.sigma,
             "threshold": self.threshold,
             "transition": self.transition,
+            "selection": self.selection,
             "start_phi": self.start_phi,
             "end_phi": self.end_phi,
         }
@@ -1543,6 +1547,7 @@ class FitCircleObject(MeasureObject):
             transition=data.get("transition", "all"),
             start_phi=data.get("start_phi", 0.0),
             end_phi=data.get("end_phi", 2 * np.pi),
+            selection=data.get("selection", "nearest"),
         )
 
     def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:
@@ -1561,6 +1566,7 @@ class FitCircleObject(MeasureObject):
                 transition=self.transition,
                 start_phi=self.start_phi,
                 end_phi=self.end_phi,
+                selection=self.selection,
             )
         if self.result is not None and self.result.valid:
             obj.result = {
