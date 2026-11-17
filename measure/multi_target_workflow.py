@@ -216,9 +216,16 @@ def _fmt_score(score: Optional[float], digits: int = 3) -> str:
 
 
 def _result_to_dict(result) -> Dict[str, Any]:
-    """Convert a GeometricResult to a plain dict."""
+    """Convert a GeometricResult to a plain dict.
+
+    Some measurement objects publish an already plain mapping rather than a
+    ``GeometricResult``; returning it as a copy keeps ``TargetResult.to_dict()``
+    usable for both shapes instead of raising ``AttributeError`` on ``.type``.
+    """
     if result is None:
         return {"valid": False}
+    if isinstance(result, dict):
+        return dict(result)
     d = {
         "type": result.type,
         "label": result.label,

@@ -198,3 +198,37 @@ calculations. Complete batches retain per-item failures without stopping unrelat
 
 Supplied-result overlays, shared sampling diagnostics, CSV/JSON reporting and operational timing
 contracts are documented in [RESULTS.md](RESULTS.md).
+
+## GUI model assets
+
+The GUI stores a *model asset*: `manifest.json` (contract 3.0/3.1), a numeric `reference.npy` with
+its portable `reference.png`, and a derived `workflow.npz`. `/runs` does not read that layout - it
+executes a schema-1.0 recipe and verifies portable `pixels.npy`/`metadata.npy` templates - and the
+`/legacy-project-conversions` route deliberately accepts only GUI *project* JSON version 3. The
+converter publishes the missing bundle offline, without importing the GUI:
+
+```bash
+python -m measure_api.v2.gui_conversion \
+  /path/to/model_瓶口定位测试 output/gui-bundle/bottle-mouth \
+  --recipe-id bottle-mouth --run
+```
+
+It writes `recipe.json`, `reference.png`, one `<node>.npz` template per taught support,
+`run-request.json` and `bundle.json` into one directory that becomes a shared root, then validates
+the recipe with `validate_snapshot` before publishing. `--run` posts the produced request to
+`/api/v2/runs` through the real application, so a conversion is only reported as successful when the
+executor accepts it.
+
+| GUI model | V2 recipe |
+|---|---|
+| `alignment.box_center` `(row, col)`, `box_size` `(height, width)` | template support + `alignment.reference_to_patch`, using the inverse of `measure.rectify.crop_and_straighten` |
+| `alignment.template_size`, `matching.*` | `localization.search` (`max_matches` 0 means unbounded in both) |
+| `objects[].object_type` | `measurements.*` / `geometry.*` nodes, translated by the same helpers `/legacy-project-conversions` uses |
+| `objects[].parameters` (straightened patch, row/col, radians) | node `parameters` (xy, degrees) |
+| probes reaching past the patch edge | `border_policy: replicate`, matching the GUI core |
+
+Not converted, by design: `obb` (an injected detector has no recipe-level equivalent),
+`multi_point` (GUI affine control composition), and `physical_scale_mm` (a scalar scale needs an
+explicit calibration applicability, so it is rejected instead of being silently dropped). The GUI
+correlates a square stage-1 template while the converted support is the taught box, so NCC scores
+are comparable rather than identical; `bundle.json` records that and every other advisory.

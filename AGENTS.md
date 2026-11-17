@@ -132,6 +132,7 @@ from measure import MeasurementWorkflow, MultiTargetWorkflow
 | `pytest -k test_fit_circle` | Run tests matching a keyword expression. |
 | `python -m measure_api.pick_server` | Start the gantry pick HTTP service (port 8100). |
 | `pytest tests/test_pick_*.py -q` | Run the pick API/artifact/HTTP tests. |
+| `python -m measure_api.v2.gui_conversion <model_dir> <out_dir> --run` | Convert a GUI model asset into a bundle `POST /api/v2/runs` accepts. |
 
 Tests write visual output to `tests/output/<test_name>/`. All test artifacts are gitignored.
 
