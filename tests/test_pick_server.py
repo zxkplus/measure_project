@@ -151,7 +151,17 @@ def test_debug_off_returns_matrices_and_coordinates(tmp_path):
         "std_xy",
         "num_samples",
         "warnings",
+        "model",
+        "effective_model",
+        "rms_mm",
+        "max_mm",
+        "condition",
+        "rotation_deg",
+        "scale",
+        "shear",
+        "convention",
     }
+    assert offset_payload["effective_model"] == "translation"
     assert offset_payload["matrix"] == [
         [1.0, 0.0, 8.0],
         [0.0, 1.0, 4.0],
@@ -170,7 +180,9 @@ def test_debug_off_returns_matrices_and_coordinates(tmp_path):
         "camera_center_xy",
         "gripper_xy",
         "delta_xy",
+        "gripper_delta_xy",
     }
+    assert payload["gripper_delta_xy"] == pytest.approx([8.975, 5.975], abs=1e-9)
     assert payload["gripper_xy"] == pytest.approx(
         (
             payload["camera_center_xy"][0] + 8.0,
@@ -223,6 +235,58 @@ def test_real_package_reproduces_matrix_over_http(tmp_path):
     assert located.json()["gripper_xy"] == pytest.approx(
         [139.5384, 326.9227], abs=1e-4
     )
+
+
+def test_multi_point_offset_returns_an_affine_transform(tmp_path):
+    client = TestClient(create_app(_settings(tmp_path)))
+    centres = np.array([[0.0, 0.0], [200.0, 0.0], [0.0, 150.0], [200.0, 150.0],
+                        [100.0, 0.0], [0.0, 75.0], [200.0, 75.0], [100.0, 150.0]])
+    theta = np.radians(1.5)
+    linear = 1.01 * np.array([[np.cos(theta), -np.sin(theta)],
+                              [np.sin(theta), np.cos(theta)]])
+    shift = np.array([8.0, 4.0])
+    samples = [
+        {"center_pose": list(centre), "place_pose": list(linear @ centre + shift)}
+        for centre in centres
+    ]
+
+    response = client.post("/api/v1/calibrate/offset", json={"samples": samples})
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["model"] == "auto"
+    assert payload["effective_model"] == "affine"
+    assert payload["rotation_deg"] == pytest.approx(1.5, abs=1e-6)
+    assert payload["scale"] == pytest.approx(1.01, abs=1e-9)
+    matrix = np.asarray(payload["matrix"])
+    assert matrix[:2, :2] == pytest.approx(linear, abs=1e-9)
+
+    located = client.post("/api/v1/locate", json={
+        "image_size": [WIDTH, HEIGHT],
+        "image_uv": [(WIDTH - 1) * 0.5, (HEIGHT - 1) * 0.5],
+        "robot_pose": [90.0, 180.0],
+        "vision_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        "offset_matrix": payload["matrix"],
+    })
+    assert located.status_code == 200, located.text
+    body = located.json()
+    expected = matrix @ np.array([90.0, 180.0, 1.0])
+    assert body["gripper_xy"] == pytest.approx(expected[:2].tolist(), abs=1e-9)
+    assert body["gripper_delta_xy"] == pytest.approx(
+        (expected[:2] - [90.0, 180.0]).tolist(), abs=1e-9)
+
+
+def test_affine_offset_reports_its_specific_error_code(tmp_path):
+    client = TestClient(create_app(_settings(tmp_path)))
+    response = client.post("/api/v1/calibrate/offset", json={
+        "model": "affine",
+        "samples": [
+            {"center_pose": [110, 85], "place_pose": [118, 89]},
+            {"center_pose": [310, 85], "place_pose": [318, 89]},
+            {"center_pose": [110, 235], "place_pose": [118, 239]},
+        ],
+    })
+    assert response.status_code == 422
+    assert response.json()["error"] == "offset_insufficient_samples"
 
 
 def test_offset_is_optional_for_locate(tmp_path):

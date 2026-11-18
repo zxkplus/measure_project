@@ -14,7 +14,8 @@ Coordinate conventions:
 * The vision matrix is ``[[A, b], [0, 1]]``.  ``locate`` uses only ``A`` and
   the image centre; ``b`` is target-position specific and is kept only for
   audit/storage.
-* The offset matrix is a pure translation ``[[I, t], [0, 1]]``.
+* The offset matrix maps the camera-centred flange pose to the grasp pose:
+  ``[[M, t], [0, 1]]``.  ``M`` is the identity for a translation-only offset.
 
 Typical use::
 
@@ -88,8 +89,10 @@ class TargetLocation:
         camera_center_xy: Flange XY that puts the target at the image centre.
         gripper_xy: Flange XY that puts the gripper over the target; ``None``
             when no offset matrix was supplied.
-        delta_xy: ``A @ (centre - uv)``, the relative move the controller
-            needs.  Always ``(0, 0)`` when ``valid`` is ``False``.
+        delta_xy: ``A @ (centre - uv)``, the camera-centring move.  Always
+            ``(0, 0)`` when ``valid`` is ``False``.
+        gripper_delta_xy: ``gripper_xy - robot_xy``, the one-shot move to the
+            grasp pose; ``None`` when no offset matrix was supplied.
         radius_px: Target radius echoed from the caller, if it supplied one.
         detection: Raw detection for annotation and replay of image-based
             runs; excluded from :meth:`as_dict`.
@@ -102,6 +105,7 @@ class TargetLocation:
     camera_center_xy: Optional[Tuple[float, float]] = None
     gripper_xy: Optional[Tuple[float, float]] = None
     delta_xy: Tuple[float, float] = (0.0, 0.0)
+    gripper_delta_xy: Optional[Tuple[float, float]] = None
     radius_px: Optional[float] = None
     detection: Optional[CircleDetection] = field(
         default=None, repr=False, compare=False
@@ -128,6 +132,7 @@ class TargetLocation:
             "camera_center_xy": pair(self.camera_center_xy),
             "gripper_xy": pair(self.gripper_xy),
             "delta_xy": pair(self.delta_xy),
+            "gripper_delta_xy": pair(self.gripper_delta_xy),
             "radius_px": None if self.radius_px is None else float(self.radius_px),
         }
 
@@ -241,8 +246,13 @@ def _vision_matrix(value: Sequence[Sequence[float]]) -> np.ndarray:
     return matrix
 
 
-def _offset_matrix(value: Sequence[Sequence[float]]) -> Tuple[float, float]:
-    """Validate a pure-translation offset matrix and return its XY."""
+def _offset_matrix(value: Sequence[Sequence[float]]) -> np.ndarray:
+    """Validate a camera-to-gripper affine offset and return it as float64.
+
+    The linear part may describe rotation, scale or shear; only structural
+    problems and implausible scales (a unit mistake) are rejected here.  The
+    calibration operation owns the statistical quality gates.
+    """
     matrix = _finite_matrix(value, "offset_matrix")
     if not np.allclose(matrix[2], (0.0, 0.0, 1.0), atol=1e-6):
         raise PickError(
@@ -250,13 +260,22 @@ def _offset_matrix(value: Sequence[Sequence[float]]) -> Tuple[float, float]:
             "offset_matrix last row must be [0, 0, 1]",
             400,
         )
-    if not np.allclose(matrix[:2, :2], np.eye(2), atol=1e-6):
+    linear = matrix[:2, :2]
+    determinant = float(np.linalg.det(linear))
+    if not np.isfinite(determinant) or determinant <= 1e-9:
         raise PickError(
             "bad_matrix",
-            "offset_matrix must be a pure translation",
+            "offset_matrix must be invertible and non-mirroring",
             400,
         )
-    return (float(matrix[0, 2]), float(matrix[1, 2]))
+    singular = np.linalg.svd(linear, compute_uv=False)
+    if float(singular.min()) < 0.5 or float(singular.max()) > 2.0:
+        raise PickError(
+            "bad_matrix",
+            "offset_matrix scale is outside [0.5, 2.0]",
+            400,
+        )
+    return matrix
 
 
 def offset_homogeneous_matrix(offset_xy: Sequence[float]) -> np.ndarray:
@@ -362,11 +381,21 @@ class GantryPick:
         self,
         samples: Sequence[OffsetSample],
         *,
+        model: str = "auto",
         center_tolerance_px: float = 5.0,
     ) -> CameraGripperOffset:
-        """Fit the gripper offset; the caller can read ``result.offset_xy``."""
+        """Fit the gripper offset; read ``result.matrix`` for the transform.
+
+        Args:
+            samples: Paired camera-centred and placed flange poses.
+            model: ``"auto"`` (default), ``"translation"`` or ``"affine"``.
+            center_tolerance_px: Maximum accepted centring residual.
+
+        Returns:
+            The fitted correction; ``effective_model`` says which model won.
+        """
         return CameraGripperOffset.from_samples(
-            samples, center_tolerance_px=center_tolerance_px
+            samples, model=model, center_tolerance_px=center_tolerance_px
         )
 
     # -- locate ----------------------------------------------------------
@@ -387,8 +416,9 @@ class GantryPick:
             image_uv: Target centre ``(u, v)`` from the caller's own detector.
             robot_xy: Flange XY at capture time; trailing Z is ignored.
             vision_matrix: 3x3 homogeneous affine from ``/calibrate/vision``.
-            offset_matrix: Optional 3x3 pure-translation matrix from
-                ``/calibrate/offset``.  When omitted, ``gripper_xy`` is None.
+            offset_matrix: Optional 3x3 camera-to-gripper transform from
+                ``/calibrate/offset``, applied as ``M @ camera + t``.  When
+                omitted, ``gripper_xy`` and ``gripper_delta_xy`` are None.
             image_size: ``(width, height)`` of the frame the point came from;
                 it fixes the image centre the servo targets.
             radius_px: Optional target radius, echoed into the result.
@@ -409,11 +439,11 @@ class GantryPick:
         delta = matrix[:2, :2] @ (centre - np.asarray(point, dtype=float))
         camera = (float(pose[0] + delta[0]), float(pose[1] + delta[1]))
         gripper: Optional[Tuple[float, float]] = None
+        gripper_delta: Optional[Tuple[float, float]] = None
         if offset is not None:
-            gripper = (
-                float(camera[0] + offset[0]),
-                float(camera[1] + offset[1]),
-            )
+            mapped = offset @ np.array([camera[0], camera[1], 1.0], dtype=float)
+            gripper = (float(mapped[0]), float(mapped[1]))
+            gripper_delta = (float(gripper[0] - pose[0]), float(gripper[1] - pose[1]))
 
         return TargetLocation(
             valid=True,
@@ -423,6 +453,7 @@ class GantryPick:
             camera_center_xy=camera,
             gripper_xy=gripper,
             delta_xy=(float(delta[0]), float(delta[1])),
+            gripper_delta_xy=gripper_delta,
             radius_px=_finite_or_none(radius_px) if radius_px is not None else None,
         )
 

@@ -89,6 +89,10 @@ VERSION = 1
 _IMAGE_SCHEMA = "measure.image_robot_calibration"
 _OFFSET_SCHEMA = "measure.camera_gripper_offset"
 _RECIPE_SCHEMA = "measure.robot_pick_recipe"
+# The offset asset gained a transform matrix and model diagnostics; other
+# schemas keep their own version so an old reader still rejects only what it
+# cannot understand.
+_OFFSET_VERSION = 2
 
 # Defaults
 DEFAULT_MAX_RMS_PX = 3.0
@@ -99,9 +103,34 @@ DEFAULT_VERIFY_TOLERANCE_PX = 5.0
 # robot units (normally mm).  Wider means the samples disagree.
 DEFAULT_OFFSET_TOLERANCE = 0.5
 
+# Multi-point offset fitting.  ``auto`` keeps the translation model while it
+# explains the samples inside ``DEFAULT_OFFSET_MAX_RMS``; only a significant,
+# plausible and well-conditioned affine replaces it.
+DEFAULT_OFFSET_MAX_RMS = DEFAULT_OFFSET_TOLERANCE
+DEFAULT_OFFSET_MIN_SPAN = 10.0
+DEFAULT_OFFSET_MAX_CONDITION = 50.0
+DEFAULT_OFFSET_MIN_AFFINE_SAMPLES = 4
+DEFAULT_OFFSET_ANGLE_TOLERANCE = 0.2
+DEFAULT_OFFSET_SCALE_TOLERANCE = 0.002
+DEFAULT_OFFSET_SHEAR_TOLERANCE = 0.002
+DEFAULT_OFFSET_MAX_ROTATION = 15.0
+DEFAULT_OFFSET_MAX_SCALE_DEVIATION = 0.02
+DEFAULT_OFFSET_MAX_SHEAR = 0.02
+DEFAULT_OFFSET_SIGNIFICANCE = 0.05
+
 
 class CalibrationError(RuntimeError):
-    """Raised when a calibration cannot be computed or is unusable."""
+    """Raised when a calibration cannot be computed or is unusable.
+
+    Attributes:
+        code: Optional stable identifier (for example
+            ``offset_implausible``) that an HTTP layer can surface instead of
+            its generic calibration code.
+    """
+
+    def __init__(self, message: str, code: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +255,8 @@ def _to_jsonable(value: Any) -> Any:
     return value
 
 
-def _check_schema(data: Dict[str, Any], schema: str) -> None:
+def _check_schema(data: Dict[str, Any], schema: str,
+                  max_version: int = VERSION) -> None:
     if data.get("schema") != schema:
         raise CalibrationError(
             f"unexpected schema {data.get('schema')!r}; expected {schema!r}"
@@ -236,9 +266,9 @@ def _check_schema(data: Dict[str, Any], schema: str) -> None:
         version = int(version)
     except (TypeError, ValueError):
         raise CalibrationError("recipe version is not an integer") from None
-    if version > VERSION:
+    if version > max_version:
         raise CalibrationError(
-            f"recipe version {version} is newer than supported version {VERSION}"
+            f"recipe version {version} is newer than supported version {max_version}"
         )
 
 
@@ -1055,23 +1085,32 @@ class OffsetSample:
 
 
 class CameraGripperOffset:
-    """Camera-to-gripper translation expressed as a grasp correction.
+    """Camera-to-gripper grasp correction: translation, or a fitted affine.
 
-    ``offset_xy`` is the mean of ``place_pose - center_pose``.  Adding it
-    to a camera-centred flange pose puts the gripper over the target::
+    The stored transform maps a camera-centred flange pose to the grasp pose::
 
-        grasp_pose = camera_centred_pose + offset_xy
+        grasp_pose = matrix @ camera_centred_pose
 
-    Physically this is the camera centre relative to the gripper centre
-    (``K - G``) under the ideal affine model, measured in the same
-    robot-space convention.  The exact wording matters less than the sign:
-    it is added to the camera-centred pose, never subtracted.
+    With one sample, or whenever the translation model explains the samples
+    inside ``max_rms``, ``matrix`` is ``[[I, mean(place - center)], [0, 1]]``
+    and equals the historical additive offset.  With four or more samples and
+    ``model="auto"`` an affine is fitted and kept only when translation cannot
+    explain the data and the non-translation part is significant and
+    physically plausible.
     """
 
     def __init__(self) -> None:
-        self.offset_xy: Tuple[float, float] = (0.0, 0.0)
+        self.matrix: np.ndarray = np.eye(3)
+        self.requested_model: str = "auto"
+        self.effective_model: str = "translation"
         self.samples: List[OffsetSample] = []
         self.std_xy: Tuple[float, float] = (0.0, 0.0)
+        self.rms_mm: float = 0.0
+        self.max_mm: float = 0.0
+        self.condition: float = 1.0
+        self.rotation_deg: float = 0.0
+        self.scale: float = 1.0
+        self.shear: float = 0.0
         self.mean_center_error_px: float = 0.0
         self.max_center_error_px: float = 0.0
         self.center_tolerance_px: float = DEFAULT_CENTER_TOLERANCE_PX
@@ -1080,46 +1119,124 @@ class CameraGripperOffset:
         self.created_at: str = _now()
         self.metadata: Dict[str, Any] = {}
 
+    # -- derived transform -------------------------------------------------
+
+    @property
+    def offset_xy(self) -> Tuple[float, float]:
+        """Translation part of :attr:`matrix` (the historical offset)."""
+        return (float(self.matrix[0, 2]), float(self.matrix[1, 2]))
+
+    @property
+    def is_translation(self) -> bool:
+        """Whether the stored transform is the identity plus a translation."""
+        return bool(np.allclose(self.matrix[:2, :2], np.eye(2), atol=1e-9))
+
+    # -- fitting -----------------------------------------------------------
+
+    @staticmethod
+    def _fit_affine(
+        centres: np.ndarray, places: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray, int, np.ndarray]:
+        """Least-squares ``place = M centre + t`` with per-sample residuals."""
+        centre_mean = centres.mean(axis=0)
+        place_mean = places.mean(axis=0)
+        design = centres - centre_mean
+        target = places - place_mean
+        solution, _, rank, _ = np.linalg.lstsq(design, target, rcond=None)
+        matrix = np.eye(3)
+        matrix[:2, :2] = solution.T
+        matrix[:2, 2] = place_mean - solution.T @ centre_mean
+        fitted = centres @ solution + (place_mean - centre_mean @ solution)
+        residuals = np.linalg.norm(places - fitted, axis=1)
+        return matrix, residuals, int(rank), design
+
+    @staticmethod
+    def _matrix_metrics(matrix: np.ndarray) -> Tuple[float, float, float, float]:
+        """Return ``(rotation_deg, scale, shear, determinant)`` of the linear part."""
+        linear = matrix[:2, :2]
+        singular = np.linalg.svd(linear, compute_uv=False)
+        determinant = float(np.linalg.det(linear))
+        scale = float(np.sqrt(abs(determinant)))
+        shear = float(singular.max() / max(float(singular.min()), 1e-12) - 1.0)
+        rotation = float(np.degrees(np.arctan2(
+            linear[1, 0] - linear[0, 1], linear[0, 0] + linear[1, 1])))
+        return rotation, scale, shear, determinant
+
+    @staticmethod
+    def _significance(rms_translation: float, rms_affine: float, count: int) -> float:
+        """Return the F-test p-value for the four extra affine terms."""
+        degrees_1 = 4
+        degrees_2 = 2 * count - 6
+        if degrees_2 <= 0:
+            return 1.0
+        rss_translation = rms_translation ** 2 * count
+        rss_affine = rms_affine ** 2 * count
+        if rss_affine <= 1e-12:
+            return 0.0 if rss_translation > 1e-12 else 1.0
+        statistic = (
+            ((rss_translation - rss_affine) / degrees_1) / (rss_affine / degrees_2)
+        )
+        if statistic <= 0:
+            return 1.0
+        from scipy.stats import f as f_distribution  # local: keeps import light
+
+        return float(f_distribution.sf(statistic, degrees_1, degrees_2))
+
     @classmethod
     def from_samples(
         cls,
         samples: Sequence[OffsetSample],
         *,
+        model: str = "auto",
         center_tolerance_px: float = DEFAULT_CENTER_TOLERANCE_PX,
         offset_tolerance: float = DEFAULT_OFFSET_TOLERANCE,
+        max_rms: float = DEFAULT_OFFSET_MAX_RMS,
+        min_span: float = DEFAULT_OFFSET_MIN_SPAN,
+        max_condition: float = DEFAULT_OFFSET_MAX_CONDITION,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> "CameraGripperOffset":
-        """Aggregate offset samples into a reusable correction.
+        """Aggregate offset samples into a translation or an affine correction.
 
         Args:
             samples: One or more :class:`OffsetSample` values.
+            model: ``"auto"`` (default), ``"translation"`` or ``"affine"``.
+                ``auto`` keeps translation while it explains the samples
+                inside *max_rms*, so adding points to translation-only data
+                returns exactly the historical mean.
             center_tolerance_px: Maximum accepted centring residual.
-            offset_tolerance: Maximum accepted per-axis sample spread.  A
-                wider spread means the samples disagree (for example a pose
-                recorded twice without moving), so the mean must not be used.
+            offset_tolerance: Maximum accepted per-axis spread of the raw
+                offsets while the translation model is in force.
+            max_rms: Maximum accepted residual of the selected model.
+            min_span: Minimum minor-axis spread of the sampled centres.
+            max_condition: Maximum condition number of the centred centres.
             metadata: Free-form metadata.
 
         Raises:
-            CalibrationError: When *samples* is empty or a pose is not finite.
+            CalibrationError: On invalid input, a model that cannot be
+                estimated, or an explicitly requested affine that fails its
+                quality gates.
         """
+        chosen = str(model or "auto").strip().lower()
+        if chosen not in {"auto", "translation", "affine"}:
+            raise CalibrationError("model must be 'auto', 'translation' or 'affine'")
         if not samples:
             raise CalibrationError("at least one offset sample is required")
         for sample in samples:
             _as_point(sample.place_pose, "place_pose")
             _as_point(sample.center_pose, "center_pose")
-        offsets = np.asarray([sample.offset_xy for sample in samples], dtype=float)
+
+        centres = np.asarray([sample.center_pose for sample in samples], dtype=float)
+        places = np.asarray([sample.place_pose for sample in samples], dtype=float)
+        offsets = places - centres
         center_errors = np.asarray(
-            [sample.center_error_px for sample in samples], dtype=float
-        )
+            [sample.center_error_px for sample in samples], dtype=float)
         if not np.all(np.isfinite(offsets)):
             raise CalibrationError("offset samples contain non-finite values")
         if not np.all(np.isfinite(center_errors)):
             raise CalibrationError("offset samples contain non-finite centring errors")
+        count = len(offsets)
         mean = offsets.mean(axis=0)
-        if len(offsets) > 1:
-            std = offsets.std(axis=0, ddof=1)
-        else:
-            std = np.zeros(2, dtype=float)
+        std = offsets.std(axis=0, ddof=1) if count > 1 else np.zeros(2, dtype=float)
 
         warnings: List[str] = []
         mean_error = float(np.mean(center_errors))
@@ -1127,27 +1244,112 @@ class CameraGripperOffset:
         if max_error > center_tolerance_px:
             _warn(warnings, "centring_error_high")
         spread = float(np.max(std))
-        if len(offsets) > 1 and spread > float(offset_tolerance):
-            _warn(warnings, "offset_inconsistent")
         low_confidence = [s for s in samples if s.confidence and s.confidence < 0.5]
         if low_confidence:
             _warn(warnings, "low_confidence_detection")
+        # Legacy translation result; also the fallback for every model.
+        matrix = np.eye(3)
+        matrix[:2, 2] = mean
+        residuals_translation = np.linalg.norm(offsets - mean, axis=1)
+        rms_translation = float(np.sqrt(np.mean(residuals_translation ** 2)))
+        effective = "translation"
+        rms, max_residual = rms_translation, float(np.max(residuals_translation))
+        condition, rotation, scale, shear, determinant = 1.0, 0.0, 1.0, 0.0, 1.0
+
+        if chosen == "affine" and count < DEFAULT_OFFSET_MIN_AFFINE_SAMPLES:
+            raise CalibrationError(
+                f"affine offset needs at least "
+                f"{DEFAULT_OFFSET_MIN_AFFINE_SAMPLES} samples",
+                "offset_insufficient_samples")
+
+        if chosen != "translation" and count >= DEFAULT_OFFSET_MIN_AFFINE_SAMPLES:
+            fitted, residuals, rank, design = cls._fit_affine(centres, places)
+            singular = np.linalg.svd(design, compute_uv=False)
+            span = float(singular[-1]) if singular.size else 0.0
+            condition = (float(singular[0] / max(float(singular[-1]), 1e-12))
+                         if singular.size > 1 else float("inf"))
+            rotation, scale, shear, determinant = cls._matrix_metrics(fitted)
+            rms_affine = float(np.sqrt(np.mean(residuals ** 2)))
+            max_affine = float(np.max(residuals))
+            problems: List[str] = []
+            if rank < 2:
+                problems.append("offset_degenerate_samples")
+            elif span < float(min_span) or condition > float(max_condition):
+                problems.append("offset_span_too_small")
+            if rms_affine > float(max_rms):
+                problems.append("offset_invalid")
+            if (determinant <= 1e-9
+                    or abs(rotation) > DEFAULT_OFFSET_MAX_ROTATION
+                    or abs(scale - 1.0) > DEFAULT_OFFSET_MAX_SCALE_DEVIATION
+                    or shear > DEFAULT_OFFSET_MAX_SHEAR):
+                problems.append("offset_implausible")
+
+            if problems:
+                if chosen == "affine":
+                    raise CalibrationError("; ".join(problems), problems[0])
+                for problem in problems:
+                    _warn(warnings, problem)
+            else:
+                deviates = (
+                    abs(rotation) > DEFAULT_OFFSET_ANGLE_TOLERANCE
+                    or abs(scale - 1.0) > DEFAULT_OFFSET_SCALE_TOLERANCE
+                    or shear > DEFAULT_OFFSET_SHEAR_TOLERANCE
+                )
+                significant = (
+                    rms_translation > float(max_rms)
+                    and deviates
+                    and cls._significance(rms_translation, rms_affine, count)
+                    <= DEFAULT_OFFSET_SIGNIFICANCE
+                )
+                if chosen == "affine" or significant:
+                    matrix = fitted
+                    effective = "affine"
+                    rms, max_residual = rms_affine, max_affine
+                    if count in (DEFAULT_OFFSET_MIN_AFFINE_SAMPLES,
+                                 DEFAULT_OFFSET_MIN_AFFINE_SAMPLES + 1):
+                        _warn(warnings, "offset_low_redundancy")
+                elif rms_translation <= float(max_rms):
+                    if deviates:
+                        _warn(warnings, "offset_snapped_to_translation")
+                else:
+                    _warn(warnings, "offset_relation_not_significant")
+
+        if effective == "translation" and count > 1 and spread > float(offset_tolerance):
+            # Only the translation model treats a wide raw spread as evidence
+            # against the fit; an affine relation makes the spread expected.
+            _warn(warnings, "offset_inconsistent")
 
         obj = cls()
-        obj.offset_xy = (float(mean[0]), float(mean[1]))
+        obj.matrix = matrix
+        obj.requested_model = chosen
+        obj.effective_model = effective
         obj.samples = list(samples)
         obj.std_xy = (float(std[0]), float(std[1]))
+        obj.rms_mm = float(rms)
+        obj.max_mm = float(max_residual)
+        obj.condition = float(condition)
+        obj.rotation_deg = float(rotation)
+        obj.scale = float(scale)
+        obj.shear = float(shear)
         obj.mean_center_error_px = mean_error
         obj.max_center_error_px = max_error
         obj.center_tolerance_px = float(center_tolerance_px)
-        # A wide spread is a hard failure, not a warning: averaging samples
-        # that disagree by tens of millimetres yields a plausible-looking but
-        # wrong grasp correction.
-        obj.valid = bool(
-            max_error <= center_tolerance_px
-            and spread <= float(offset_tolerance)
-            and np.all(np.isfinite(mean))
-        )
+        if effective == "affine":
+            obj.valid = bool(
+                max_error <= center_tolerance_px
+                and rms <= float(max_rms)
+                and np.all(np.isfinite(matrix))
+                and determinant > 0.0
+            )
+        else:
+            # A wide spread is a hard failure, not a warning: averaging samples
+            # that disagree by tens of millimetres yields a plausible-looking
+            # but wrong grasp correction.
+            obj.valid = bool(
+                max_error <= center_tolerance_px
+                and spread <= float(offset_tolerance)
+                and np.all(np.isfinite(mean))
+            )
         obj.warnings = warnings
         obj.metadata = dict(metadata or {})
         return obj
@@ -1155,16 +1357,26 @@ class CameraGripperOffset:
     def apply(self, center_pose: Sequence[float]) -> np.ndarray:
         """Return the grasp pose for a camera-centred pose."""
         pose = _as_pose(center_pose, "center_pose").copy()
-        pose[0] += self.offset_xy[0]
-        pose[1] += self.offset_xy[1]
+        mapped = self.matrix[:2, :2] @ pose[:2] + self.matrix[:2, 2]
+        pose[0] = float(mapped[0])
+        pose[1] = float(mapped[1])
         return pose
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "schema": _OFFSET_SCHEMA,
-            "version": VERSION,
+            "version": _OFFSET_VERSION,
+            "matrix": self.matrix.tolist(),
             "offset_xy": [float(self.offset_xy[0]), float(self.offset_xy[1])],
-            "convention": "grasp_pose = camera_centred_pose + offset_xy",
+            "model": self.requested_model,
+            "effective_model": self.effective_model,
+            "convention": "grasp_pose = matrix @ camera_centred_pose",
+            "rms_mm": float(self.rms_mm),
+            "max_mm": float(self.max_mm),
+            "condition": float(self.condition),
+            "rotation_deg": float(self.rotation_deg),
+            "scale": float(self.scale),
+            "shear": float(self.shear),
             "std_xy": [float(self.std_xy[0]), float(self.std_xy[1])],
             "mean_center_error_px": float(self.mean_center_error_px),
             "max_center_error_px": float(self.max_center_error_px),
@@ -1179,12 +1391,34 @@ class CameraGripperOffset:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "CameraGripperOffset":
-        _check_schema(data, _OFFSET_SCHEMA)
-        offset = data.get("offset_xy")
-        if offset is None or len(offset) != 2:
-            raise CalibrationError("offset_xy must be a 2-element vector")
+        _check_schema(data, _OFFSET_SCHEMA, _OFFSET_VERSION)
         obj = cls()
-        obj.offset_xy = (float(offset[0]), float(offset[1]))
+        matrix = data.get("matrix")
+        if matrix is not None:
+            try:
+                parsed = np.asarray(matrix, dtype=float)
+            except (TypeError, ValueError) as exc:
+                raise CalibrationError("matrix must contain numbers") from exc
+            if parsed.shape != (3, 3) or not np.all(np.isfinite(parsed)):
+                raise CalibrationError("matrix must be a finite 3x3 matrix")
+            obj.matrix = parsed
+        else:
+            offset = data.get("offset_xy")
+            if offset is None or len(offset) != 2:
+                raise CalibrationError("offset_xy must be a 2-element vector")
+            obj.matrix = np.eye(3)
+            obj.matrix[:2, 2] = [float(offset[0]), float(offset[1])]
+        obj.requested_model = str(data.get("model", "translation"))
+        obj.effective_model = str(data.get(
+            "effective_model",
+            "translation" if obj.is_translation else "affine",
+        ))
+        obj.rms_mm = float(data.get("rms_mm", 0.0))
+        obj.max_mm = float(data.get("max_mm", 0.0))
+        obj.condition = float(data.get("condition", 1.0))
+        obj.rotation_deg = float(data.get("rotation_deg", 0.0))
+        obj.scale = float(data.get("scale", 1.0))
+        obj.shear = float(data.get("shear", 0.0))
         std = data.get("std_xy", (0.0, 0.0))
         obj.std_xy = (float(std[0]), float(std[1]))
         obj.mean_center_error_px = float(data.get("mean_center_error_px", 0.0))
@@ -1216,7 +1450,10 @@ class CameraGripperOffset:
     def summary(self) -> Dict[str, Any]:
         return {
             "valid": self.valid,
+            "matrix": self.matrix.tolist(),
             "offset_xy": [float(self.offset_xy[0]), float(self.offset_xy[1])],
+            "effective_model": self.effective_model,
+            "rms_mm": float(self.rms_mm),
             "std_xy": [float(self.std_xy[0]), float(self.std_xy[1])],
             "num_samples": len(self.samples),
             "mean_center_error_px": self.mean_center_error_px,
@@ -1227,15 +1464,17 @@ class CameraGripperOffset:
 def combine_offsets(
     offsets: Sequence[CameraGripperOffset],
     *,
+    model: str = "auto",
     center_tolerance_px: float = DEFAULT_CENTER_TOLERANCE_PX,
     offset_tolerance: float = DEFAULT_OFFSET_TOLERANCE,
 ) -> CameraGripperOffset:
-    """Merge several offset calibrations into one (mean + spread)."""
+    """Merge several offset calibrations into one (pooled refit)."""
     samples: List[OffsetSample] = []
     for offset in offsets:
         samples.extend(offset.samples)
     return CameraGripperOffset.from_samples(
         samples,
+        model=model,
         center_tolerance_px=center_tolerance_px,
         offset_tolerance=offset_tolerance,
     )
@@ -1315,10 +1554,17 @@ class RobotPickRecipe:
     def pick_delta(self, image_uv: Sequence[float]) -> np.ndarray:
         """Single-move displacement from the current pose to the grasp pose.
 
-        This is ``A·(c − p) + offset``: the user-facing one-shot command.
+        This is ``A·(c − p) + offset``: the user-facing one-shot command.  It
+        is only defined for a translation offset, where the grasp correction is
+        independent of the current pose; an affine offset needs
+        :meth:`grasp_pose`.
         """
         if self.gripper_offset is None:
             raise CalibrationError("gripper offset has not been calibrated")
+        if not self.gripper_offset.is_translation:
+            raise CalibrationError(
+                "pick_delta requires a translation offset; use grasp_pose "
+                "for an affine offset")
         delta = self.image_robot.servo_delta(image_uv)
         return delta + np.asarray(self.gripper_offset.offset_xy, dtype=float)
 
@@ -1330,6 +1576,9 @@ class RobotPickRecipe:
         """
         if self.gripper_offset is None:
             raise CalibrationError("gripper offset has not been calibrated")
+        if not self.gripper_offset.is_translation:
+            raise CalibrationError(
+                "expected_uv_at_grasp requires a translation offset")
         point = self.image_robot.pixel_per_robot @ np.asarray(
             self.gripper_offset.offset_xy, dtype=float
         )

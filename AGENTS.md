@@ -84,9 +84,11 @@ integrating with the equipment software.  The colleague-facing walkthrough
 - `POST /api/v1/calibrate/vision` takes `image_size` + `image_points` +
   `robot_points` and returns the 3x3 matrix plus `rms_px`/`rms_mm`/`warnings`;
   `POST /api/v1/calibrate/offset` takes place/centre pose samples and returns a
-  pure-translation matrix plus `std_xy`; `POST /api/v1/locate` takes
+  3x3 offset transform (translation with one sample or when translation
+  explains the data; `model=affine` fits a linear part from 4+ samples, with
+  `effective_model`/`rms_mm` diagnostics); `POST /api/v1/locate` takes
   `image_uv`, `image_size`, the current flange XY and both matrices and returns
-  `camera_center_xy` / `gripper_xy` / `delta_xy`.
+  `camera_center_xy` / `gripper_xy` / `delta_xy` / `gripper_delta_xy`.
 - Points are validated against `image_size` (`400 point_out_of_image`), which
   catches a `(row, col)` swap. XY only; Z is ignored. The service never talks
   to the robot/PLC.

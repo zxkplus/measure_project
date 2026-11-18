@@ -88,7 +88,13 @@ O = [[1, 0, dx],
 gripper_xy = camera_center_xy + (dx, dy)
 ```
 
-当前偏移是纯平移，矩阵左上 2×2 固定为单位阵；如果传入带旋转的矩阵，接口会报 `400 bad_matrix`。
+左上 2×2 也可以是拟合出的线性部分（旋转/尺度/剪切），此时按完整矩阵应用：
+
+```text
+gripper_xy = O @ [camera_center_xy, 1]
+```
+
+`/locate` 接受一般仿射；只拒绝奇异、镜像、末行错误和尺度异常（|σ| 超出 [0.5, 2]）的矩阵。
 
 ---
 
@@ -129,13 +135,21 @@ flowchart TD
    - 先用视觉矩阵调 `/locate` 拿 `camera_center_xy`，移动过去，再拍一张确认；
 4. 记录实际 `center_pose`；
 5. 调 `/calibrate/offset`，保存返回的 `matrix`；
-6. 建议换 3~5 个位置重复，检查矩阵平移列 `dx/dy` 是否稳定。
+6. 建议换 3~5 个位置重复；只做平移时看平移列 `dx/dy` 是否稳定，需要拟合仿射时看 `effective_model` 与 `rms_mm`。
 
-`offset = place_pose − center_pose`，符号是**加**到相机居中位姿上：
+平移模型下 `offset = place_pose − center_pose`，**加**到相机居中位姿上：
 
 ```text
 gripper_xy = camera_center_xy + offset_xy
 ```
+
+多点拟合后统一按矩阵应用：
+
+```text
+gripper_xy = matrix @ [camera_center_xy, 1]
+```
+
+`model=auto`（默认）只有在平移解释不了样本时才启用仿射；只给一对样本时仍然是纯平移。
 
 ### 3.3 运行时定位
 
@@ -217,7 +231,8 @@ curl -X POST http://127.0.0.1:8100/api/v1/calibrate/vision \
 {
   "samples": [
     {"place_pose": [118.0, 89.0], "center_pose": [110.0, 85.0]}
-  ]
+  ],
+  "model": "auto"
 }
 ```
 
@@ -234,15 +249,27 @@ curl -X POST http://127.0.0.1:8100/api/v1/calibrate/vision \
   "offset_xy": [8.0, 4.0],
   "std_xy": [0.0, 0.0],
   "num_samples": 1,
+  "model": "auto",
+  "effective_model": "translation",
+  "rms_mm": 0.0,
+  "max_mm": 0.0,
+  "condition": 1.0,
+  "rotation_deg": 0.0,
+  "scale": 1.0,
+  "shear": 0.0,
+  "convention": "grasp_pose = matrix @ camera_centred_pose",
   "warnings": []
 }
 ```
 
-- `samples` 至少 1 组，建议 3~5 组；
+- `samples` 至少 1 组；做平移建议 3~5 组，做仿射建议 ≥6 组（4 组只够勉强验证）；
 - `place_pose`：夹爪放下目标时的法兰 XY；
 - `center_pose`：相机对准目标时的法兰 XY；
-- 样本互相矛盾（每轴 `std_xy` 超过 0.5 mm）：422 `offset_invalid`，不返回矩阵。
+- `model`：`auto`（默认，平移够用就不拟合仿射）/ `translation` / `affine`；
+- 平移模型下样本互相矛盾（每轴 `std_xy` 超过 0.5 mm）：422 `offset_invalid`，不返回矩阵。
   典型场景是把「没有真正移动」的 place/center 占位样本混进来，均值会偏几十毫米；
+- `effective_model=affine` 时看 `rms_mm` 和 `rotation_deg`/`scale`/`shear`；残差超限或旋转 >15°、
+  尺度变化 >2%、镜像都会 422；
 - debug 开时只额外返回 `run_id`。
 
 ---
@@ -283,13 +310,16 @@ curl -X POST http://127.0.0.1:8100/api/v1/locate \
   "ok": true,
   "camera_center_xy": [15.8587, 325.4455],
   "gripper_xy": [139.5384, 326.9227],
-  "delta_xy": [-0.0693, -1.2015]
+  "delta_xy": [-0.0693, -1.2015],
+  "gripper_delta_xy": [123.6106, 2.7553]
 }
 ```
 
-- `delta_xy = A @ (image_centre - image_uv)`，就是要走的相对量，可以直接下发；
-- 不传 `offset_matrix`：`gripper_xy` 为 `null`，`camera_center_xy` 仍可用；
-- 矩阵不是 3×3、最后一行不对、奇异、偏移矩阵含旋转：400 `bad_matrix`；
+- `delta_xy = A @ (image_centre - image_uv)`，只负责把相机对准，不含偏移；
+- 一步走到抓取位用 `gripper_delta_xy = gripper_xy - robot_pose`；仿射偏移下不能再拿
+  `delta_xy + offset` 相加；
+- 不传 `offset_matrix`：`gripper_xy`/`gripper_delta_xy` 为 `null`，`camera_center_xy` 仍可用；
+- 矩阵不是 3×3、最后一行不对、奇异、镜像、尺度异常：400 `bad_matrix`；
 - 点越界：400 `point_out_of_image`；
 - 找不到圆不再是本接口的错误：找圆失败由软件自己处理；
 - debug 开时只额外返回 `run_id`。

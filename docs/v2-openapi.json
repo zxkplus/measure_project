@@ -3197,7 +3197,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationResponse_GantryMatrixResult_"
+                  "$ref": "#/components/schemas/OperationResponse_GantryOffsetResult_"
                 }
               }
             }
@@ -3287,7 +3287,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationResponse_GantryMatrixResult_"
+                  "$ref": "#/components/schemas/OperationResponse_GantryOffsetResult_"
                 }
               }
             }
@@ -11454,6 +11454,22 @@
               }
             ],
             "title": "Gripper Xy"
+          },
+          "gripper_delta_xy": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array",
+                "maxItems": 2,
+                "minItems": 2
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gripper Delta Xy"
           }
         },
         "additionalProperties": false,
@@ -11487,7 +11503,7 @@
           "matrix"
         ],
         "title": "GantryMatrixResult",
-        "description": "Upstream-owned row-major 3x3 vision affine or pure-translation offset."
+        "description": "Upstream-owned row-major 3x3 vision affine or offset transform."
       },
       "GantryOffsetRequest": {
         "properties": {
@@ -11534,6 +11550,16 @@
             "type": "array",
             "minItems": 1,
             "title": "Samples"
+          },
+          "model": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "translation",
+              "affine"
+            ],
+            "title": "Model",
+            "default": "auto"
           }
         },
         "additionalProperties": false,
@@ -11542,7 +11568,81 @@
           "samples"
         ],
         "title": "GantryOffsetRequest",
-        "description": "One or more samples of the additive camera-to-gripper XY correction."
+        "description": "Samples of the camera-to-gripper correction, fitted as selected."
+      },
+      "GantryOffsetResult": {
+        "properties": {
+          "matrix": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array",
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "type": "array",
+            "maxItems": 3,
+            "minItems": 3,
+            "title": "Matrix"
+          },
+          "model": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "translation",
+              "affine"
+            ],
+            "title": "Model"
+          },
+          "effective_model": {
+            "type": "string",
+            "enum": [
+              "translation",
+              "affine"
+            ],
+            "title": "Effective Model"
+          },
+          "rms_mm": {
+            "type": "number",
+            "title": "Rms Mm"
+          },
+          "max_mm": {
+            "type": "number",
+            "title": "Max Mm"
+          },
+          "condition": {
+            "type": "number",
+            "title": "Condition"
+          },
+          "rotation_deg": {
+            "type": "number",
+            "title": "Rotation Deg"
+          },
+          "scale": {
+            "type": "number",
+            "title": "Scale"
+          },
+          "shear": {
+            "type": "number",
+            "title": "Shear"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "matrix",
+          "model",
+          "effective_model",
+          "rms_mm",
+          "max_mm",
+          "condition",
+          "rotation_deg",
+          "scale",
+          "shear"
+        ],
+        "title": "GantryOffsetResult",
+        "description": "Offset transform plus the diagnostics that selected its model."
       },
       "GantryOffsetSample": {
         "properties": {
@@ -14962,6 +15062,85 @@
           "created_at"
         ],
         "title": "OperationResponse[GantryMatrixResult]"
+      },
+      "OperationResponse_GantryOffsetResult_": {
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "title": "Operation Id"
+          },
+          "operation": {
+            "type": "string",
+            "title": "Operation"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "cancelling",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "timed_out"
+            ],
+            "title": "State"
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GantryOffsetResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "diagnostics": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Diagnostics"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "operation_id",
+          "operation",
+          "state",
+          "trace_id",
+          "created_at"
+        ],
+        "title": "OperationResponse[GantryOffsetResult]"
       },
       "OperationResponse_GantryVisionPointsResult_": {
         "properties": {
@@ -23686,6 +23865,28 @@
             "minimum": 0.0,
             "title": "Fine Search Expand Px",
             "default": 24
+          },
+          "fine_candidates": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 1000.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fine Candidates"
+          },
+          "fine_angle_policy": {
+            "type": "string",
+            "enum": [
+              "dense",
+              "hierarchical"
+            ],
+            "title": "Fine Angle Policy",
+            "default": "dense"
           }
         },
         "additionalProperties": false,

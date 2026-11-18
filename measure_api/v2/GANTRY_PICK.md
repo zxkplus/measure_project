@@ -8,8 +8,8 @@ process owner or listening port is required.
 |---|---|---|---|
 | POST | `/api/v2/calibrate/vision-points` | `calibrate.vision-points` | candidate `matrix`, quality and per-point residuals |
 | POST | `/api/v2/calibrate/vision` | `calibrate.vision` | `matrix`: 3x3 vision affine |
-| POST | `/api/v2/calibrate/offset` | `calibrate.offset` | `matrix`: 3x3 XY translation |
-| POST | `/api/v2/locate` | `locate` | `camera_center_xy`, optional `gripper_xy` |
+| POST | `/api/v2/calibrate/offset` | `calibrate.offset` | `matrix`: 3x3 offset transform, `effective_model` and fit diagnostics |
+| POST | `/api/v2/locate` | `locate` | `camera_center_xy`, optional `gripper_xy` / `gripper_delta_xy` |
 
 All requests use `application/json`. Image inputs are upstream-owned `FileReference`
 objects within the configured shared roots, as for other V2 calculations. Multipart
@@ -94,7 +94,13 @@ and explicit persistence remain the caller's responsibility.
 
 For each sample, `place_pose` is the flange pose when the gripper places the target,
 and `center_pose` is the flange pose when the camera is centred over that target.
-The offset is the mean of `place_pose[:2] - center_pose[:2]` across samples.
+The operation fits `place_pose ~ matrix @ center_pose`.  With one sample, or when
+the translation model explains every sample, `matrix` is the identity plus the
+mean of `place_pose[:2] - center_pose[:2]`.
+
+`model` selects the fit: `auto` (default) keeps translation while its residual
+stays within 0.5 controller units, `translation` never fits a linear part, and
+`affine` fits one from four or more samples (six recommended).
 
 ```bash
 curl -sS -X POST "$BASE_URL/api/v2/calibrate/offset" \
@@ -114,11 +120,20 @@ The operation returns this value under `result`:
     [1.0, 0.0, 8.0],
     [0.0, 1.0, 4.0],
     [0.0, 0.0, 1.0]
-  ]
+  ],
+  "model": "auto",
+  "effective_model": "translation",
+  "rms_mm": 0.0,
+  "max_mm": 0.0,
+  "condition": 1.0,
+  "rotation_deg": 0.0,
+  "scale": 1.0,
+  "shear": 0.0
 }
 ```
 
-Store it as `offset_matrix`. It must remain a pure XY translation.
+Store `matrix` as `offset_matrix`.  `effective_model` says whether a linear part
+was kept; `rms_mm` and `max_mm` are the residuals of that model.
 
 ## Location
 
@@ -146,20 +161,28 @@ has this `result`:
 ```json
 {
   "camera_center_xy": [90.975, 181.975],
-  "gripper_xy": [98.975, 185.975]
+  "gripper_xy": [98.975, 185.975],
+  "gripper_delta_xy": [8.975, 5.975]
 }
 ```
 
-Both values are **flange poses**, not absolute target coordinates:
+Both poses are **flange poses**, not absolute target coordinates:
 
 ```text
 c = ((width - 1) / 2, (height - 1) / 2)
 camera_center_xy = robot_pose[:2] + V[:2, :2] @ (c - target_uv)
-gripper_xy = camera_center_xy + offset_matrix[:2, 2]
+gripper_xy = offset_matrix @ [camera_center_xy, 1]
+gripper_delta_xy = gripper_xy - robot_pose[:2]
 ```
 
-Omit `offset_matrix` to calculate only camera centring; `gripper_xy` is then JSON
-`null`. No response contains Z, and these operations never command the robot/PLC.
+`offset_matrix` is applied as a full homogeneous transform.  With a translation
+matrix this is `camera_center_xy + offset[:2, 2]`; with a fitted affine it is
+not, so use `gripper_delta_xy` for a single-move command instead of adding
+`delta_xy` and the offset.
+
+Omit `offset_matrix` to calculate only camera centring; `gripper_xy` and
+`gripper_delta_xy` are then JSON `null`. No response contains Z, and these
+operations never command the robot/PLC.
 The shared circle locator uses a default radius range of 6–3000 px.
 
 ## Scheduling, errors and diagnostics
@@ -183,7 +206,7 @@ query `/api/v2/operations/{operation_id}/diagnostics` for V2 lifecycle diagnosti
 | 422 | `pick.calibration_failed` | Missing calibration target, differing image sizes or degenerate observations |
 | 422 | `pick.calibration_invalid` | Fitted vision calibration failed its quality gate |
 | 422 | `pick.offset_invalid` | Offset samples could not produce a valid correction |
-| 400 | `pick.bad_matrix` | Singular/non-affine vision matrix or non-translation offset |
+| 400 | `pick.bad_matrix` | Singular/non-affine vision matrix, or an offset that is singular, mirrored or outside the plausible scale range |
 | 422 | `pick.no_target` | Location target is absent or below the confidence gate |
 | 404 / 409 / 422 | `file.*`, `image.*` | Normal V2 missing-file, content, boundary or image validation errors |
 

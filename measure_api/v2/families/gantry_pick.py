@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import math
-from typing import Annotated, List, Optional
+from typing import Annotated, List, Literal, Optional
 
 from pydantic import Field, model_validator
 
-from measure.pick_api import GantryPick, PickError, offset_homogeneous_matrix
+from measure.pick_api import GantryPick, PickError
 from measure.robot_calibration import CalibrationError, OffsetSample, fit_image_to_robot
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.models import CalculationRequest, FileReference, StrictModel
@@ -120,15 +120,29 @@ class GantryOffsetSample(StrictModel):
 
 
 class GantryOffsetRequest(CalculationRequest):
-    """One or more samples of the additive camera-to-gripper XY correction."""
+    """Samples of the camera-to-gripper correction, fitted as selected."""
 
     samples: List[GantryOffsetSample] = Field(min_length=1)
+    model: Literal["auto", "translation", "affine"] = "auto"
 
 
 class GantryMatrixResult(StrictModel):
-    """Upstream-owned row-major 3x3 vision affine or pure-translation offset."""
+    """Upstream-owned row-major 3x3 vision affine or offset transform."""
 
     matrix: Matrix3x3
+
+
+class GantryOffsetResult(GantryMatrixResult):
+    """Offset transform plus the diagnostics that selected its model."""
+
+    model: Literal["auto", "translation", "affine"]
+    effective_model: Literal["translation", "affine"]
+    rms_mm: float
+    max_mm: float
+    condition: float
+    rotation_deg: float
+    scale: float
+    shear: float
 
 
 class GantryLocateRequest(CalculationRequest):
@@ -145,6 +159,7 @@ class GantryLocateResult(StrictModel):
 
     camera_center_xy: XY
     gripper_xy: Optional[XY] = None
+    gripper_delta_xy: Optional[XY] = None
 
 
 def _no_target_details(location) -> dict:
@@ -191,11 +206,12 @@ def calibrate_offset(
     """Fit the existing gripper correction without server-side recipe state.
 
     Args:
-        request: Paired flange poses; trailing Z values are ignored.
+        request: Paired flange poses, the requested model and Z values that
+            are ignored.
         context: V2 operation identity and resource limits.
 
     Returns:
-        A pure-translation 3x3 matrix containing the mean XY offset.
+        The selected 3x3 transform plus the diagnostics that selected it.
     """
     samples = [
         OffsetSample(place_pose=tuple(sample.place_pose[:2]),
@@ -203,15 +219,26 @@ def calibrate_offset(
         for sample in request.samples
     ]
     try:
-        offset = GantryPick().calibrate_offset(samples)
+        offset = GantryPick().calibrate_offset(samples, model=request.model)
     except CalibrationError as error:
-        raise ServiceError("pick.offset_invalid", str(error)) from error
+        code = error.code or "offset_invalid"
+        raise ServiceError("pick." + code, str(error)) from error
     if not offset.valid:
         raise ServiceError(
             "pick.offset_invalid", "Gripper offset calibration failed its quality gate",
             details={"warnings": offset.warnings},
         )
-    return GantryMatrixResult(matrix=offset_homogeneous_matrix(offset.offset_xy).tolist())
+    return GantryOffsetResult(
+        matrix=offset.matrix.tolist(),
+        model=offset.requested_model,
+        effective_model=offset.effective_model,
+        rms_mm=float(offset.rms_mm),
+        max_mm=float(offset.max_mm),
+        condition=float(offset.condition),
+        rotation_deg=float(offset.rotation_deg),
+        scale=float(offset.scale),
+        shear=float(offset.shear),
+    )
 
 
 def locate(request: GantryLocateRequest, context: CalculationContext) -> GantryLocateResult:
@@ -241,6 +268,10 @@ def locate(request: GantryLocateRequest, context: CalculationContext) -> GantryL
     return GantryLocateResult(
         camera_center_xy=list(location.camera_center_xy),
         gripper_xy=None if location.gripper_xy is None else list(location.gripper_xy),
+        gripper_delta_xy=(
+            None if location.gripper_delta_xy is None
+            else list(location.gripper_delta_xy)
+        ),
     )
 
 
@@ -251,8 +282,9 @@ OPERATIONS = [
     Operation("/calibrate/vision", GantryVisionRequest, GantryMatrixResult, calibrate_vision,
               "Compute gantry vision calibration from shared images", "gantry_pick",
               {"matrix": "matrix"}),
-    Operation("/calibrate/offset", GantryOffsetRequest, GantryMatrixResult, calibrate_offset,
-              "Compute gantry camera-to-gripper offset", "gantry_pick", {"matrix": "matrix"}),
+    Operation("/calibrate/offset", GantryOffsetRequest, GantryOffsetResult, calibrate_offset,
+              "Compute gantry camera-to-gripper offset", "gantry_pick",
+              {"matrix": "matrix"}),
     Operation("/locate", GantryLocateRequest, GantryLocateResult, locate,
               "Locate a circular target for camera or gripper centring", "gantry_pick",
               {"camera_center_xy": "robot_xy", "gripper_xy": "robot_xy"}),

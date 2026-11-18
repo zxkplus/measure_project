@@ -9,7 +9,7 @@ stateless FastAPI v2 service, which its own README designates as the
 authoritative contract. The hand-written v1 reference in
 `../api_reference.md` does not describe these routes.
 
-Paths: **69** · Schemas: **241**
+Paths: **69** · Schemas: **243**
 
 ## Endpoints
 
@@ -90,11 +90,11 @@ Paths: **69** · Schemas: **241**
 Every v2 request/response schema is defined by the service itself and
 documented in full in `docs/v2-api-reference.md` plus the raw
 `docs/v2-openapi.json`. Only the route index is rendered here — duplicating
-241 schemas into this skill would bury it and drift from his docs.
+243 schemas into this skill would bury it and drift from his docs.
 
 ## Schema index
 
-241 schemas; see `docs/v2-api-reference.md` for every field.
+243 schemas; see `docs/v2-api-reference.md` for every field.
 
 | Schema | Kind | Properties |
 |---|---|---|
@@ -155,9 +155,10 @@ documented in full in `docs/v2-api-reference.md` plus the raw
 | `FitDiagnostics` | object | 7 |
 | `FrozenManifest` | object | 11 |
 | `GantryLocateRequest` | object | 8 |
-| `GantryLocateResult` | object | 2 |
+| `GantryLocateResult` | object | 3 |
 | `GantryMatrixResult` | object | 1 |
-| `GantryOffsetRequest` | object | 5 |
+| `GantryOffsetRequest` | object | 6 |
+| `GantryOffsetResult` | object | 9 |
 | `GantryOffsetSample` | object | 2 |
 | `GantryVisionPointResidual` | object | 2 |
 | `GantryVisionPointsRequest` | object | 8 |
@@ -209,6 +210,7 @@ documented in full in `docs/v2-api-reference.md` plus the raw
 | `OperationResponse_EvaluationResult_` | object | 9 |
 | `OperationResponse_GantryLocateResult_` | object | 9 |
 | `OperationResponse_GantryMatrixResult_` | object | 9 |
+| `OperationResponse_GantryOffsetResult_` | object | 9 |
 | `OperationResponse_GantryVisionPointsResult_` | object | 9 |
 | `OperationResponse_GeometryTransformResult_` | object | 9 |
 | `OperationResponse_ImageCircleResult_` | object | 9 |
@@ -331,7 +333,7 @@ documented in full in `docs/v2-api-reference.md` plus the raw
 | `TemplatePointLocalizationDiagnostics` | object | 5 |
 | `TemplatePointRequest` | object | 8 |
 | `TemplatePointResult` | object | 8 |
-| `TemplateSearch` | object | 19 |
+| `TemplateSearch` | object | 21 |
 | `ThresholdPreprocessing` | object | 3 |
 | `TwoPointRequest` | object | 6 |
 | `UndistortionRequest` | object | 10 |

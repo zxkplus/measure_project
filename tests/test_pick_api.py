@@ -274,18 +274,44 @@ def test_bad_vision_matrix_is_rejected():
         )
 
 
-def test_bad_offset_matrix_is_rejected():
+def test_affine_offset_matrix_is_applied_as_a_transform():
     pick, calibration = _calibration()
     rotated = np.array(
         [[0.0, -1.0, 8.0], [1.0, 0.0, 4.0], [0.0, 0.0, 1.0]]
     )
 
+    location = pick.locate(
+        (300.0, 200.0),
+        (90.0, 180.0),
+        calibration.matrix,
+        rotated,
+        image_size=(WIDTH, HEIGHT),
+    )
+
+    camera = np.asarray(location.camera_center_xy, dtype=float)
+    expected = rotated @ np.array([camera[0], camera[1], 1.0])
+    assert location.gripper_xy == pytest.approx(
+        (float(expected[0]), float(expected[1])), abs=1e-12
+    )
+    assert location.gripper_delta_xy == pytest.approx(
+        (float(expected[0]) - 90.0, float(expected[1]) - 180.0), abs=1e-12
+    )
+
+
+@pytest.mark.parametrize("matrix", [
+    [[0.0, 1.0, 8.0], [1.0, 0.0, 4.0], [0.0, 0.0, 1.0]],   # mirrored
+    [[0.0, 0.0, 8.0], [0.0, 0.0, 4.0], [0.0, 0.0, 1.0]],   # singular
+    [[1.0, 0.0, 8.0], [0.0, 1.0, 4.0], [1.0, 0.0, 1.0]],   # bad last row
+    [[10.0, 0.0, 8.0], [0.0, 10.0, 4.0], [0.0, 0.0, 1.0]], # implausible scale
+])
+def test_bad_offset_matrices_are_rejected(matrix):
+    pick, calibration = _calibration()
     with pytest.raises(PickError) as error:
         pick.locate(
             (300.0, 200.0),
             (90.0, 180.0),
             calibration.matrix,
-            rotated,
+            matrix,
             image_size=(WIDTH, HEIGHT),
         )
     assert error.value.code == "bad_matrix"

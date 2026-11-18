@@ -26,7 +26,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
 from fastapi import FastAPI, Query, Request
@@ -42,7 +42,6 @@ from measure.pick_api import (
     PickError,
     check_image_point,
     image_size_pair,
-    offset_homogeneous_matrix,
 )
 from measure.pick_artifacts import (
     RunRecorder,
@@ -142,9 +141,10 @@ class PoseSampleModel(BaseModel):
 
 
 class OffsetRequest(BaseModel):
-    """Offset calibration request."""
+    """Offset calibration request; ``model`` selects the fitted transform."""
 
     samples: List[PoseSampleModel] = Field(..., min_length=1)
+    model: Literal["auto", "translation", "affine"] = "auto"
 
 
 class VisionRequest(BaseModel):
@@ -432,7 +432,7 @@ class PickService:
         *,
         debug: bool,
     ) -> Dict[str, Any]:
-        """Return the fitted 3x3 pure-translation offset matrix."""
+        """Return the fitted 3x3 offset transform and its diagnostics."""
         if not body.samples:
             raise PickError("bad_request", "samples must not be empty", 400)
 
@@ -458,15 +458,15 @@ class PickService:
             recorder = RunRecorder(
                 self.settings.runs_dir,
                 "offset",
-                {"samples": raw},
+                {"samples": raw, "model": body.model},
             )
 
         try:
-            offset = CameraGripperOffset.from_samples(built)
+            offset = CameraGripperOffset.from_samples(built, model=body.model)
         except CalibrationError as exc:
             self._fail(
                 recorder,
-                "offset_invalid",
+                exc.code or "offset_invalid",
                 str(exc),
                 422,
                 {"valid": False},
@@ -484,24 +484,27 @@ class PickService:
                 extra={"warnings": list(offset.warnings)},
             )
 
-        matrix = offset_homogeneous_matrix(offset.offset_xy)
-        debug_result = {
+        matrix = np.asarray(offset.matrix, dtype=float)
+        diagnostics: Dict[str, Any] = {
             "matrix": matrix.tolist(),
             "offset_xy": [float(value) for value in offset.offset_xy],
             "std_xy": [float(value) for value in offset.std_xy],
             "num_samples": len(offset.samples),
             "warnings": list(offset.warnings),
-            "samples": [sample.as_dict() for sample in offset.samples],
+            "model": offset.requested_model,
+            "effective_model": offset.effective_model,
+            "rms_mm": float(offset.rms_mm),
+            "max_mm": float(offset.max_mm),
+            "condition": float(offset.condition),
+            "rotation_deg": float(offset.rotation_deg),
+            "scale": float(offset.scale),
+            "shear": float(offset.shear),
+            "convention": "grasp_pose = matrix @ camera_centred_pose",
         }
+        debug_result = dict(diagnostics)
+        debug_result["samples"] = [sample.as_dict() for sample in offset.samples]
         manifest = self._finish_success(recorder, debug_result)
-        response: Dict[str, Any] = {
-            "ok": True,
-            "matrix": matrix.tolist(),
-            "offset_xy": [float(value) for value in offset.offset_xy],
-            "std_xy": [float(value) for value in offset.std_xy],
-            "num_samples": len(offset.samples),
-            "warnings": list(offset.warnings),
-        }
+        response: Dict[str, Any] = {"ok": True, **diagnostics}
         if manifest is not None:
             response["run_id"] = manifest["run_id"]
         return response
@@ -565,6 +568,12 @@ class PickService:
             "delta_xy": [
                 float(location.delta_xy[0]),
                 float(location.delta_xy[1]),
+            ],
+            "gripper_delta_xy": None
+            if location.gripper_delta_xy is None
+            else [
+                float(location.gripper_delta_xy[0]),
+                float(location.gripper_delta_xy[1]),
             ],
         }
         if manifest is not None:

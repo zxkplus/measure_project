@@ -176,7 +176,22 @@ grasp_pose = camera_centered_pose + offset
 
 也就是“从相机对准目标的位姿，加上这个向量，夹爪就在目标正上方”。
 
-> **符号是最容易错的地方**：`offset` 是**加**到相机居中位姿上的，不是减。如果按“夹爪到相机”的直觉存成 `G − K`，那么抓取公式要改成减，两者不能混用。配方 JSON 里写了 `convention: "grasp_pose = camera_centred_pose + offset_xy"`，以它为准。
+> **符号是最容易错的地方**：`offset` 是**作用在相机居中位姿上的变换**，方向不能反。配方 JSON 里写了 `convention: "grasp_pose = matrix @ camera_centred_pose"`，以它为准。平移模型的矩阵是 `[[I, offset], [0, 1]]`，所以旧公式 `grasp = camera_centred + offset_xy` 仍然成立；仿射模型则必须按矩阵乘。
+
+### 3.1.1 多点拟合（可选）
+
+只给一对样本时，`CameraGripperOffset` 就是纯平移。给四对以上时可以选择拟合
+`place ≈ M·center + t`：
+
+- `model="auto"`（默认）：先用平移模型；若平移残差 ≤0.5（控制器单位）就保留平移，
+  **点位增多不会改变结果**；只有平移解释不了、且仿射项显著（F 检验）并通过物理性检查
+  （非镜像、旋转 ≤15°、尺度变化 ≤2%、剪切 ≤2%）时才启用仿射。
+- `model="translation"`：永远只输出平移。
+- `model="affine"`：强制拟合仿射，至少 4 对（建议 6 对以上），仍要过残差与物理性门。
+
+空间跨度太小、点共线或重复时，仿射不可辨识，会回退平移（`auto`）或直接报错（`affine`）。
+仿射模型下 `pick_delta()` / `expected_uv_at_grasp()` 不再适用——偏移随位姿变化，
+必须用 `grasp_pose()` / 完整矩阵。
 
 ### 3.2 操作流程（与你的描述一致）
 
@@ -310,8 +325,12 @@ A_place_i − r_i = offset + A · (c − p_i)
     "warnings": []
   },
   "gripper_offset": {
+    "matrix": [[1.0, 0.0, 8.0], [0.0, 1.0, 4.0], [0.0, 0.0, 1.0]],
     "offset_xy": [8.0, 4.0],
-    "convention": "grasp_pose = camera_centred_pose + offset_xy",
+    "convention": "grasp_pose = matrix @ camera_centred_pose",
+    "model": "auto",
+    "effective_model": "translation",
+    "rms_mm": 0.02,
     "std_xy": [0.0, 0.0],
     "mean_center_error_px": 0.03,
     "valid": true,
@@ -501,9 +520,9 @@ if det.valid and recipe.validate()["valid"]:
 
 - `ImageRobotCalibration.servo_delta(p)` → `A·(c − p)`；
 - `ImageRobotCalibration.center_pose(pose, p)` → `pose + A·(c − p)`；
-- `CameraGripperOffset.apply(pose)` → `pose + offset`；
-- `RobotPickRecipe.pick_delta(p)` → `A·(c − p) + offset`（一次移动）；
-- `RobotPickRecipe.expected_uv_at_grasp()` → `c + A⁻¹·offset`（抓取位复检用）。
+- `CameraGripperOffset.apply(pose)` → `matrix @ pose`（平移模型下等于 `pose + offset`）；
+- `RobotPickRecipe.pick_delta(p)` → `A·(c − p) + offset`（仅平移模型；仿射模型抛错）；
+- `RobotPickRecipe.expected_uv_at_grasp()` → `c + A⁻¹·offset`（仅平移模型，抓取位复检用）。
 
 ---
 

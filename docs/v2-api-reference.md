@@ -857,7 +857,7 @@ Compute gantry camera-to-gripper offset.
 
 Calculation ID: `calibrate.offset`.
 
-Request: [GantryOffsetRequest](#schema-gantryoffsetrequest). Response: [OperationResponse_GantryMatrixResult_](#schema-operationresponse-gantrymatrixresult).
+Request: [GantryOffsetRequest](#schema-gantryoffsetrequest). Response: [OperationResponse_GantryOffsetResult_](#schema-operationresponse-gantryoffsetresult).
 
 Named output ports (for recipe bindings):
 
@@ -2222,12 +2222,13 @@ Flange XY poses that centre the camera and optionally the gripper on the target.
 |---|---|---|---|---|
 | `camera_center_xy` | array of number | yes | `not declared` | minItems: 2; maxItems: 2 |
 | `gripper_xy` | array of number or null | no | `not declared` | anyOf[0] minItems: 2; anyOf[0] maxItems: 2 |
+| `gripper_delta_xy` | array of number or null | no | `not declared` | anyOf[0] minItems: 2; anyOf[0] maxItems: 2 |
 
 <a id="schema-gantrymatrixresult"></a>
 
 ### GantryMatrixResult
 
-Upstream-owned row-major 3x3 vision affine or pure-translation offset.
+Upstream-owned row-major 3x3 vision affine or offset transform.
 
 | Field | Type | Required | Default | Constraints / description |
 |---|---|---|---|---|
@@ -2237,7 +2238,7 @@ Upstream-owned row-major 3x3 vision affine or pure-translation offset.
 
 ### GantryOffsetRequest
 
-One or more samples of the additive camera-to-gripper XY correction.
+Samples of the camera-to-gripper correction, fitted as selected.
 
 | Field | Type | Required | Default | Constraints / description |
 |---|---|---|---|---|
@@ -2246,6 +2247,25 @@ One or more samples of the additive camera-to-gripper XY correction.
 | `timeout_ms` | integer | no | `60000` | minimum: 1.0; maximum: 3600000.0 |
 | `idempotency_key` | string or null | no | `not declared` | anyOf[0] minLength: 1; anyOf[0] maxLength: 200 |
 | `samples` | array of [GantryOffsetSample](#schema-gantryoffsetsample) | yes | `not declared` | minItems: 1 |
+| `model` | `"auto"`, `"translation"`, `"affine"` | no | `"auto"` | — |
+
+<a id="schema-gantryoffsetresult"></a>
+
+### GantryOffsetResult
+
+Offset transform plus the diagnostics that selected its model.
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `matrix` | array of array of number | yes | `not declared` | minItems: 3; maxItems: 3 |
+| `model` | `"auto"`, `"translation"`, `"affine"` | yes | `not declared` | — |
+| `effective_model` | `"translation"`, `"affine"` | yes | `not declared` | — |
+| `rms_mm` | number | yes | `not declared` | — |
+| `max_mm` | number | yes | `not declared` | — |
+| `condition` | number | yes | `not declared` | — |
+| `rotation_deg` | number | yes | `not declared` | — |
+| `scale` | number | yes | `not declared` | — |
+| `shear` | number | yes | `not declared` | — |
 
 <a id="schema-gantryoffsetsample"></a>
 
@@ -3029,6 +3049,22 @@ Physical board coordinate in the declared unit.
 | `state` | `"queued"`, `"running"`, `"cancelling"`, `"succeeded"`, `"failed"`, `"cancelled"`, `"timed_out"` | yes | `not declared` | — |
 | `trace_id` | string | yes | `not declared` | — |
 | `result` | [GantryMatrixResult](#schema-gantrymatrixresult) or null | no | `not declared` | — |
+| `error` | [ErrorDetail](#schema-errordetail) or null | no | `not declared` | — |
+| `created_at` | string | yes | `not declared` | — |
+| `completed_at` | string or null | no | `not declared` | — |
+| `diagnostics` | object | no | `not declared` | — |
+
+<a id="schema-operationresponse-gantryoffsetresult"></a>
+
+### OperationResponse_GantryOffsetResult_
+
+| Field | Type | Required | Default | Constraints / description |
+|---|---|---|---|---|
+| `operation_id` | string | yes | `not declared` | — |
+| `operation` | string | yes | `not declared` | — |
+| `state` | `"queued"`, `"running"`, `"cancelling"`, `"succeeded"`, `"failed"`, `"cancelled"`, `"timed_out"` | yes | `not declared` | — |
+| `trace_id` | string | yes | `not declared` | — |
+| `result` | [GantryOffsetResult](#schema-gantryoffsetresult) or null | no | `not declared` | — |
 | `error` | [ErrorDetail](#schema-errordetail) or null | no | `not declared` | — |
 | `created_at` | string | yes | `not declared` | — |
 | `completed_at` | string or null | no | `not declared` | — |
@@ -4959,6 +4995,8 @@ NCC localization controls, angles clockwise and scales dimensionless.
 | `pyramid_max_template_size` | integer | no | `400` | minimum: 8.0; maximum: 32768.0 |
 | `fine_search_policy` | `"neighborhood"`, `"whole"` or null | no | `not declared` | — |
 | `fine_search_expand_px` | integer | no | `24` | minimum: 0.0; maximum: 4096.0 |
+| `fine_candidates` | integer or null | no | `not declared` | anyOf[0] minimum: 1.0; anyOf[0] maximum: 1000.0 |
+| `fine_angle_policy` | `"dense"`, `"hierarchical"` | no | `"dense"` | — |
 
 <a id="schema-thresholdpreprocessing"></a>
 

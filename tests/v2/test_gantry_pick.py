@@ -85,11 +85,57 @@ def test_vision_offset_and_location_form_one_v2_workflow(service):
     result = located["result"]
     assert result["camera_center_xy"] == pytest.approx([90.975, 181.975], abs=1e-3)
     assert result["gripper_xy"] == pytest.approx([98.975, 185.975], abs=1e-3)
-    assert set(result) == {"camera_center_xy", "gripper_xy"}
+    assert set(result) == {"camera_center_xy", "gripper_xy", "gripper_delta_xy"}
+    assert result["gripper_delta_xy"] == pytest.approx([8.975, 5.975], abs=1e-3)
     assert located["operation"] == "locate"
     assert (root / "shot.png").read_bytes() == original
     assert not (root / "pick_runs").exists()
     assert not (root / "pick_recipe.json").exists()
+
+
+def test_multi_point_offset_returns_an_affine_transform(service):
+    client, _ = service
+    centres = np.array([[0.0, 0.0], [200.0, 0.0], [0.0, 150.0], [200.0, 150.0],
+                        [100.0, 0.0], [0.0, 75.0], [200.0, 75.0], [100.0, 150.0]])
+    theta = np.radians(1.5)
+    linear = 1.01 * np.array([[np.cos(theta), -np.sin(theta)],
+                              [np.sin(theta), np.cos(theta)]])
+    shift = np.array([8.0, 4.0])
+    samples = [
+        {"center_pose": list(centre), "place_pose": list(linear @ centre + shift)}
+        for centre in centres
+    ]
+
+    payload = calculate(client, "/calibrate/offset",
+                        {"samples": samples, "model": "affine"})["result"]
+    assert payload["model"] == "affine"
+    assert payload["effective_model"] == "affine"
+    assert payload["rotation_deg"] == pytest.approx(1.5, abs=1e-6)
+    matrix = np.asarray(payload["matrix"])
+
+    located = calculate(client, "/locate", {
+        "image": reference("shot.png"), "robot_pose": [90, 180],
+        "vision_matrix": VISION_MATRIX, "offset_matrix": payload["matrix"],
+    })["result"]
+    camera = located["camera_center_xy"]
+    expected = matrix @ np.array([camera[0], camera[1], 1.0])
+    assert located["gripper_xy"] == pytest.approx(expected[:2].tolist(), abs=1e-9)
+    assert located["gripper_delta_xy"] == pytest.approx(
+        (expected[:2] - [90.0, 180.0]).tolist(), abs=1e-9)
+
+
+def test_mirrored_affine_offset_is_rejected(service):
+    client, _ = service
+    centres = [[0.0, 0.0], [200.0, 0.0], [0.0, 150.0], [200.0, 150.0]]
+    samples = [
+        {"center_pose": centre,
+         "place_pose": [-centre[0] + 8.0, centre[1] + 4.0]}
+        for centre in centres
+    ]
+    response = client.post("/api/v2/calibrate/offset", json={
+        "samples": samples, "model": "affine"})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "pick.offset_implausible"
 
 
 def test_location_ignores_translation_column_and_z_and_offset_is_optional(service):
@@ -171,7 +217,7 @@ def test_invalid_requests_use_the_v2_validation_envelope(service, route, payload
 @pytest.mark.parametrize("field,matrix", [
     ("vision_matrix", [[0, 0, 0], [0, 0, 0], [0, 0, 1]]),
     ("vision_matrix", [[1, 0, 0], [0, 1, 0], [1, 0, 1]]),
-    ("offset_matrix", [[2, 0, 0], [0, 1, 0], [0, 0, 1]]),
+    ("offset_matrix", [[0, 1, 0], [1, 0, 0], [0, 0, 1]]),
 ])
 def test_invalid_matrix_semantics_are_reported_as_pick_errors(service, field, matrix):
     client, _ = service

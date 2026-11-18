@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import cv2
 import numpy as np
 
-from measure.pick_api import GantryPick, offset_homogeneous_matrix
+from measure.pick_api import GantryPick
 from measure.pick_artifacts import read_manifest
 from measure.robot_calibration import OffsetSample
 
@@ -136,9 +136,11 @@ def _replay_offset(inputs: Dict[str, Any], result: Dict[str, Any]) -> bool:
                 center_pose=(float(centre[0]), float(centre[1])),
             )
         )
-    offset = GantryPick().calibrate_offset(built)
-    matrix = offset_homogeneous_matrix(offset.offset_xy)
-    print(f"  replay: offset={offset.offset_xy} std={offset.std_xy}")
+    model = str(inputs.get("model", "auto"))
+    offset = GantryPick().calibrate_offset(built, model=model)
+    matrix = offset.matrix
+    print(f"  replay: model={offset.effective_model} offset={offset.offset_xy} "
+          f"std={offset.std_xy}")
     return _compare("offset.matrix", result.get("matrix"), matrix, tolerance=1e-9)
 
 

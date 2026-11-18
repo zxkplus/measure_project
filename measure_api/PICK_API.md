@@ -89,14 +89,25 @@ invalidates the matrix — `/calibrate/vision` echoes `image_size` and
 ### Offset matrix
 
 ```text
-O = [[1, 0, dx],
-     [0, 1, dy],
-     [0, 0, 1 ]]
+O = [[m00, m01, tx],
+     [m10, m11, ty],
+     [0,   0,   1 ]]
+
+gripper_xy = O @ [camera_center_xy[0], camera_center_xy[1], 1]
 ```
 
+With one sample, or when the translation model explains every sample inside
+0.5 controller units, `m = I` and the matrix reduces to:
+
 ```text
-gripper_xy = camera_center_xy + (dx, dy)
+gripper_xy = camera_center_xy + (tx, ty)
 ```
+
+The linear part is fitted only from four or more samples and is kept only when
+translation cannot explain the data, the extra terms are significant, and the
+result stays physically plausible (no mirror, rotation within 15 degrees,
+scale within 2 percent).  `/locate` applies the full matrix; it does not read
+`matrix[:2, 2]` alone.
 
 ## Endpoints
 
@@ -150,6 +161,11 @@ service sees no image: store them next to the matrix, and re-calibrate when
 
 `application/json`:
 
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `samples` | `[{place_pose, center_pose}, ...]` | yes | same-length pairs; trailing Z is ignored |
+| `model` | `auto` \| `translation` \| `affine` | no, default `auto` | `auto` keeps translation while it explains the samples, `affine` forces the fit |
+
 ```json
 {"samples": [{"place_pose": [118.0, 89.0], "center_pose": [110.0, 85.0]}]}
 ```
@@ -165,14 +181,30 @@ service sees no image: store them next to the matrix, and re-calibrate when
   "offset_xy": [8.0, 4.0],
   "std_xy": [0.0, 0.0],
   "num_samples": 1,
+  "model": "auto",
+  "effective_model": "translation",
+  "rms_mm": 0.0,
+  "max_mm": 0.0,
+  "condition": 1.0,
+  "rotation_deg": 0.0,
+  "scale": 1.0,
+  "shear": 0.0,
+  "convention": "grasp_pose = matrix @ camera_centred_pose",
   "warnings": []
 }
 ```
 
-`offset_xy` is the mean of `place_pose - center_pose`.  Samples that disagree
-by more than 0.5 mm per axis (`std_xy`) are rejected with
-`422 offset_invalid` — averaging them would produce a plausible but wrong
-grasp correction.
+`offset_xy` is the translation part of `matrix` (`matrix[:2, 2]`).  For the
+translation model it equals the mean of `place_pose - center_pose`, and
+samples that disagree by more than 0.5 units per axis (`std_xy`) are rejected
+with `422 offset_invalid` — averaging them would produce a plausible but wrong
+grasp correction.  With `model=affine` (or `auto` once translation fails) the
+linear part is fitted from at least four samples; the response reports
+`effective_model` plus the residual (`rms_mm`, `max_mm`) and the fitted
+rotation, scale and shear.
+
+Four samples leave only two residual degrees of freedom, which the endpoint
+flags with `offset_low_redundancy`; six or more are recommended for an affine.
 
 ### `POST /api/v1/locate`
 
@@ -184,7 +216,7 @@ grasp correction.
 | `image_uv` | `[u, v]` | yes | detected target centre |
 | `robot_pose` | `[x, y]` | yes | flange XY at capture time |
 | `vision_matrix` | 3x3 | yes | from `/calibrate/vision` |
-| `offset_matrix` | 3x3 | no | from `/calibrate/offset` |
+| `offset_matrix` | 3x3 | no | from `/calibrate/offset`; translation or affine |
 | `radius_px` | float | no | echoed into the debug run only |
 
 ```bash
@@ -208,13 +240,17 @@ curl -X POST http://127.0.0.1:8100/api/v1/locate \
   "ok": true,
   "camera_center_xy": [15.8587, 325.4455],
   "gripper_xy": [139.5384, 326.9227],
-  "delta_xy": [-0.0693, -1.2015]
+  "delta_xy": [-0.0693, -1.2015],
+  "gripper_delta_xy": [123.6106, 2.7553]
 }
 ```
 
-- `offset_matrix` omitted: `gripper_xy` is `null`.
-- `delta_xy` is `A @ (image_centre - image_uv)`: the relative move that puts
-  the target at the image centre.
+- `offset_matrix` omitted: `gripper_xy` and `gripper_delta_xy` are `null`.
+- `delta_xy` is `A @ (image_centre - image_uv)`: the move that puts the target
+  at the image centre.  It never includes the offset.
+- `gripper_xy` applies the offset matrix to `camera_center_xy`.  With an affine
+  matrix the correction depends on the pose, so the one-shot move is
+  `gripper_delta_xy = gripper_xy - robot_pose`, not `delta_xy + offset`.
 - A bad/singular matrix is `400 bad_matrix`; a point outside the frame is
   `400 point_out_of_image`.
 - The response never includes Z.
@@ -278,7 +314,7 @@ runs re-run the circle locator first.
 | 400 | `bad_request` | missing/invalid field, fewer than 4 points, bad `image_size` |
 | 400 | `point_count_mismatch` | `image_points` and `robot_points` differ in length |
 | 400 | `point_out_of_image` | a point lies outside `image_size` (often a row/col swap) |
-| 400 | `bad_matrix` | matrix not 3x3, wrong last row, singular, or offset not a translation |
+| 400 | `bad_matrix` | matrix not 3x3, wrong last row, singular, mirrored, or implausible offset scale |
 | 422 | `calibration_failed` | degenerate correspondences (collinear or singular) |
 | 422 | `calibration_invalid` | fit quality gate failed; see `rms_px` and `warnings` |
 | 422 | `offset_invalid` | no samples, or samples disagree beyond `std_xy` |
