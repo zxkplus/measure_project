@@ -227,3 +227,29 @@ def test_coarse_fine_search_matches_the_single_pass_result(api, space, textured_
         assert left.center == pytest.approx(right.center, abs=1.0)
         assert left.angle_rad == pytest.approx(right.angle_rad, abs=np.deg2rad(1.0))
         assert left.score == pytest.approx(right.score, abs=0.05)
+
+
+def test_pyramid_search_refines_a_large_support_at_full_resolution(api, space):
+    rng = np.random.RandomState(3)
+    reference = cv2.GaussianBlur((rng.rand(700, 700) * 255).astype(np.uint8), (7, 7), 2.0)
+    prepared = api("template_search", "prepare_support")(
+        reference,
+        api("template_search", "SupportSpec")(
+            box=api("computation_types", "RotatedBox")((350.0, 350.0), (600.0, 600.0), 0.0),
+            anchor_reference=(350.0, 350.0),
+        ),
+        api("preprocessing", "RawSpec")(),
+        reference_space=space("reference"), support_space=space("support"),
+    ).value
+    image = np.zeros((1000, 1000), np.uint8)
+    image[200:800, 200:800] = reference[50:650, 50:650]
+    result = api("template_search", "search_support")(
+        image, prepared, api("template_search", "SearchOptions")(
+            score_threshold=0.6, pyramid_max_template_size=400,
+        ), image_space=space("inspection"),
+    )
+    assert result.valid
+    assert result.diagnostics["pyramid_factor"] < 1.0
+    match = result.value.matches[0]
+    assert match.center == pytest.approx((500.0, 500.0), abs=0.6)
+    assert match.score > 0.99

@@ -82,6 +82,9 @@ class SearchOptions:
     coarse_angle_step_rad: float = math.radians(5.0)
     coarse_scale_step: float = 0.1
     max_coarse_template_side: int = 400
+    pyramid_levels: int = 0
+    pyramid_max_template_size: int = 400
+    fine_search_radius_px: float = 24.0
     angle_list: Optional[Tuple[float, ...]] = None
     scale_list: Optional[Tuple[float, ...]] = None
     inplace_variants: bool = False
@@ -359,6 +362,7 @@ def _suppress(candidates: List[TemplateMatch], max_overlap: float) -> List[Templ
 
 
 
+
 def _search_coarse_fine(gray: Array, prepared: PreparedSupport, options: SearchOptions,
                         image_space: Space, angles: List[float], scales: List[float],
                         requested: int, pad: int) -> Observation[MatchSet]:
@@ -441,6 +445,102 @@ def _coarse_grid(values: List[float], step: float) -> List[float]:
         coarse.append(values[-1])
     return coarse
 
+
+def _pyramid_factor(prepared: PreparedSupport, options: SearchOptions) -> float:
+    """Return the decimation factor implied by the pyramid options."""
+    height, width = np.asarray(prepared.pixels).shape[:2]
+    factor = min(2.0 ** -int(options.pyramid_levels),
+                 options.pyramid_max_template_size / max(width, height))
+    return min(1.0, max(factor, min(1.0, 6.0 / max(1, min(width, height)))))
+
+
+def _search_pyramid(gray: Array, prepared: PreparedSupport, options: SearchOptions,
+                    image_space: Space, factor: float) -> Observation[MatchSet]:
+    """Coarse search on decimated pixels, then rescan each candidate at full resolution.
+
+    Both stages call :func:`_scan_once`, so the pyramid dispatcher can never
+    re-enter itself regardless of the options carried by the caller.
+
+    Args:
+        gray: ``float32`` inspection image.
+        prepared: Immutable prepared support.
+        options: Search policy.
+        image_space: Space of the inspection image.
+        factor: Decimation factor in ``(0, 1)``.
+
+    Returns:
+        Matches located on the full-resolution image.
+    """
+    support = np.asarray(prepared.pixels, dtype=np.float32)
+    small_support = cv2.resize(support, None, fx=factor, fy=factor,
+                               interpolation=cv2.INTER_AREA)
+    small_gray = cv2.resize(gray, None, fx=factor, fy=factor,
+                            interpolation=cv2.INTER_AREA)
+    small = PreparedSupport(
+        pixels=small_support,
+        valid_mask=np.ones(small_support.shape[:2], dtype=bool),
+        anchor_support=(prepared.anchor_support[0] * factor,
+                        prepared.anchor_support[1] * factor),
+        support_to_reference=prepared.support_to_reference,
+        reference_space=prepared.reference_space,
+        support_space=prepared.support_space,
+        mask=None,
+    )
+    coarse_options = SearchOptions(
+        score_threshold=min(options.score_threshold, options.coarse_score_threshold),
+        max_matches=0, max_overlap=options.max_overlap, subpixel=False,
+        coarse_fine=False, angle_list=tuple(options.angles()),
+        scale_list=tuple(options.scales()),
+    )
+    coarse = _scan_once(small_gray, small, coarse_options, image_space)
+    diagnostics = {"requested_variant_count": len(options.angles()) * len(options.scales()),
+                   "unavailable_variant_count": 0, "pyramid_factor": float(factor)}
+    if not coarse.valid or coarse.value is None:
+        diagnostics.update({"searched_variant_count": 0, "pruned_variant_count": 0,
+                            "search_complete": True})
+        return invalid(image_space, "no_matches", diagnostics)
+    limit = options.max_matches if options.max_matches > 0 else len(coarse.value.matches)
+    height, width = gray.shape[:2]
+    radius = max(options.fine_search_radius_px, max(support.shape[:2]) * 0.75)
+    refined: List[TemplateMatch] = []
+    searched = 0
+    for match in coarse.value.matches[:limit]:
+        center_x = match.center[0] / factor
+        center_y = match.center[1] / factor
+        left = int(max(0, center_x - radius))
+        top = int(max(0, center_y - radius))
+        right = int(min(width, center_x + radius))
+        bottom = int(min(height, center_y + radius))
+        window = gray[top:bottom, left:right]
+        if window.size == 0:
+            continue
+        searched += len(options.angles()) * len(options.scales())
+        local = _scan_once(window, prepared, options, image_space)
+        if not local.valid or local.value is None:
+            continue
+        for found in local.value.matches:
+            matrix = np.array(found.support_to_image.matrix, dtype=np.float64)
+            matrix[0, 2] += left
+            matrix[1, 2] += top
+            refined.append(TemplateMatch(
+                center=(found.center[0] + left, found.center[1] + top),
+                anchor=(found.anchor[0] + left, found.anchor[1] + top),
+                angle_rad=found.angle_rad, scale=found.scale, score=found.score,
+                support_to_image=make_mapping(matrix, source=prepared.support_space,
+                                              destination=image_space, kind="similarity"),
+                peak_xy=found.peak_xy, size_wh=found.size_wh,
+            ))
+    selected = _suppress(refined, options.max_overlap)
+    if options.max_matches:
+        selected = selected[: options.max_matches]
+    diagnostics.update({"searched_variant_count": searched,
+                        "pruned_variant_count": len(coarse.value.matches),
+                        "search_complete": True})
+    if not selected:
+        return invalid(image_space, "no_matches", diagnostics)
+    return observed(image_space, MatchSet(matches=tuple(selected)), diagnostics)
+
+
 def search_support(
     image: Array, prepared: PreparedSupport, options: SearchOptions, *,
     image_space: Space,
@@ -464,6 +564,16 @@ def search_support(
                              "image must be uint8 or float32", "image")
     gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     gray = np.array(gray, dtype=np.float32, copy=True)
+    factor = _pyramid_factor(prepared, options)
+    if factor < 1.0 - 1e-12:
+        return _search_pyramid(gray, prepared, options, image_space, factor)
+    return _scan_once(gray, prepared, options, image_space)
+
+
+def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
+               image_space: Space) -> Observation[MatchSet]:
+    """Single-resolution search over the requested pose grid."""
+    template = prepared.pixels
     template = prepared.pixels
     support_height, support_width = template.shape[:2]
     angles = options.angles()
