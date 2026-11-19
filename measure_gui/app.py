@@ -47,6 +47,74 @@ from .template_view import TemplateTool, TemplateView
 from .tool_panel import ToolPanel
 from measure.rectify import crop_and_straighten
 
+_SIDE_LABELS = {"left": "左侧", "right": "右侧", "top": "上侧", "bottom": "下侧"}
+
+
+def template_roi_issues(roi_state: Dict[str, Any], click_col: float,
+                        click_row: float, template_size: float,
+                        margin: float = 0.0) -> List[Dict[str, Any]]:
+    """Return box-containment issues for a taught template (empty when it fits).
+
+    The GUI box is the **patch** the engine crops and straightens, not a search
+    region: ``MultiTargetWorkflow`` matches on the whole frame
+    (``template_point.measure(inspection_image)``), so there is nothing for the
+    box to clip. What the box must do is contain the template support — a box
+    smaller than the template yields a straightened patch smaller than the
+    template, and the stage-2 measurement fails or shifts.
+
+    The test therefore runs in the box's own frame (the click is rotated into
+    box-local coordinates). Using the axis-aligned bounding box instead would
+    over-state the available room by up to ``|cos| + |sin|`` (≈1.41x at 45°)
+    and hide real clipping.
+
+    Args:
+        roi_state: ``_get_roi_state()`` payload (centre, size, angle in degrees).
+        click_col: Taught template centre column.
+        click_row: Taught template centre row.
+        template_size: Square template side length in pixels.
+        margin: Extra clearance required on each side (0 keeps "box == template"
+            legal; use a positive value only to flag tight-but-fitting boxes).
+
+    Returns:
+        Issue dicts with ``side``, ``available`` (room left on that side of the
+        click), ``required`` (template half size + margin) and ``message``.
+    """
+    if not roi_state:
+        return []
+    width = float(roi_state.get("width", 0) or 0)
+    height = float(roi_state.get("height", 0) or 0)
+    if width <= 0 or height <= 0:
+        return []
+    center_col = float(roi_state.get("center_col", 0.0))
+    center_row = float(roi_state.get("center_row", 0.0))
+    angle = np.deg2rad(float(roi_state.get("angle_deg", 0.0)))
+    dx = click_col - center_col
+    dy = click_row - center_row
+    local_x = dx * np.cos(angle) + dy * np.sin(angle)
+    local_y = -dx * np.sin(angle) + dy * np.cos(angle)
+    half = float(template_size) / 2.0 + float(margin)
+
+    issues: List[Dict[str, Any]] = []
+    for side, occupied, limit in (
+        ("left", -local_x, width / 2.0),
+        ("right", local_x, width / 2.0),
+        ("top", -local_y, height / 2.0),
+        ("bottom", local_y, height / 2.0),
+    ):
+        available = limit - occupied
+        if available + 1e-9 < half:
+            issues.append({
+                "side": side,
+                "available": available,
+                "required": half,
+                "message": (
+                    f"框的{_SIDE_LABELS[side]}只剩 {available:.1f} px，"
+                    f"模板需要 {half:.1f} px"
+                ),
+            })
+    return issues
+
+
 
 class _AnchorStub:
     """Minimal stand-in for a detection, for restoring views from stored geometry.
@@ -232,6 +300,7 @@ class MeasureApp:
         self.tool_panel.on_angle_range_changed = self._on_angle_range_changed
         self.tool_panel.on_max_matches_changed = self._on_max_matches_changed
         self.tool_panel.on_overlap_changed = self._on_overlap_changed
+        self.tool_panel.on_pyramid_changed = self._on_pyramid_changed
         self.tool_panel.on_add_composed = self._on_add_composed
         self.tool_panel.on_tool_edit = self._on_tool_edit
         self.tool_panel.on_tool_delete = self._on_tool_delete
@@ -388,6 +457,7 @@ class MeasureApp:
         if self._workflow is None or not self._workflow.is_taught:
             messagebox.showwarning("提示", "请先创建/加载模型")
             return
+        self._warn_template_roi("保存")
 
         # Determine project directory
         if self._current_project_dir and os.path.isdir(self._current_project_dir):
@@ -418,6 +488,7 @@ class MeasureApp:
         if self._workflow is None or not self._workflow.is_taught:
             messagebox.showwarning("提示", "请先创建/加载模型")
             return
+        self._warn_template_roi("保存")
 
         project_dir = filedialog.askdirectory(
             parent=self.root,
@@ -619,6 +690,8 @@ class MeasureApp:
         if self._inspection_image is None:
             messagebox.showwarning("提示", "请先加载检测图")
             return
+
+        self._warn_template_roi("运行")
 
         try:
             self.tool_panel.set_progress(True)
@@ -1322,16 +1395,13 @@ class MeasureApp:
             self.tool_panel.set_obb_status(
                 "模型未载入：请选择模型文件并点击「载入模型并自检」", False)
 
-    def _parse_pyramid_decimate(self) -> int:
-        """Parse the pyramid decimation level from the tool panel combobox."""
-        val = self.tool_panel._pyramid_var.get()
-        mapping = {
-            "禁用": 0,
-            "2x": 1,
-            "4x (推荐)": 2,
-            "8x": 3,
-        }
-        return mapping.get(val, 2)
+    def _parse_pyramid(self) -> tuple:
+        """Return ``(decimate, max_template_size)`` from the tool panel.
+
+        The engine only treats ``decimate`` as an on/off switch; the actual
+        downsampling ratio is ``min(1, max_template_size / longest_side)``.
+        """
+        return self.tool_panel.pyramid_config()
 
     # ------------------------------------------------------------------
     # Template creation
@@ -1420,6 +1490,7 @@ class MeasureApp:
             strategy = SingleBoxAlignment()
         self._workflow._alignment = strategy
 
+        pyramid_decimate, pyramid_max_size = self._parse_pyramid()
         self._workflow.teach_template(
             self._reference_image,
             center=(center_row, center_col),
@@ -1433,9 +1504,10 @@ class MeasureApp:
             overlap=self.tool_panel._overlap_var.get(),
             coarse_fine=True,
             coarse_angle_step=5.0,
-            pyramid_decimate=self._parse_pyramid_decimate(),
-            pyramid_max_template_size=400,
+            pyramid_decimate=pyramid_decimate,
+            pyramid_max_template_size=pyramid_max_size,
         )
+        self.tool_panel.update_pyramid_factor(max(height, width))
 
         # For multi-point, register control points with the alignment
         if use_multi_point and isinstance(strategy, MultiPointAlignment):
@@ -1612,6 +1684,10 @@ class MeasureApp:
         angle_str = self.tool_panel._angle_var.get()
         angle_val = float(angle_str.replace("±", "").replace("°", ""))
         self._workflow.angle_range = (-angle_val, angle_val)
+        point = self._current_template_point()
+        if point is not None:
+            decimate, max_size = self.tool_panel.pyramid_config()
+            point.set_pyramid(decimate, max_size)
 
     def _on_preprocessor_changed(self, name: str):
         if self._workflow:
@@ -1767,6 +1843,56 @@ class MeasureApp:
     def _on_overlap_changed(self, value: float):
         if self._workflow:
             self._workflow.overlap = value
+
+    def _current_template_point(self):
+        """The taught template point of the active strategy, if any."""
+        alignment = getattr(self._workflow, "_alignment", None)
+        return getattr(alignment, "template_point", None)
+
+    def _on_pyramid_changed(self, decimate: int, max_template_size: int):
+        """Apply pyramid settings to the taught template and refresh the ratio."""
+        point = self._current_template_point()
+        if point is None:
+            self.tool_panel.update_pyramid_factor()
+            return
+        point.set_pyramid(decimate, max_template_size)
+        self.tool_panel.update_pyramid_factor(max(point.edge_template.shape[:2]))
+
+    def _template_roi_warnings(self) -> List[Dict[str, Any]]:
+        """Box-containment issues for the current template (empty when it fits)."""
+        point = self._current_template_point()
+        if point is None:
+            return []
+        return template_roi_issues(
+            self._get_roi_state(),
+            float(point.click_col), float(point.click_row),
+            float(point.template_size),
+        )
+
+    def _warn_template_roi(self, action: str) -> None:
+        """Warn when the taught box is smaller than the template support.
+
+        The box is the patch the engine straightens, not a search region, so a
+        box that merely *equals* the template is fine; only a box that cannot
+        contain the template is a problem. Shown once per distinct problem set:
+        repeating it on every save would train the operator to dismiss it.
+        """
+        issues = self._template_roi_warnings()
+        if not issues:
+            self._roi_warning_signature = None
+            return
+        signature = tuple(
+            (issue["side"], round(float(issue["available"]), 3)) for issue in issues)
+        if signature == getattr(self, "_roi_warning_signature", None):
+            return
+        self._roi_warning_signature = signature
+        detail = "\n".join(f"· {issue['message']}" for issue in issues)
+        messagebox.showwarning(
+            "旋转框装不下模板",
+            f"{action}前检查到旋转框小于模板支撑：\n{detail}\n\n"
+            "框小于模板时，拉正后的 patch 会比模板小，模板匹配会失败或偏移。"
+            "请把框放大到至少 模板尺寸（推荐每边再留 20–50px）。",
+        )
 
     def _on_control_points_confirmed(self, points: list):
         """Handle multi-point control point confirmation (double-click)."""

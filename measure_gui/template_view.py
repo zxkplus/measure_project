@@ -1175,6 +1175,8 @@ class TemplateView(tk.Frame):
             "angle_range_half": 15.0,
             "angle_step": 1.0,
             "use_subpixel": True,
+            "pyramid_decimate": 0,
+            "pyramid_max_template_size": 400,
         }
 
         dlg_params = TemplateMatchPointDialog.ask(self, params={
@@ -1184,6 +1186,8 @@ class TemplateView(tk.Frame):
             "angle_range_half": 15.0,
             "angle_step": 1.0,
             "use_subpixel": True,
+            "pyramid_decimate": 0,
+            "pyramid_max_template_size": 400,
         })
 
         if dlg_params is None:

@@ -97,7 +97,11 @@ class _RecordingToolPanel:
 
     def set_matching_params(self, preprocessor_type, score_threshold,
                             angle_range_half, max_matches, overlap=0.3,
-                            angle_step_deg=1.0, preprocessor=None):
+                            angle_step_deg=1.0, preprocessor=None,
+                            pyramid_decimate=None,
+                            pyramid_max_template_size=None):
+        # Recorded separately so the long-standing 8-tuple stays readable.
+        self.last_pyramid = (pyramid_decimate, pyramid_max_template_size)
         self.calls.append(("set_matching_params", preprocessor_type,
                            float(score_threshold), float(angle_range_half),
                            int(max_matches), float(overlap), float(angle_step_deg),
@@ -362,6 +366,24 @@ class TestLoadProject:
         assert step == pytest.approx(1.5)
         # The whole preprocessor config survives the round-trip, not just its type.
         assert preproc_cfg["type"] == "raw"
+        # Pyramid settings are part of the model; dropping them here used to
+        # revert the widget to its default on reopen.
+        assert app.tool_panel.last_pyramid == (0, 400)
+
+    def test_pyramid_settings_are_restored_from_the_model(self, tmp_path):
+        wf = MultiTargetWorkflow()
+        wf.teach_template(_reference(), center=ROI_CENTER, size=ROI_SIZE,
+                          angle_deg=12.5, match_score_threshold=0.4,
+                          angle_range=(-25.0, 25.0), angle_step=1.5,
+                          max_matches=3, overlap=0.25,
+                          pyramid_decimate=1, pyramid_max_template_size=300)
+        wf.add_measurement("FitLine", "line_1", start=(10, 20), end=(60, 90),
+                           measure_length1=8.0, measure_length2=3.0)
+        project_dir, _ = _saved_project(tmp_path, wf)
+
+        app = FakeApp()
+        ProjectManager.load_project(project_dir, app)
+        assert app.tool_panel.last_pyramid == (1, 300)
 
     def test_roi_confirmed_flag_still_comes_from_project_json(self, tmp_path,
                                                              taught_workflow):

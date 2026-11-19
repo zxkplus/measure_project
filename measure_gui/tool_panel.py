@@ -43,6 +43,7 @@ class ToolPanel(ttk.Frame):
         on_score_threshold_changed: (value: float) -> None
         on_angle_range_changed: (value: str) -> None  # '±30', '±45', '±90'
         on_max_matches_changed: (value: int) -> None
+        on_pyramid_changed: (decimate: int, max_template_size: int) -> None
         on_add_composed: (obj_type: str, label: str, params: dict) -> None
         on_tool_edit: (label: str) -> None
         on_tool_delete: (label: str) -> None
@@ -92,6 +93,7 @@ class ToolPanel(ttk.Frame):
         self.on_angle_range_changed: Optional[Callable] = None
         self.on_max_matches_changed: Optional[Callable] = None
         self.on_overlap_changed: Optional[Callable] = None
+        self.on_pyramid_changed: Optional[Callable] = None
         self.on_add_composed: Optional[Callable] = None
         self.on_tool_edit: Optional[Callable] = None
         self.on_tool_delete: Optional[Callable] = None
@@ -230,8 +232,11 @@ class ToolPanel(ttk.Frame):
 
         self._build_preproc_params()
 
-        # Match score threshold
-        ttk.Label(self._template_form, text="匹配分数阈值").pack(anchor=tk.W, **pad)
+        # Match score threshold. The label spells out the estimator: the V2 API
+        # scores masked NCC, which reads higher than this engine's mean-filled
+        # borders for the same pose, so a threshold must not be copied across
+        # without re-measuring (gui_conversion flags the same thing).
+        ttk.Label(self._template_form, text="匹配分数阈值（掩膜 NCC）").pack(anchor=tk.W, **pad)
         self._score_var = tk.DoubleVar(value=0.5)
         score_scale = ttk.Scale(
             self._template_form, from_=0.1, to=1.0, variable=self._score_var,
@@ -297,16 +302,34 @@ class ToolPanel(ttk.Frame):
             self._overlap_label.config(text=f"{pct}%")
         self._overlap_var.trace_add("write", _update_overlap_label)
 
-        # Pyramid downsampling
-        ttk.Label(self._template_form, text="金字塔降采样").pack(anchor=tk.W, **pad)
-        self._pyramid_var = tk.StringVar(value="4x (推荐)")
-        pyramid_combo = ttk.Combobox(
-            self._template_form, textvariable=self._pyramid_var,
-            values=["禁用", "2x", "4x (推荐)", "8x"],
-            state="readonly", width=18,
+        # Pyramid coarse search.  The engine ignores the decimation *level*: any
+        # non-zero value only switches the pyramid on, and the real ratio comes
+        # from pyramid_max_template_size.  The old "2x/4x/8x" list therefore
+        # offered three labels for one behaviour, so it is an on/off switch plus
+        # the size cap that actually decides the ratio.
+        ttk.Label(self._template_form, text="金字塔粗筛").pack(anchor=tk.W, **pad)
+        self._pyramid_enabled_var = tk.BooleanVar(value=True)
+        pyramid_check = ttk.Checkbutton(
+            self._template_form, text="启用（粗搜在降采样图上做）",
+            variable=self._pyramid_enabled_var,
+            command=self._fire_pyramid,
         )
-        pyramid_combo.pack(fill=tk.X, **pad)
-        # 无 callback，创建模板时直接读取
+        pyramid_check.pack(anchor=tk.W, **pad)
+
+        pyramid_size_row = ttk.Frame(self._template_form)
+        pyramid_size_row.pack(fill=tk.X, **pad)
+        ttk.Label(pyramid_size_row, text="模板边长上限").pack(side=tk.LEFT)
+        self._pyramid_size_var = tk.StringVar(value="400")
+        pyramid_size_entry = ttk.Entry(
+            pyramid_size_row, textvariable=self._pyramid_size_var, width=6)
+        pyramid_size_entry.pack(side=tk.LEFT, padx=4)
+        ttk.Label(pyramid_size_row, text="px").pack(side=tk.LEFT)
+        pyramid_size_entry.bind("<Return>", lambda _event: self._fire_pyramid())
+        pyramid_size_entry.bind("<FocusOut>", lambda _event: self._fire_pyramid())
+
+        self._pyramid_factor_label = ttk.Label(
+            self._template_form, text="实际比例: 1.00× (未降采样)", foreground="gray")
+        self._pyramid_factor_label.pack(anchor=tk.W, **pad)
 
         # ROI display (read-only)
         self._roi_label = ttk.Label(tmpl_frame, text="ROI: (未设置)", foreground="gray")
@@ -687,13 +710,63 @@ class ToolPanel(ttk.Frame):
         """The committed preprocessor config (what the next teach will use)."""
         return dict(self._preproc_committed)
 
+    def pyramid_config(self) -> tuple:
+        """Return ``(decimate, max_template_size)`` from the current widgets.
+
+        ``decimate`` is 1/0 (the engine only uses it as an on/off switch) and
+        the ratio comes from ``max_template_size``.  A malformed or non-positive
+        size falls back to 400 px instead of silently disabling the pyramid.
+        """
+        enabled = bool(self._pyramid_enabled_var.get())
+        try:
+            size = int(float(self._pyramid_size_var.get()))
+        except (TypeError, ValueError):
+            size = 400
+        if size <= 0:
+            size = 400
+        return (1 if enabled else 0, size)
+
+    def set_pyramid_config(self, decimate: int, max_template_size: int,
+                           template_longest_side: Optional[int] = None) -> None:
+        """Restore the pyramid widgets (project load / model switch)."""
+        self._pyramid_enabled_var.set(bool(int(decimate)))
+        self._pyramid_size_var.set(str(int(max_template_size)))
+        self.update_pyramid_factor(template_longest_side)
+
+    def update_pyramid_factor(self, template_longest_side: Optional[int] = None) -> None:
+        """Show the ratio the engine would actually use.
+
+        Args:
+            template_longest_side: Longest side of the current template. Without
+                it only the size cap can be shown, because the ratio is
+                ``min(1, cap / side)``.
+        """
+        decimate, size = self.pyramid_config()
+        if not decimate:
+            text = "实际比例: 1.00× (未降采样)"
+        elif template_longest_side and template_longest_side > 0:
+            factor = min(1.0, size / float(template_longest_side))
+            text = f"实际比例: {factor:.2f}×"
+        else:
+            text = f"实际比例: ≤1.00× (上限 {size}px)"
+        self._pyramid_factor_label.config(text=text)
+
+    def _fire_pyramid(self) -> None:
+        """Push the pyramid widgets to the app and refresh the ratio label."""
+        decimate, size = self.pyramid_config()
+        self.update_pyramid_factor()
+        self._fire(self.on_pyramid_changed, decimate, size)
+
     def set_matching_params(self, preprocessor_type: str,
                             score_threshold: float,
                             angle_range_half: float,
                             max_matches: int,
                             overlap: float = 0.3,
                             angle_step_deg: float = 1.0,
-                            preprocessor: Optional[Dict[str, Any]] = None):
+                            preprocessor: Optional[Dict[str, Any]] = None,
+                            pyramid_decimate: Optional[int] = None,
+                            pyramid_max_template_size: Optional[int] = None,
+                            template_longest_side: Optional[int] = None):
         """Set matching parameter widgets programmatically (for project restore).
 
         Args:
@@ -707,6 +780,11 @@ class ToolPanel(ttk.Frame):
                 given, its parameters (clip_limit, thresholds, ...) are restored
                 too; ``preprocessor_type`` alone cannot carry them, which used
                 to make a re-taught template silently revert to the defaults.
+            pyramid_decimate: Non-zero enables the pyramid coarse search. When
+                ``None`` the current widget value is kept (legacy callers).
+            pyramid_max_template_size: Longest template side on the coarse level.
+            template_longest_side: Current template side, only used to render the
+                actual downsampling ratio next to the widgets.
         """
         if preprocessor:
             self.apply_preprocessor_config(dict(preprocessor))
@@ -722,6 +800,10 @@ class ToolPanel(ttk.Frame):
         self._max_matches_var.set(max_matches)
         self._overlap_var.set(overlap)
         self._angle_step_var.set(angle_step_deg)
+        if pyramid_decimate is not None:
+            self.set_pyramid_config(pyramid_decimate,
+                                    pyramid_max_template_size if pyramid_max_template_size is not None else 400,
+                                    template_longest_side)
 
     def get_alignment_mode(self) -> str:
         """Return the selected alignment mode key.
