@@ -54,7 +54,7 @@ def matrix3(value: List[List[float]], name: str) -> np.ndarray:
     """
     matrix = np.asarray(value, dtype=float)
     if (matrix.shape != (3, 3) or not np.isfinite(matrix).all()
-            or abs(np.linalg.det(matrix)) < 1e-12):
+            or invert_matrix(matrix).shape != (3, 3)):
         raise ValueError(f"{name} must be an invertible finite 3 by 3 matrix")
     return matrix
 
@@ -71,7 +71,7 @@ def rotation3(value: List[List[float]]) -> np.ndarray:
     """
     rotation = matrix3(value, "rotation")
     if (not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-7)
-            or not np.isclose(np.linalg.det(rotation), 1, atol=1e-7)):
+            or validate_rotation_matrix(rotation) is not None):
         raise ValueError("rotation must be a proper orthogonal matrix")
     return rotation
 
@@ -164,14 +164,14 @@ class PlaneParameters(StrictModel):
             elif (mapping.matrix is None or mapping.inverse_matrix is None
                   or not np.allclose(matrix3(mapping.matrix, "mapping"), expected)
                   or not np.allclose(matrix3(mapping.inverse_matrix, "inverse mapping"),
-                                     np.linalg.inv(expected))):
+                                     invert_matrix(expected))):
                 raise ValueError("View mapping matrix must agree with calibrated canvas geometry")
             details = mapping.details
             if (details.get("camera_sha256") != view.camera_sha256
                     or not np.allclose(matrix3(details.get("corrected_to_canvas"),
                                                "corrected_to_canvas"), expected)
                     or not np.allclose(matrix3(details.get("canvas_to_corrected"),
-                                               "canvas_to_corrected"), np.linalg.inv(expected))):
+                                               "canvas_to_corrected"), invert_matrix(expected))):
                 raise ValueError("View correction metadata must agree with calibrated canvas")
         return self
 
@@ -438,7 +438,7 @@ def plane_parameters(
                        [0, 1 / pixel_size, -y0 / pixel_size], [0, 0, 1]])
     canvas = PlaneCanvas(image_size=ImageSize(width=width, height=height), pixel_size=pixel_size,
                          unit=unit, frame=frame, plane_to_canvas=affine.tolist(),
-                         canvas_to_plane=np.linalg.inv(affine).tolist(),
+                         canvas_to_plane=invert_matrix(affine).tolist(),
                          bounds=[float(x0), float(y0), float(x1), float(y1)])
     for view in views:
         forward = affine @ np.array(view.camera_to_plane)
@@ -447,13 +447,13 @@ def plane_parameters(
             source_frame=view.camera.applicability.frame, destination_frame=frame,
             type="nonlinear" if nonlinear else "projective",
             matrix=None if nonlinear else forward.tolist(),
-            inverse_matrix=None if nonlinear else np.linalg.inv(forward).tolist(),
+            inverse_matrix=None if nonlinear else invert_matrix(forward).tolist(),
             details={"corrected_frame": f"{view.camera.applicability.camera_id}:pinhole",
                      "corrected_camera_matrix": view.camera.parameters.camera_matrix,
                      "distortion": view.camera.parameters.distortion,
                      "source_to_corrected": "undistortPoints(K,D,P=K)",
                      "corrected_to_canvas": forward.tolist(),
-                     "canvas_to_corrected": np.linalg.inv(forward).tolist(),
+                     "canvas_to_corrected": invert_matrix(forward).tolist(),
                      "camera_sha256": view.camera_sha256,
                      "geometry_policy": "transform_sample_points_and_curves",
                      "physical_unit": unit},
@@ -540,7 +540,7 @@ class StereoParameters(PlaneParameters):
     def check_stereo(self) -> StereoParameters:
         rotation = rotation3(self.rotation)
         translation = np.asarray(self.translation)
-        if not np.isclose(np.linalg.norm(translation), self.baseline):
+        if not np.isclose(vector_norm(translation), self.baseline):
             raise ValueError("baseline must equal the translation magnitude")
         x, y, z = translation
         skew = np.array([[0, -z, y], [z, 0, -x], [-y, x, 0]])
@@ -550,8 +550,8 @@ class StereoParameters(PlaneParameters):
         kb = np.array(self.views[1].camera.parameters.camera_matrix)
         if (essential.shape != (3, 3) or fundamental.shape != (3, 3)
                 or not np.allclose(essential, skew @ rotation, atol=1e-6)
-                or not np.allclose(fundamental, np.linalg.inv(kb).T @ essential
-                                   @ np.linalg.inv(ka), atol=1e-6)):
+                or not np.allclose(fundamental,
+                                   fundamental_matrix(essential, ka, kb), atol=1e-6)):
             raise ValueError("Essential/fundamental matrices must match declared pose/intrinsics")
         a, b = self.views
         ra, rb = np.array(a.board_to_camera_rotation), np.array(b.board_to_camera_rotation)
@@ -791,7 +791,7 @@ def compute_stereo(request: StereoRequest, context: CalculationContext) -> Calib
     plane_b.board_to_camera_rotation = rb.tolist()
     plane_b.board_to_camera_translation = tb.tolist()
     plane_b.plane_to_camera = pb.tolist()
-    plane_b.camera_to_plane = np.linalg.inv(pb).tolist()
+    plane_b.camera_to_plane = invert_matrix(pb).tolist()
     parameters = plane_parameters(
         [plane_a, plane_b], request.pixel_size, request.unit, request.destination_frame,
         provenance={"capture_ids": [a.view_id for a, *_ in accepted],
@@ -806,8 +806,9 @@ def compute_stereo(request: StereoRequest, context: CalculationContext) -> Calib
                                                       "b_from_a_residuals_px"] for e in item[key]])
     stereo = StereoParameters(**parameters.model_dump(), rotation=rotation.tolist(),
                               translation=translation.tolist(), essential=essential.tolist(),
-                              fundamental=fundamental.tolist(), baseline=float(np.linalg.norm(
-                                  translation)), reprojection_error_px=float(rms))
+                              fundamental=fundamental.tolist(),
+                              baseline=vector_norm(translation),
+                              reprojection_error_px=float(rms))
     return StereoResult(**asset_result(
         StereoCalibration(unit=request.unit, applicability=ca.applicability, parameters=stereo),
         context, request.output, {"accepted_pairs": details, "rejected_pairs": rejected,
@@ -857,7 +858,7 @@ def adjust_origin(request: OriginRequest, context: CalculationContext) -> Calibr
     for view in parameters.views:
         h = shift @ np.array(view.camera_to_plane)
         view.camera_to_plane = h.tolist()
-        view.plane_to_camera = np.linalg.inv(h).tolist()
+        view.plane_to_camera = invert_matrix(h).tolist()
         rotation = np.array(view.board_to_camera_rotation)
         translation = np.array(view.board_to_camera_translation) + rotation @ [dx, dy, 0]
         view.board_to_camera_translation = translation.tolist()
@@ -950,7 +951,7 @@ def validate_board_observations(
             camera_points = (obj @ np.array(view.board_to_camera_rotation).T
                              + np.array(view.board_to_camera_translation))
             projected = project_camera(camera_points, view.camera)
-            errors = np.linalg.norm(projected - img, axis=1)
+            errors = point_residuals(img, projected)
         errors_all.extend(errors.tolist())
         details.append({"camera_id": original.camera_id, "capture_id": observation.view_id,
                         "residuals_px": errors.tolist(), **error_summary(errors)})
