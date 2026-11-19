@@ -1443,6 +1443,45 @@ class Undistortion:
     inverse_map_y: np.ndarray
 
 
+@dataclass(frozen=True)
+class LensRemap:
+    """Pixels corrected onto their own camera grid, plus real-pixel coverage."""
+
+    pixels: np.ndarray
+    #: ``True`` where the corrected pixel sampled a real source pixel.
+    valid_mask: np.ndarray
+
+
+def remap_lens(image: np.ndarray, camera: CameraModel) -> LensRemap:
+    """Remove lens distortion onto the same camera grid.
+
+    Unlike :func:`undistort_image` this keeps the original camera matrix, so the
+    corrected frame shares the source pixel grid.
+
+    Args:
+        image: Image whose size matches ``camera.image_size_wh``.
+        camera: Validated pinhole camera with distortion coefficients.
+
+    Returns:
+        Corrected pixels and the mask of destination pixels backed by real data.
+
+    Raises:
+        ComputationContractError: On an image size mismatch.
+    """
+    width, height = camera.image_size_wh
+    if image.shape[:2] != (height, width):
+        raise contract_error("contract.invalid_shape",
+                             "image size must match the camera image size", "image")
+    matrix = camera.matrix
+    distortion = camera.distortion
+    map_x, map_y = cv2.initUndistortRectifyMap(matrix, distortion, None, matrix,
+                                               (width, height), cv2.CV_32FC1)
+    pixels = cv2.remap(image, map_x, map_y, cv2.INTER_LINEAR)
+    coverage = cv2.remap(np.full((height, width), 255, np.uint8), map_x, map_y,
+                         cv2.INTER_NEAREST)
+    return LensRemap(pixels=pixels, valid_mask=coverage > 0)
+
+
 def undistort_image(image: np.ndarray, camera: CameraModel, *,
                     alpha: float = 0.0) -> Undistortion:
     """Remove lens distortion and return the destination-to-source inverse map.

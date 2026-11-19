@@ -259,7 +259,7 @@ def stitch_plane_views(
         matrix = canvas_from_plane @ np.asarray(view.plane_to_corrected.inverse_matrix)
         warped = cv2.warpPerspective(image, matrix, (width, height), flags=cv2.INTER_LINEAR,
                                      borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-        mask = cv2.warpPerspective(np.ones_like(image, dtype=np.uint8), matrix,
+        mask = cv2.warpPerspective(np.ones(image.shape[:2], dtype=np.uint8), matrix,
                                    (width, height), flags=cv2.INTER_NEAREST,
                                    borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0
         masks.append(mask)

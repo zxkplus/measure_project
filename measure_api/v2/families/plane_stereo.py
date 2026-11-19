@@ -17,11 +17,13 @@ from measure_api.v2.calibration_assets import (
 from measure.computation_types import (
     ComputationContractError, Space, invert_matrix,
 )
+from measure.computation_types import make_mapping
 from measure.measure_calibration import (
-    BoardObservation, CameraModel, Pose3D, point_set_rank,
+    BoardObservation, CameraModel, Pose3D, point_set_rank, remap_lens,
 )
 from measure.plane_geometry import (
-    build_plane_view, project_camera_points, solve_plane_pose,
+    PlaneCanvas as SharedCanvas, PlaneView as SharedView, StitchOptions,
+    build_plane_view, project_camera_points, solve_plane_pose, stitch_plane_views,
 )
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.families.calibrations import (
@@ -1166,7 +1168,7 @@ def stitch_images(request: StitchRequest, context: CalculationContext) -> Stitch
     size = (canvas.image_size.width, canvas.image_size.height)
     if size[0] * size[1] > context.settings.max_image_pixels:
         raise ServiceError("image.too_large", "Plane canvas exceeds configured image pixel limit")
-    warped, masks, sources, mappings, payloads = [], [], [], [], []
+    warped, sources, mappings, payloads = [], [], [], []
     shape = None
     for index, image_input in enumerate(request.images):
         view = next((view for view in asset.parameters.views
@@ -1184,40 +1186,55 @@ def stitch_images(request: StitchRequest, context: CalculationContext) -> Stitch
             raise ServiceError("image.incompatible_formats",
                                "Both views need the same pixel format")
         shape = image.ndim
-        k = np.array(view.camera.parameters.camera_matrix)
-        d = np.array(view.camera.parameters.distortion)
-        mx, my = cv2.initUndistortRectifyMap(k, d, None, k,
-                                          (expected.width, expected.height), cv2.CV_32FC1)
-        corrected = cv2.remap(image, mx, my, cv2.INTER_LINEAR)
-        corrected_mask = cv2.remap(np.full(image.shape[:2], 255, np.uint8), mx, my,
-                                   cv2.INTER_NEAREST)
-        matrix = np.array(canvas.plane_to_canvas) @ np.array(view.camera_to_plane)
-        warped_image = cv2.warpPerspective(corrected, matrix, size, flags=cv2.INTER_LINEAR)
-        mask = cv2.warpPerspective(corrected_mask, matrix, size,
-                                   flags=cv2.INTER_NEAREST) > 0
-        warped.append(warped_image)
-        masks.append(mask)
+        # The corrected frame keeps the source grid; the plane warp is the
+        # engine's decision, so this route only supplies images and metadata.
+        remapped = remap_lens(image, camera_model(view.camera))
+        warped.append(remapped.pixels)
         sources.append(source)
         mappings.append(view.mapping)
-        payloads.append((f"mask-{index}.png", f"mask_{index}", "png",
-                         encode_png(mask.astype(np.uint8) * 255)))
         if request.return_warped_views:
             payloads.append((f"view-{index}.png", f"warped_{index}", "png",
-                             encode_png(warped_image)))
-    coverage = np.sum(masks, axis=0).astype(np.uint8)
-    result = np.zeros_like(warped[0])
-    if request.blend == "average":
-        sums = np.zeros_like(warped[0], np.float64)
-        for image, mask in zip(warped, masks):
-            sums += image * (mask[:, :, None] if image.ndim == 3 else mask)
-        denominator = np.maximum(coverage, 1)
-        if sums.ndim == 3:
-            denominator = denominator[:, :, None]
-        result = np.rint(sums / denominator).astype(np.uint8)
-    else:
-        ordered = range(2) if request.blend == "last" else reversed(range(2))
-        for index in ordered:
-            result[masks[index]] = warped[index][masks[index]]
+                             encode_png(remapped.pixels)))
+    plane_space = Space("plane", asset.unit)
+    plane_canvas = SharedCanvas(
+        size_wh=(canvas.image_size.width, canvas.image_size.height),
+        pixel_size=float(canvas.pixel_size),
+        origin_xy=(float(canvas.bounds[0]), float(canvas.bounds[1])),
+        bounds_xyxy=tuple(float(value) for value in canvas.bounds),
+        canvas_space=Space("plane_canvas", "px"), plane_space=plane_space,
+    )
+    plane_views = [
+        SharedView(
+            camera=camera_model(item.camera),
+            board_to_camera=Pose3D(
+                source_frame="board", destination_frame=item.camera.applicability.frame,
+                unit=asset.unit,
+                rotation=np.array(item.board_to_camera_rotation, dtype=np.float64),
+                translation=np.array(item.board_to_camera_translation, dtype=np.float64),
+            ),
+            plane_space=plane_space,
+            plane_to_corrected=make_mapping(
+                np.array(item.plane_to_camera, dtype=np.float64),
+                source=plane_space, destination=Space("plane_canvas", "px"),
+                kind="projective"),
+            corrected_to_plane=make_mapping(
+                np.array(item.camera_to_plane, dtype=np.float64),
+                source=Space("plane_canvas", "px"), destination=plane_space,
+                kind="projective"),
+            image_size_wh=(item.camera.applicability.image_size.width,
+                           item.camera.applicability.image_size.height),
+        )
+        for item in asset.parameters.views
+    ]
+    stitched = stitch_plane_views(warped, plane_views, plane_canvas,
+                                  options=StitchOptions(blend=request.blend))
+    if not stitched.valid:
+        raise ServiceError("image.stitch_failed", "Plane stitching failed")
+    result = np.rint(stitched.value.pixels).astype(np.uint8)
+    coverage = stitched.value.coverage.astype(np.uint8)
+    for index, mask in enumerate(stitched.value.valid_masks):
+        payloads.append((f"mask-{index}.png", f"mask_{index}", "png",
+                         encode_png(mask.astype(np.uint8) * 255)))
     provenance = {"capture_id": request.images[0].capture_id,
                   "calibration_sha256": calibration_digest(asset),
                   "camera_ids": [image.camera_id for image in request.images],
