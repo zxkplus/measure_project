@@ -253,3 +253,43 @@ def test_pyramid_search_refines_a_large_support_at_full_resolution(api, space):
     match = result.value.matches[0]
     assert match.center == pytest.approx((500.0, 500.0), abs=0.6)
     assert match.score > 0.99
+
+
+def test_variant_rendering_snaps_the_footprint_onto_the_pixel_grid(api):
+    pixels = np.zeros((30, 40), dtype=np.float32)
+    rendered = api("template_search", "render_variant")(
+        pixels, np.deg2rad(23.0), 1.0, origin="pixel_center")
+    corners = np.array([[0.0, 0.0, 1.0], [39.0, 0.0, 1.0],
+                        [0.0, 29.0, 1.0], [39.0, 29.0, 1.0]])
+    mapped = corners @ rendered.matrix.T
+    width, height = rendered.size_wh
+    # Anchoring on the fractional minimum instead of floor(min) would let the
+    # footprint run past the last whole pixel, i.e. sample off the search grid.
+    for axis, extent in ((0, width), (1, height)):
+        assert 0.0 <= mapped[:, axis].min() < 1.0
+        assert mapped[:, axis].max() <= extent - 1 + 1e-9
+    assert rendered.pixels.shape == (height, width)
+    assert api("template_search", "variant_size")(
+        pixels, np.deg2rad(23.0), 1.0, origin="pixel_center") == rendered.size_wh
+
+
+def test_unrotated_variant_keeps_each_pixel_convention(api):
+    pixels = np.arange(200, dtype=np.float32).reshape(10, 20)
+    pixel_center = api("template_search", "render_variant")(
+        pixels, 0.0, 1.0, origin="pixel_center")
+    continuous = api("template_search", "render_variant")(
+        pixels, 0.0, 1.0, origin="continuous")
+    np.testing.assert_allclose(pixel_center.matrix, np.eye(3))
+    np.testing.assert_allclose(continuous.matrix, np.eye(3))
+    np.testing.assert_allclose(pixel_center.pixels, pixels)
+    np.testing.assert_allclose(continuous.pixels, pixels)
+    assert pixel_center.center == pytest.approx((9.5, 4.5))
+    assert continuous.center == pytest.approx((10.0, 5.0))
+    assert pixel_center.size_wh == continuous.size_wh == (20, 10)
+
+
+def test_unknown_variant_origin_is_rejected(api):
+    with pytest.raises(Exception) as error:
+        api("template_search", "render_variant")(
+            np.zeros((8, 8), dtype=np.float32), 0.0, 1.0, origin="corner")
+    assert "origin" in str(error.value)

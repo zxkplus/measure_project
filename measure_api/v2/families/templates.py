@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 from pydantic import Field, model_validator
 
+from measure.template_search import render_variant, variant_size
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.files import ArtifactWriter
 from measure_api.v2.models import (
@@ -532,24 +533,20 @@ def _variant(pixels: np.ndarray, angle: float, scale: float,
         ``None`` and only the required size is returned so callers can widen
         their window instead of clipping the variant into false peaks.
     """
-    h, w = pixels.shape[:2]
-    theta = np.deg2rad(angle)
-    c, s = np.cos(theta) * scale, np.sin(theta) * scale
-    linear = np.array([[c, -s], [s, c]])
-    corners = np.array([[0, 0], [w - 1, 0], [0, h - 1], [w - 1, h - 1]])
-    warped = corners @ linear.T
-    low, high = np.floor(warped.min(axis=0)), np.ceil(warped.max(axis=0))
-    width, height = np.maximum(1, (high - low + 1).astype(int))
-    size = (int(width), int(height))
+    angle_rad = float(np.deg2rad(angle))
+    # The shared layer owns the rotation geometry; ``pixel_center`` selects the
+    # pixel-index convention this API has always reported.
+    width, height = variant_size(pixels, angle_rad, scale, origin="pixel_center")
+    size = (width, height)
     if width > feasible[0] or height > feasible[1]:
         return None, None, None, size
-    matrix = np.eye(3)
-    matrix[:2, :2], matrix[:2, 2] = linear, -low
     with measure("variant_render"):
-        variant = cv2.warpAffine(pixels.astype(np.float32), matrix[:2], (width, height))
-        mask = cv2.warpAffine(np.ones((h, w), np.uint8), matrix[:2], (width, height),
-                              flags=cv2.INTER_NEAREST)
-    return variant, mask, matrix, size
+        rendered = render_variant(pixels.astype(np.float32), angle_rad, scale,
+                                  origin="pixel_center")
+    mask = rendered.mask
+    if mask is None:
+        mask = np.ones(rendered.pixels.shape[:2], np.uint8)
+    return rendered.pixels, mask, rendered.matrix, size
 
 
 def _scan(search: np.ndarray, pixels: np.ndarray, options: TemplateSearch,
