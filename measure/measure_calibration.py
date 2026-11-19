@@ -1291,12 +1291,38 @@ class BoardSpec:
 
 @dataclass(frozen=True)
 class DotDetectionOptions:
-    """Blob-detection tuning for dot grids."""
+    """Blob-detection tuning for dot grids.
+
+    Threshold fields default to OpenCV's own blob-detector defaults; callers
+    that want a denser sweep pass a narrower range.
+    """
 
     min_area: float = 5.0
     max_area: float = 2000.0
     min_circularity: float = 0.3
     min_convexity: float = 0.3
+    #: ``dark`` dots on a light board, or ``light`` dots on a dark board.
+    color: str = "dark"
+    refine: bool = False
+    min_threshold: float = 50.0
+    max_threshold: float = 220.0
+    threshold_step: float = 10.0
+
+    def __post_init__(self) -> None:
+        if self.color not in ("dark", "light"):
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown blob color {self.color!r}", "board.blob.color")
+        require_finite((self.min_area, self.max_area, self.min_circularity,
+                        self.min_convexity, self.min_threshold, self.max_threshold,
+                        self.threshold_step), "board.blob")
+        if self.max_area <= self.min_area:
+            raise contract_error("contract.invalid_parameter",
+                                 "max_area must be greater than min_area",
+                                 "board.blob.max_area")
+        if self.threshold_step <= 0.0 or self.min_threshold >= self.max_threshold:
+            raise contract_error("contract.invalid_parameter",
+                                 "blob thresholds must be ordered and stepped",
+                                 "board.blob.min_threshold")
 
 
 @dataclass(frozen=True)
@@ -1413,13 +1439,33 @@ def validate_pose(pose: Pose3D) -> None:
                              "rotation must not reflect (det <= 0)", "pose")
 
 
+def board_object_points(spec: BoardSpec) -> np.ndarray:
+    """Return the row-major physical ``(N, 3)`` coordinates of a board grid.
+
+    OpenCV orders both grid patterns row-major, but an asymmetric grid staggers
+    every odd row by one spacing, so its physical x is ``2 * column + row % 2``.
+
+    Args:
+        spec: Board geometry.
+
+    Returns:
+        An ``(N, 3)`` array of board coordinates in ``spec.unit``.
+    """
+    points = np.zeros((spec.columns * spec.rows, 3), dtype=np.float64)
+    for index in range(len(points)):
+        row, column = divmod(index, spec.columns)
+        staggered = column if spec.symmetric else 2 * column + row % 2
+        points[index] = (staggered * spec.spacing, row * spec.spacing, 0.0)
+    return points
+
+
 def detect_dot_grid(image: np.ndarray, spec: BoardSpec, options: DotDetectionOptions, *,
                     image_space: Space, object_frame: str,
                     view_id: str) -> Observation[BoardObservation]:
     """Detect an ordered dot grid and build its physical correspondences.
 
     Args:
-        image: ``uint8`` image containing the grid.
+        image: ``uint8`` image containing the grid; colour is reduced to luma.
         spec: Board geometry.
         options: Blob-detection tuning.
         image_space: Space of the image.
@@ -1431,7 +1477,11 @@ def detect_dot_grid(image: np.ndarray, spec: BoardSpec, options: DotDetectionOpt
     """
     if image.dtype != np.uint8:
         raise contract_error("contract.invalid_parameter", "image must be uint8", "image")
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
     parameters = cv2.SimpleBlobDetector_Params()
+    parameters.minThreshold = float(options.min_threshold)
+    parameters.maxThreshold = float(options.max_threshold)
+    parameters.thresholdStep = float(options.threshold_step)
     parameters.filterByArea = True
     parameters.minArea = float(options.min_area)
     parameters.maxArea = float(options.max_area)
@@ -1440,25 +1490,32 @@ def detect_dot_grid(image: np.ndarray, spec: BoardSpec, options: DotDetectionOpt
     parameters.filterByConvexity = True
     parameters.minConvexity = float(options.min_convexity)
     parameters.filterByInertia = False
+    parameters.filterByColor = True
+    parameters.blobColor = 0 if options.color == "dark" else 255
     detector = cv2.SimpleBlobDetector_create(parameters)
     flags = cv2.CALIB_CB_SYMMETRIC_GRID if spec.symmetric else cv2.CALIB_CB_ASYMMETRIC_GRID
-    found, centers = cv2.findCirclesGrid(image, (spec.columns, spec.rows), flags=flags,
+    found, centers = cv2.findCirclesGrid(gray, (spec.columns, spec.rows), flags=flags,
                                          blobDetector=detector)
     if not found or centers is None:
-        return invalid(image_space, "grid_not_found")
+        return invalid(image_space, "grid_not_found",
+                       {"board": spec, "refined": False})
+    refined = False
+    if options.refine:
+        corners = np.asarray(centers, dtype=np.float32).reshape(-1, 1, 2)
+        cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1),
+                         (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001))
+        centers = corners.reshape(-1, 2)
+        refined = True
     image_points = np.asarray(centers, dtype=np.float64).reshape(-1, 2)
-    object_points = np.zeros((len(image_points), 3), dtype=np.float64)
-    for index in range(len(image_points)):
-        row, column = divmod(index, spec.columns)
-        object_points[index] = (column * spec.spacing, row * spec.spacing, 0.0)
     observation = BoardObservation(
         view_id=view_id, image_space=image_space,
         object_space=Space(object_frame, spec.unit),
         image_size_wh=(image.shape[1], image.shape[0]),
-        image_points_xy=image_points, object_points_xyz=object_points,
+        image_points_xy=image_points,
+        object_points_xyz=board_object_points(spec)[:len(image_points)],
         ordering="row_major",
     )
-    return observed(image_space, observation, {"board": spec})
+    return observed(image_space, observation, {"board": spec, "refined": refined})
 
 
 def _solve_intrinsics(views, camera_id, image_space, image_size_wh, options):

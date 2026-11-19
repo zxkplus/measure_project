@@ -150,3 +150,36 @@ def test_stereo_requires_three_distinct_pairs(api, camera_model, board_views):
         (pair,), left, right, unit="mm", options=api("measure_calibration", "StereoOptions")(),
     )
     assert not result.valid and result.value is None
+
+
+def test_asymmetric_board_points_stagger_the_odd_rows(api):
+    board = api("measure_calibration", "BoardSpec")(
+        columns=3, rows=2, spacing=2.0, symmetric=False)
+    points = api("measure_calibration", "board_object_points")(board)
+    # OpenCV's asymmetric grid offsets every odd row by one spacing, so the
+    # physical x of a column is 2 * column + row % 2.
+    np.testing.assert_allclose(points[:, 0], [0.0, 4.0, 8.0, 2.0, 6.0, 10.0])
+    np.testing.assert_allclose(points[:, 1], [0.0, 0.0, 0.0, 2.0, 2.0, 2.0])
+
+
+def test_symmetric_board_points_share_one_column_origin(api):
+    board = api("measure_calibration", "BoardSpec")(
+        columns=3, rows=2, spacing=2.0, symmetric=True)
+    points = api("measure_calibration", "board_object_points")(board)
+    np.testing.assert_allclose(points[:, 0], [0.0, 2.0, 4.0, 0.0, 2.0, 4.0])
+
+
+def test_light_dots_on_a_dark_board_are_detected(api, space):
+    image = np.zeros((180, 240), np.uint8)
+    for row in range(4):
+        for col in range(5):
+            cv2.circle(image, (60 + 30 * col, 40 + 30 * row), 7, 255, -1)
+    result = api("measure_calibration", "detect_dot_grid")(
+        image, api("measure_calibration", "BoardSpec")(columns=5, rows=4, spacing=3.0),
+        api("measure_calibration", "DotDetectionOptions")(color="light", refine=True),
+        image_space=space(), object_frame="board", view_id="light",
+    )
+    assert result.valid, result.reason
+    assert result.value.image_points_xy.shape == (20, 2)
+    assert result.diagnostics["refined"] is True
+    assert result.value.image_points_xy[6] == pytest.approx([60 + 30, 40 + 30], abs=0.2)

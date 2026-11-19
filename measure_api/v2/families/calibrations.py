@@ -9,6 +9,10 @@ import cv2
 import numpy as np
 from pydantic import Field, model_validator
 
+from measure.computation_types import Space
+from measure.measure_calibration import (
+    BoardSpec, DotDetectionOptions, board_object_points, detect_dot_grid as shared_detect_dot_grid,
+)
 from measure.measure_calibration import CameraCalibration as CoreCameraCalibration
 from measure.pixel_calibration import CheckerboardScaleCalibration
 from measure_api.v2.calibration_assets import (
@@ -257,22 +261,6 @@ class DotGridResult(StrictModel):
     diagnostics: dict
 
 
-def board_points(grid: BoardGrid, spacing: float, symmetric: bool) -> List[ObjectPoint]:
-    """Generate explicit row-major symmetric/asymmetric physical coordinates.
-
-    Args:
-        grid: Board row and column counts and symmetric/asymmetric pattern definition.
-        spacing: Physical spacing between neighboring board points in the requested unit.
-        symmetric: Whether rows share the same horizontal origin instead of staggered dots.
-
-    Returns:
-        Row-major physical board coordinates with the requested dot staggering.
-    """
-    return [ObjectPoint(x=(col if symmetric else 2 * col + row % 2) * spacing,
-                        y=row * spacing) for row in range(grid.rows)
-            for col in range(grid.columns)]
-
-
 def detect_dot_grid(request: DotGridRequest, context: CalculationContext) -> DotGridResult:
     """Detect one image independently, preserving missing-grid domain outcomes.
 
@@ -286,35 +274,34 @@ def detect_dot_grid(request: DotGridRequest, context: CalculationContext) -> Dot
         Ordered dot centers, physical board correspondences and detection quality.
     """
     image, source = context.files.read_image(request.image)
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-    params = cv2.SimpleBlobDetector_Params()
-    params.minThreshold, params.maxThreshold, params.thresholdStep = 1, 255, 5
-    params.filterByArea = True
-    params.minArea, params.maxArea = request.blob.min_area, request.blob.max_area
-    params.filterByCircularity = True
-    params.minCircularity = request.blob.min_circularity
-    params.filterByConvexity = True
-    params.minConvexity = request.blob.min_convexity
-    params.filterByInertia = False
-    params.filterByColor = True
-    params.blobColor = 0 if request.blob.color == "dark" else 255
-    flags = cv2.CALIB_CB_SYMMETRIC_GRID if request.symmetric else cv2.CALIB_CB_ASYMMETRIC_GRID
-    found, centers = cv2.findCirclesGrid(
-        gray, (request.grid.columns, request.grid.rows), flags=flags,
-        blobDetector=cv2.SimpleBlobDetector_create(params),
+    spec = BoardSpec(columns=request.grid.columns, rows=request.grid.rows,
+                     spacing=request.spacing, unit=request.unit,
+                     symmetric=request.symmetric)
+    # Explicit thresholds keep this route's historical sweep (1..255 step 5)
+    # instead of OpenCV's wider default blob detector tuning.
+    detection = shared_detect_dot_grid(
+        image, spec,
+        DotDetectionOptions(min_area=request.blob.min_area,
+                            max_area=request.blob.max_area,
+                            min_circularity=request.blob.min_circularity,
+                            min_convexity=request.blob.min_convexity,
+                            color=request.blob.color, refine=request.refine,
+                            min_threshold=1.0, max_threshold=255.0, threshold_step=5.0),
+        image_space=Space("source", "px"), object_frame="board", view_id="dot-grid",
     )
-    if found and request.refine:
-        cv2.cornerSubPix(gray, centers, (5, 5), (-1, -1),
-                         (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001))
-    points = [Point(x=float(p[0]), y=float(p[1])) for p in centers.reshape(-1, 2)] if found else []
+    points = ([] if not detection.valid else
+              [Point(x=float(p[0]), y=float(p[1]))
+               for p in detection.value.image_points_xy])
     return DotGridResult(
-        valid=bool(found), source=source, image_size=ImageSize(
-            width=image.shape[1], height=image.shape[0]),
-        image_points=points, object_points=board_points(request.grid, request.spacing,
-                                                       request.symmetric),
-        unit=request.unit, diagnostics={"reason": None if found else "grid_not_found",
-                                       "refined": bool(found and request.refine),
-                                       "symmetric": request.symmetric},
+        valid=bool(detection.valid), source=source,
+        image_size=ImageSize(width=image.shape[1], height=image.shape[0]),
+        image_points=points,
+        object_points=[ObjectPoint(x=float(p[0]), y=float(p[1]), z=float(p[2]))
+                       for p in board_object_points(spec)],
+        unit=request.unit,
+        diagnostics={"reason": None if detection.valid else detection.reason,
+                     "refined": bool(detection.valid and request.refine),
+                     "symmetric": request.symmetric},
     )
 
 
