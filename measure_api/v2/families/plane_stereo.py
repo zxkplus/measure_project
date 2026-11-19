@@ -19,7 +19,9 @@ from measure.computation_types import (
 )
 from measure.computation_types import make_mapping
 from measure.measure_calibration import (
-    BoardObservation, CameraModel, Pose3D, point_set_rank, remap_lens,
+    BoardObservation, CameraModel, Pose3D, fundamental_matrix, point_residuals,
+    point_set_rank, remap_lens, solve_stereo_extrinsics, validate_rotation_matrix,
+    vector_norm,
 )
 from measure.plane_geometry import (
     PlaneCanvas as SharedCanvas, PlaneView as SharedView, StitchOptions,
@@ -700,8 +702,8 @@ def validate_pair(
     camera_points_b = objects_b @ rb.T + tb
     projected_b = project_camera(camera_points_a @ rotation.T + translation, camera_b)
     projected_a = project_camera((camera_points_b - translation) @ rotation, camera_a)
-    errors_a = np.linalg.norm(projected_a - pixels_a, axis=1)
-    errors_b = np.linalg.norm(projected_b - pixels_b, axis=1)
+    errors_a = point_residuals(pixels_a, projected_a)
+    errors_b = point_residuals(pixels_b, projected_b)
     return {"capture_id": a.view_id, "a_from_b_residuals_px": errors_a.tolist(),
             "b_from_a_residuals_px": errors_b.tolist(),
             "a_from_b_projected": projected_a.tolist(), "b_from_a_projected": projected_b.tolist(),
@@ -754,31 +756,22 @@ def compute_stereo(request: StereoRequest, context: CalculationContext) -> Calib
             "reason": "at_least_three_distinct_usable_pairs_required", "rejected_pairs": rejected,
             "accepted_pairs": [{"capture_id": item[0].view_id} for item in accepted]})
     ca, cb = cameras
-    size = ca.applicability.image_size
-    try:
-        result = cv2.stereoCalibrate(
-            [item[2].astype(np.float32) for item in accepted],
-            [item[3].astype(np.float32) for item in accepted],
-            [item[4].astype(np.float32) for item in accepted],
-            np.array(ca.parameters.camera_matrix), np.array(ca.parameters.distortion),
-            np.array(cb.parameters.camera_matrix), np.array(cb.parameters.distortion),
-            (size.width, size.height),
-            flags=(cv2.CALIB_FIX_INTRINSIC if request.fix_intrinsics
-                   else cv2.CALIB_USE_INTRINSIC_GUESS),
-            criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-9),
-        )
-    except cv2.error as error:
-        return StereoResult(valid=False, diagnostics={"reason": "stereo_solve_failed",
-                                                          "message": str(error)})
-    rms, ka, da, kb, db, rotation, translation, essential, fundamental = result[:9]
-    if not all(np.isfinite(v).all() for v in result[:9]):
-        return StereoResult(valid=False, diagnostics={"reason": "nonfinite_stereo_solution"})
-    translation = translation.reshape(3)
-    x, y, z = translation
-    essential = np.array([[0, -z, y], [z, 0, -x], [-y, x, 0]]) @ rotation
-    fundamental = np.linalg.inv(kb).T @ essential @ np.linalg.inv(ka)
-    if np.linalg.norm(translation) < 1e-9:
-        return StereoResult(valid=False, diagnostics={"reason": "zero_stereo_baseline"})
+    solved = solve_stereo_extrinsics(
+        [item[2] for item in accepted], [item[3] for item in accepted],
+        [item[4] for item in accepted], camera_model(ca), camera_model(cb),
+        fix_intrinsics=request.fix_intrinsics,
+    )
+    if not solved.valid:
+        reason = {"solve_failed": "stereo_solve_failed", "nonfinite": "nonfinite_stereo_solution",
+                  "zero_baseline": "zero_stereo_baseline"}.get(solved.reason,
+                                                               "stereo_solve_failed")
+        return StereoResult(valid=False, diagnostics={"reason": reason})
+    solve = solved.value
+    rms = solve.rms_error_px
+    ka, da = solve.camera_a_matrix, solve.camera_a_distortion
+    kb, db = solve.camera_b_matrix, solve.camera_b_distortion
+    rotation, translation = solve.rotation, solve.translation
+    essential, fundamental = solve.essential, solve.fundamental
     original_digests = [calibration_digest(ca), calibration_digest(cb)]
     ca, cb = ca.model_copy(deep=True), cb.model_copy(deep=True)
     if not request.fix_intrinsics:

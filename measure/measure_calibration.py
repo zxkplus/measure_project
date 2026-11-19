@@ -36,7 +36,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import cv2
-from typing import Tuple, List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from measure.computation_types import (
     Observation,
     Space,
@@ -1515,6 +1515,150 @@ def undistort_image(image: np.ndarray, camera: CameraModel, *,
     return Undistortion(pixels=pixels, camera_matrix=corrected_matrix,
                         valid_roi_xywh=tuple(int(value) for value in roi),
                         inverse_map_x=map_x, inverse_map_y=map_y)
+
+
+def vector_norm(values: np.ndarray) -> float:
+    """Return the Euclidean length of a finite vector.
+
+    Args:
+        values: Any finite numeric array.
+
+    Returns:
+        The Euclidean norm as a float.
+    """
+    return float(np.linalg.norm(np.asarray(values, dtype=np.float64)))
+
+
+def point_residuals(observed_xy: np.ndarray, predicted_xy: np.ndarray) -> np.ndarray:
+    """Return per-point Euclidean residuals between two xy arrays.
+
+    Args:
+        observed_xy: ``(N, 2)`` measured points.
+        predicted_xy: ``(N, 2)`` predicted points.
+
+    Returns:
+        ``(N,)`` residual lengths in input units.
+    """
+    measured = np.asarray(observed_xy, dtype=np.float64).reshape(-1, 2)
+    predicted = np.asarray(predicted_xy, dtype=np.float64).reshape(-1, 2)
+    return np.linalg.norm(measured - predicted, axis=1)
+
+
+def fundamental_matrix(essential: np.ndarray, camera_a_matrix: np.ndarray,
+                       camera_b_matrix: np.ndarray) -> np.ndarray:
+    """Return ``K_b^-T * E * K_a^-1`` for a pair of pinhole cameras.
+
+    Args:
+        essential: 3x3 essential matrix between the two cameras.
+        camera_a_matrix: Source camera intrinsics.
+        camera_b_matrix: Destination camera intrinsics.
+
+    Returns:
+        The 3x3 fundamental matrix.
+    """
+    inverse_b = np.linalg.inv(np.asarray(camera_b_matrix, dtype=np.float64))
+    inverse_a = np.linalg.inv(np.asarray(camera_a_matrix, dtype=np.float64))
+    return inverse_b.T @ np.asarray(essential, dtype=np.float64) @ inverse_a
+
+
+def validate_rotation_matrix(rotation: np.ndarray) -> None:
+    """Validate a proper rotation: orthonormal with a unit determinant.
+
+    Args:
+        rotation: 3x3 candidate rotation.
+
+    Raises:
+        ComputationContractError: On non-finite, non-orthonormal or reflecting input.
+    """
+    values = np.asarray(rotation, dtype=np.float64)
+    if values.shape != (3, 3):
+        raise contract_error("contract.invalid_shape", "rotation must be 3x3", "rotation")
+    require_finite(values, "rotation")
+    if not np.allclose(values.T @ values, np.eye(3), atol=1e-6):
+        raise contract_error("contract.invalid_parameter",
+                             "rotation must be orthonormal", "rotation")
+    if abs(float(np.linalg.det(values)) - 1.0) > 1e-6:
+        raise contract_error("contract.invalid_parameter",
+                             "rotation determinant must be one", "rotation")
+
+
+@dataclass(frozen=True)
+class StereoSolve:
+    """OpenCV stereo extrinsics with the derived epipolar geometry."""
+
+    rms_error_px: float
+    camera_a_matrix: np.ndarray
+    camera_a_distortion: np.ndarray
+    camera_b_matrix: np.ndarray
+    camera_b_distortion: np.ndarray
+    rotation: np.ndarray
+    translation: np.ndarray
+    essential: np.ndarray
+    fundamental: np.ndarray
+    baseline: float
+
+
+def solve_stereo_extrinsics(object_points: Sequence[np.ndarray],
+                            image_points_a: Sequence[np.ndarray],
+                            image_points_b: Sequence[np.ndarray],
+                            camera_a: CameraModel, camera_b: CameraModel, *,
+                            fix_intrinsics: bool,
+                            criteria: Tuple[int, int, float] = (100, 1e-9),
+                            ) -> Observation[StereoSolve]:
+    """Solve the relative pose of two calibrated cameras.
+
+    Args:
+        object_points: Per-pair ``(N, 3)`` board coordinates.
+        image_points_a: Per-pair ``(N, 2)`` observations in camera A.
+        image_points_b: Per-pair ``(N, 2)`` observations in camera B.
+        camera_a: Camera A model.
+        camera_b: Camera B model.
+        fix_intrinsics: Hold both intrinsic matrices fixed instead of refining them.
+        criteria: ``(max_iterations, epsilon)`` of the OpenCV solver.
+
+    Returns:
+        The solved extrinsics, or ``solve_failed`` / ``nonfinite`` / ``zero_baseline``.
+    """
+    width, height = camera_a.image_size_wh
+    flags = cv2.CALIB_FIX_INTRINSIC if fix_intrinsics else cv2.CALIB_USE_INTRINSIC_GUESS
+    try:
+        result = cv2.stereoCalibrate(
+            [np.asarray(item, dtype=np.float32) for item in object_points],
+            [np.asarray(item, dtype=np.float32) for item in image_points_a],
+            [np.asarray(item, dtype=np.float32) for item in image_points_b],
+            np.asarray(camera_a.matrix, dtype=np.float64),
+            np.asarray(camera_a.distortion, dtype=np.float64),
+            np.asarray(camera_b.matrix, dtype=np.float64),
+            np.asarray(camera_b.distortion, dtype=np.float64),
+            (width, height), flags=flags,
+            criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+                      int(criteria[0]), float(criteria[1])),
+        )
+    except cv2.error:
+        return invalid(camera_a.image_space, "solve_failed")
+    if not all(np.isfinite(value).all() for value in result[:9]):
+        return invalid(camera_a.image_space, "nonfinite")
+    (rms, matrix_a, distortion_a, matrix_b, distortion_b,
+     rotation, translation, _essential, _fundamental) = result[:9]
+    translation = np.asarray(translation, dtype=np.float64).reshape(3)
+    rotation = np.asarray(rotation, dtype=np.float64)
+    x, y, z = (float(item) for item in translation)
+    # Rebuild E from the solved pose so it is consistent with R and t.
+    essential = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]]) @ rotation
+    baseline = float(np.linalg.norm(translation))
+    if baseline < 1e-9:
+        return invalid(camera_a.image_space, "zero_baseline")
+    fundamental = fundamental_matrix(essential, matrix_a, matrix_b)
+    solve = StereoSolve(
+        rms_error_px=float(rms),
+        camera_a_matrix=np.asarray(matrix_a, dtype=np.float64),
+        camera_a_distortion=np.asarray(distortion_a, dtype=np.float64).reshape(-1),
+        camera_b_matrix=np.asarray(matrix_b, dtype=np.float64),
+        camera_b_distortion=np.asarray(distortion_b, dtype=np.float64).reshape(-1),
+        rotation=rotation, translation=translation, essential=essential,
+        fundamental=fundamental, baseline=baseline,
+    )
+    return observed(camera_a.image_space, solve, {"baseline": baseline})
 
 
 def validate_pose(pose: Pose3D) -> None:
