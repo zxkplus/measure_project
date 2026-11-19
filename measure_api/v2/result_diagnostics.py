@@ -8,11 +8,14 @@ import zipfile
 from typing import Any, Optional
 
 import cv2
+import math
+
 import numpy as np
 
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.models import FileReference
 from measure_api.v2.registry import CalculationContext
+from measure.geometry_ops import vector_angle_rad
 from measure_api.v2.result_models import VisualizationRequest
 from measure_api.v2.result_support import result_nodes
 
@@ -171,7 +174,7 @@ def probe_provenance(run: dict, target: dict, node: dict) -> Any:
         count = params.get("probe_count", 20 if node["operation"].endswith("lines") else 24)
         if node["operation"].endswith("lines"):
             a, b = params["start"], params["end"]
-            angle = np.rad2deg(np.arctan2(b["y"] - a["y"], b["x"] - a["x"])) + 90
+            angle = math.degrees(vector_angle_rad(b["x"] - a["x"], b["y"] - a["y"])) + 90
             centers = [
                 [a["x"] + fraction * (b["x"] - a["x"]), a["y"] + fraction * (b["y"] - a["y"])]
                 for fraction in np.linspace(0, 1, count)

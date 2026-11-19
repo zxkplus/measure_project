@@ -70,6 +70,19 @@ def circle_center(circle: Observation[CircleValue]) -> Observation[XY]:
                     dict(circle.diagnostics))
 
 
+def vector_angle_rad(dx: float, dy: float) -> float:
+    """Return the polar angle of one xy direction.
+
+    Args:
+        dx: Column component.
+        dy: Row component.
+
+    Returns:
+        The clockwise-positive angle from the x axis, in radians.
+    """
+    return float(math.atan2(float(dy), float(dx)))
+
+
 def line_through_points(
     point_a: Observation[XY], point_b: Observation[XY],
 ) -> Observation[LineValue]:

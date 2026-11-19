@@ -1,8 +1,9 @@
 """Frame-safe atomic geometry composition and supplied-point fits."""
 
-from measure_api.v2.timing import timed
-
+import math
 from typing import List, Optional
+
+from measure_api.v2.timing import timed
 
 import numpy as np
 from pydantic import Field
@@ -256,7 +257,7 @@ def line_angle(request: LineAngleRequest, context: CalculationContext) -> Scalar
         measured = shared_line_angle(
             observed(space, LineValue((first.a, first.b, first.c))),
             observed(space, LineValue((second.a, second.b, second.c))))
-        value = float(np.rad2deg(measured.value)) if measured.valid else None
+        value = math.degrees(float(measured.value)) if measured.valid else None
         valid = measured.valid
     return Scalar(valid=valid, reason=None if valid else 'invalid_input',
                   frame=first.frame, unit='deg', value=value)

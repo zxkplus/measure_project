@@ -12,6 +12,8 @@ from pydantic import Field, model_validator
 from scipy.ndimage import gaussian_filter1d
 
 from measure.computation_types import Space
+from measure.geometry_ops import vector_angle_rad
+from measure.measure_calibration import vector_norm
 from measure.measure1D import (
     EdgeOptions,
     Halcon1DMeasure,
@@ -484,13 +486,13 @@ def measure_line(request: ImageLineRequest, context: CalculationContext) -> Imag
     """
     start, end = request.start, request.end
     vector = np.array([end.x - start.x, end.y - start.y])
-    if np.linalg.norm(vector) <= 1e-12:
+    if vector_norm(vector) <= 1e-12:
         return ImageLineResult(
             valid=False, reason='coincident_expected_points', frame=request.frame,
             line=Line(valid=False, reason='coincident_expected_points', frame=request.frame),
             diagnostics=FitDiagnostics(sample_count=0, requested_probe_count=request.probe_count),
         )
-    angle_rad = float(np.arctan2(vector[1], vector[0])) + np.pi / 2
+    angle_rad = vector_angle_rad(float(vector[0]), float(vector[1])) + np.pi / 2
     image = read_gray(request, context)
     probes = [((start.x + fraction * vector[0], start.y + fraction * vector[1]), angle_rad)
               for fraction in np.linspace(0, 1, request.probe_count)]
