@@ -6,9 +6,12 @@ from typing import Callable, Tuple
 
 import numpy as np
 
-from measure.computation_types import Space, make_mapping
+from measure.computation_types import (
+    ComputationContractError as ContractError, Space, invert_matrix, make_mapping,
+)
 from measure.geometry_mapping import (
-    LensStep, MappingChain, MatrixStep, map_sample_points,
+    LensStep, MappingChain, MatrixStep, circle_crosses_horizon, map_line_coefficients,
+    map_sample_points,
 )
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.families.alignment import validated_matrix
@@ -102,11 +105,11 @@ def mapping_function(
         distortion = np.array(detail["distortion"], np.float64)
         matrix = np.array(detail["corrected_to_physical"], np.float64)
         inverse = np.array(detail["physical_to_corrected"], np.float64)
+        invert_matrix(k)  # Rejects a singular camera matrix like the old det() check.
         if (
             k.shape != (3, 3)
             or matrix.shape != (3, 3)
             or inverse.shape != (3, 3)
-            or abs(np.linalg.det(k)) < 1e-12
             or not np.allclose(matrix @ inverse, np.eye(3), atol=1e-6)
             or distortion.size not in {4, 5, 8, 12, 14}
             or not all(np.isfinite(v).all() for v in [k, distortion, matrix, inverse])
@@ -166,11 +169,12 @@ def map_geometry(
     if shape == "annotation":
         return shape, geometry, unit
     if shape == "line" and matrix is not None:
-        coefficients = np.linalg.inv(matrix).T @ [geometry["a"], geometry["b"], geometry["c"]]
-        norm = np.linalg.norm(coefficients[:2])
-        if norm <= 1e-12:
-            raise ServiceError("visualization.line_at_infinity", "Mapped line lies at infinity")
-        coefficients /= norm
+        try:
+            coefficients = map_line_coefficients(
+                [geometry["a"], geometry["b"], geometry["c"]], matrix)
+        except ContractError as error:
+            raise ServiceError(
+                "visualization.line_at_infinity", "Mapped line lies at infinity") from error
         value = dict(zip(["a", "b", "c"], map(float, coefficients)))
         for key in ["start", "end"]:
             value[key] = point(geometry[key]) if geometry.get(key) else None
@@ -193,9 +197,7 @@ def map_geometry(
         )
         if matrix is not None:
             # A closed projective curve is invalid if its continuous circumference hits infinity.
-            normal = matrix[2]
-            offset = normal[0] * center["x"] + normal[1] * center["y"] + normal[2]
-            if abs(offset) <= radius * np.linalg.norm(normal[:2]) + 1e-12:
+            if circle_crosses_horizon((center["x"], center["y"]), radius, matrix):
                 raise ServiceError(
                     "visualization.point_at_infinity", "Circle crosses the projective horizon"
                 )

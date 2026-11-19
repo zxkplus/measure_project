@@ -297,10 +297,50 @@ def _similarity_scale(matrix: Array) -> Optional[float]:
     return math.sqrt(scale_squared)
 
 
+def map_line_coefficients(coefficients: Array, matrix: Array) -> np.ndarray:
+    """Transform infinite-line coefficients with ``H^-T`` and renormalise them.
+
+    Args:
+        coefficients: ``(a, b, c)`` of ``a*x + b*y + c = 0``.
+        matrix: 3x3 source-to-destination transform.
+
+    Returns:
+        The transformed coefficients, normalised so ``hypot(a, b) == 1``.
+
+    Raises:
+        ComputationContractError: When the mapped line has no finite normal.
+    """
+    values = np.asarray(coefficients, dtype=np.float64).reshape(3)
+    transformed = np.linalg.inv(np.asarray(matrix, dtype=np.float64)).T @ values
+    norm = float(np.linalg.norm(transformed[:2]))
+    if not np.isfinite(norm) or norm <= MIN_HOMOGENEOUS:
+        raise contract_error("contract.degenerate_mapping",
+                             "mapped line has no finite normal", "line.coefficients")
+    return transformed / norm
+
+
+def circle_crosses_horizon(center_xy: Array, radius: float, matrix: Array) -> bool:
+    """Return whether a circle's circumference reaches the projective horizon.
+
+    Args:
+        center_xy: Circle centre in the source space.
+        radius: Circle radius in source units.
+        matrix: 3x3 projective transform.
+
+    Returns:
+        ``True`` when the transformed curve is no longer a closed finite figure.
+    """
+    values = np.asarray(matrix, dtype=np.float64)
+    normal = values[2]
+    center = np.asarray(center_xy, dtype=np.float64).reshape(2)
+    offset = float(normal[0] * center[0] + normal[1] * center[1] + normal[2])
+    reach = float(radius) * float(np.linalg.norm(normal[:2]))
+    return abs(offset) <= reach + 1e-12
+
+
 def _map_line(value: LineValue, mapping: Mapping2D) -> LineValue:
     """Transform an infinite line exactly with ``H^-T``."""
-    coefficients = np.asarray(value.coefficients, dtype=np.float64)
-    transformed = np.linalg.inv(np.asarray(mapping.matrix, dtype=np.float64)).T @ coefficients
+    transformed = map_line_coefficients(value.coefficients, mapping.matrix)
     start = end = None
     if value.start is not None:
         mapped = _apply_matrix(np.asarray([value.start, value.end], dtype=np.float64),
