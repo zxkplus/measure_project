@@ -11,8 +11,11 @@ from pydantic import Field, model_validator
 
 from measure.computation_types import Space
 from measure.measure_calibration import (
-    BoardSpec, CameraModel, DotDetectionOptions, board_object_points,
-    detect_dot_grid as shared_detect_dot_grid, undistort_image as shared_undistort_image,
+    BoardObservation, BoardSpec, CameraModel, DotDetectionOptions, board_object_points,
+    board_observation_issue, detect_dot_grid as shared_detect_dot_grid,
+    point_set_rank,
+    fit_camera_intrinsics as shared_fit_intrinsics,
+    undistort_image as shared_undistort_image,
 )
 from measure.pixel_calibration import CheckerboardScaleCalibration
 from measure_api.v2.calibration_assets import (
@@ -29,6 +32,15 @@ from measure_api.v2.models import (
     OutputSpec, Point, StrictModel,
 )
 from measure_api.v2.registry import CalculationContext, Operation
+
+
+#: Neutral engine codes mapped onto this API's published rejection reasons.
+_OBSERVATION_ISSUES = {
+    "incomplete": "incomplete_correspondences",
+    "duplicate_points": "degenerate_or_nonplanar_correspondences",
+    "not_planar": "degenerate_or_nonplanar_correspondences",
+    "board_off_plane": "board_plane_requires_z_zero",
+}
 
 
 class ScaleRequest(CalculationRequest):
@@ -69,7 +81,7 @@ def compute_scale(request: ScaleRequest, context: CalculationContext) -> Calibra
                            "Corner lies outside applicable image")
     coordinates = np.array(points, dtype=float).reshape(-1, 2)
     if (len(points) < 6 or len(set(points)) != len(points)
-            or np.linalg.matrix_rank(coordinates - coordinates.mean(axis=0)) < 2):
+            or point_set_rank(coordinates) < 2):
         return CalibrationResult(valid=False, diagnostics={
             "reason": "at_least_six_unique_noncollinear_corners_required",
             "num_corners": len(points),
@@ -431,13 +443,10 @@ def compute_camera(request: CameraRequest, context: CalculationContext) -> Calib
         elif any(not (0 <= p.x < size.width and 0 <= p.y < size.height)
                  for p in view.image_points):
             reason = "image_point_outside"
-        elif (len(np.unique(obj, axis=0)) != len(obj)
-              or len(np.unique(img, axis=0)) != len(img)
-              or np.linalg.matrix_rank(obj - obj.mean(axis=0), tol=1e-5) != 2
-              or np.linalg.matrix_rank(img - img.mean(axis=0), tol=1e-5) != 2):
-            reason = "degenerate_or_nonplanar_correspondences"
-        elif not np.allclose(obj[:, 2], 0, atol=1e-6):
-            reason = "board_plane_requires_z_zero"
+        else:
+            issue = board_observation_issue(obj, img)
+            if issue is not None:
+                reason = _OBSERVATION_ISSUES[issue]
         identity = (obj.tobytes(), img.tobytes())
         if reason is None and identity in seen_observations:
             reason = "duplicate_observation"
@@ -454,39 +463,54 @@ def compute_camera(request: CameraRequest, context: CalculationContext) -> Calib
             "accepted_views": [{"view_id": view.view_id} for view in accepted],
         })
     try:
-        rms, matrix, distortion, rotations, translations = cv2.calibrateCamera(
-            objects, pixels, (size.width, size.height), None, None,
+        fitted = shared_fit_intrinsics(
+            [BoardObservation(view_id=view.view_id,
+                              image_space=Space("camera", "px"),
+                              object_space=Space("board", request.unit),
+                              image_size_wh=(size.width, size.height),
+                              image_points_xy=pixels[index],
+                              object_points_xyz=objects[index],
+                              ordering=view.ordering)
+             for index, view in enumerate(accepted)],
+            camera_id=request.applicability.camera_id,
+            image_space=Space("camera", "px"),
+            image_size_wh=(size.width, size.height),
         )
     except cv2.error as error:
         return CalibrationResult(valid=False, diagnostics={
             "reason": "intrinsic_solve_failed", "message": str(error),
             "rejected_views": rejected,
         })
+    if not fitted.valid:
+        return CalibrationResult(valid=False, diagnostics={
+            "reason": "intrinsic_solve_failed", "message": fitted.reason,
+            "rejected_views": rejected,
+        })
+    solved = fitted.value
+    matrix = solved.camera.matrix
+    distortion = solved.camera.distortion
     if (not np.isfinite(matrix).all() or not np.isfinite(distortion).all()
-            or not np.isfinite(rms)):
+            or not np.isfinite(solved.rms_error_px)):
         return CalibrationResult(valid=False, diagnostics={"reason": "nonfinite_solution",
                                                           "rejected_views": rejected})
     details = []
-    all_errors = []
     for index, view in enumerate(accepted):
-        projected, _ = cv2.projectPoints(objects[index], rotations[index], translations[index],
-                                         matrix, distortion)
-        errors = np.linalg.norm(pixels[index] - projected.reshape(-1, 2), axis=1)
-        all_errors.extend(errors.tolist())
+        errors = solved.per_view_residuals_px[index]
         details.append({"view_id": view.view_id, "residuals_px": errors.tolist(),
                         "mean_error_px": float(errors.mean()),
-                        "rotation_vector": rotations[index].reshape(-1).tolist(),
-                        "translation_vector": translations[index].reshape(-1).tolist(),
+                        "rotation_vector": solved.rotation_vectors[index].tolist(),
+                        "translation_vector": solved.poses[index].translation.tolist(),
                         "translation_unit": request.unit,
                         "source": view.source.model_dump(mode="json") if view.source else None})
     asset = CameraCalibration(
         unit=request.unit, applicability=request.applicability,
         parameters=CameraParameters(camera_matrix=matrix.tolist(),
                                     distortion=distortion.reshape(-1).tolist(),
-                                    reprojection_error_px=float(np.mean(all_errors))),
+                                    reprojection_error_px=solved.mean_point_error_px),
     )
     return asset_result(asset, context, request.output, {
-        "accepted_views": details, "rejected_views": rejected, "rms_error_px": float(rms),
+        "accepted_views": details, "rejected_views": rejected,
+        "rms_error_px": solved.rms_error_px,
         "physical_scale_available": False,
     })
 

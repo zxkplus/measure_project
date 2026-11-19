@@ -1389,6 +1389,12 @@ class IntrinsicResult:
     accepted_view_ids: Tuple[str, ...]
     rms_error_px: float
     per_view_errors_px: Tuple[float, ...]
+    #: Per-view, per-point reprojection residuals in pixels.
+    per_view_residuals_px: Tuple[np.ndarray, ...] = ()
+    #: Per-view Rodrigues rotation vectors of the solved board pose.
+    rotation_vectors: Tuple[np.ndarray, ...] = ()
+    #: Mean reprojection error over every point of every accepted view.
+    mean_point_error_px: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1487,6 +1493,57 @@ def validate_pose(pose: Pose3D) -> None:
     if determinant <= 0.0:
         raise contract_error("calibration.pose_invalid",
                              "rotation must not reflect (det <= 0)", "pose")
+
+
+def point_set_rank(points_xy: np.ndarray, *, tolerance: float = 1e-5) -> int:
+    """Return the affine rank of a finite point set.
+
+    Args:
+        points_xy: ``(N, D)`` points.
+        tolerance: Singular-value tolerance of the centred coordinates.
+
+    Returns:
+        ``0`` for a single location, ``1`` for collinear points, ``2`` for a
+        planar set and ``3`` when the points span a volume.
+    """
+    values = np.asarray(points_xy, dtype=np.float64)
+    if len(values) == 0:
+        return 0
+    centered = values - values.mean(axis=0)
+    return int(np.linalg.matrix_rank(centered, tol=tolerance))
+
+
+def board_observation_issue(object_points_xyz: np.ndarray, image_points_xy: np.ndarray, *,
+                            planarity_tolerance: float = 1e-5,
+                            plane_tolerance: float = 1e-6) -> Optional[str]:
+    """Return why one board view cannot enter an intrinsic solve.
+
+    Args:
+        object_points_xyz: ``(N, 3)`` physical board points.
+        image_points_xy: ``(N, 2)`` observed image points.
+        planarity_tolerance: Rank tolerance used to test the 2-D span.
+        plane_tolerance: Absolute tolerance for ``z == 0`` board points.
+
+    Returns:
+        ``None`` when the view is usable, otherwise one neutral code:
+        ``incomplete``, ``duplicate_points``, ``not_planar`` or
+        ``board_off_plane``.
+    """
+    objects = np.asarray(object_points_xyz, dtype=np.float64)
+    images = np.asarray(image_points_xy, dtype=np.float64)
+    if objects.ndim != 2 or images.ndim != 2 or len(objects) != len(images):
+        return "incomplete"
+    if len(objects) == 0:
+        return "incomplete"
+    if len(np.unique(objects, axis=0)) != len(objects) or len(np.unique(images, axis=0)) != len(images):
+        return "duplicate_points"
+    for values in (objects, images):
+        centered = values - values.mean(axis=0)
+        if int(np.linalg.matrix_rank(centered, tol=planarity_tolerance)) != 2:
+            return "not_planar"
+    if not np.allclose(objects[:, 2], 0.0, atol=plane_tolerance):
+        return "board_off_plane"
+    return None
 
 
 def board_object_points(spec: BoardSpec) -> np.ndarray:
@@ -1591,6 +1648,7 @@ def _solve_intrinsics(views, camera_id, image_space, image_size_wh, options):
         for rvec, tvec in zip(rvecs, tvecs)
     )
     per_view = []
+    residuals = []
     for index, (view, rvec, tvec) in enumerate(zip(views, rvecs, tvecs)):
         projected, _ = cv2.projectPoints(
             np.asarray(view.object_points_xyz, dtype=np.float64), rvec, tvec,
@@ -1598,7 +1656,11 @@ def _solve_intrinsics(views, camera_id, image_space, image_size_wh, options):
         )
         error = np.linalg.norm(projected.reshape(-1, 2) - view.image_points_xy, axis=1)
         per_view.append(float(np.sqrt(np.mean(error ** 2))))
-    return float(rms), camera, poses, tuple(per_view)
+        residuals.append(error)
+    mean_point = float(np.mean(np.concatenate(residuals))) if residuals else 0.0
+    rotation_vectors = tuple(np.asarray(rvec, dtype=np.float64).reshape(3) for rvec in rvecs)
+    return (float(rms), camera, poses, tuple(per_view), tuple(residuals),
+            rotation_vectors, mean_point)
 
 
 def fit_camera_intrinsics(views, *, camera_id: str, image_space: Space,
@@ -1626,11 +1688,15 @@ def fit_camera_intrinsics(views, *, camera_id: str, image_space: Space,
     if len(distinct) < 3:
         return invalid(image_space, "insufficient_views")
     ordered = list(distinct.values())
-    rms, camera, poses, per_view = _solve_intrinsics(
+    (rms, camera, poses, per_view, residuals,
+     rotation_vectors, mean_point) = _solve_intrinsics(
         ordered, camera_id, image_space, image_size_wh, options)
-    result = IntrinsicResult(camera=camera, poses=poses,
-                             accepted_view_ids=tuple(view.view_id for view in ordered),
-                             rms_error_px=rms, per_view_errors_px=per_view)
+    result = IntrinsicResult(
+        camera=camera, poses=poses,
+        accepted_view_ids=tuple(view.view_id for view in ordered),
+        rms_error_px=rms, per_view_errors_px=per_view,
+        per_view_residuals_px=residuals, rotation_vectors=rotation_vectors,
+        mean_point_error_px=mean_point)
     return observed(image_space, result, {"view_count": len(ordered)})
 
 
