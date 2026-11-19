@@ -381,6 +381,123 @@ def prepare_support(
     return observed(support_space, prepared, {"support_shape": support_pixels.shape})
 
 
+def has_texture(pixels: Array) -> bool:
+    """Return whether pixels carry enough variation to correlate.
+
+    Args:
+        pixels: Support or search-window pixels.
+
+    Returns:
+        ``True`` when the standard deviation is non-zero beyond round-off.
+    """
+    return _has_texture(pixels)
+
+
+def peak_argmax(scores: Array) -> Tuple[int, int, float]:
+    """Return the strongest cell of a correlation map.
+
+    Args:
+        scores: Correlation score map.
+
+    Returns:
+        ``(x, y, value)`` of the maximum.
+    """
+    _, value, _, position = cv2.minMaxLoc(np.asarray(scores, dtype=np.float32))
+    return int(position[0]), int(position[1]), float(value)
+
+
+def rotated_box_overlap(center_a: XY, size_a: XY, angle_a: float,
+                        center_b: XY, size_b: XY, angle_b: float) -> float:
+    """Return the intersection over the smaller rotated box.
+
+    Args:
+        center_a: First box centre.
+        size_a: First box ``(width, height)``.
+        angle_a: First box rotation in degrees.
+        center_b: Second box centre.
+        size_b: Second box ``(width, height)``.
+        angle_b: Second box rotation in degrees.
+
+    Returns:
+        Intersection area divided by the smaller box area, or ``0`` when the
+        boxes do not intersect.
+    """
+    first = ((float(center_a[0]), float(center_a[1])),
+             (float(size_a[0]), float(size_a[1])), float(angle_a))
+    second = ((float(center_b[0]), float(center_b[1])),
+              (float(size_b[0]), float(size_b[1])), float(angle_b))
+    _, polygon = cv2.rotatedRectangleIntersection(first, second)
+    if polygon is None:
+        return 0.0
+    area = float(cv2.contourArea(polygon))
+    smaller = min(float(size_a[0]) * float(size_a[1]), float(size_b[0]) * float(size_b[1]))
+    return area / smaller if smaller > 0.0 else 0.0
+
+
+def decimate_matrix(factor: float) -> np.ndarray:
+    """Return the full-frame to coarse-frame matrix of a decimation.
+
+    Args:
+        factor: Decimation factor in ``(0, 1]``.
+
+    Returns:
+        The 3x3 matrix mapping full-resolution pixel centres onto the coarse grid.
+    """
+    matrix = np.eye(3, dtype=np.float64)
+    matrix[0, 0] = matrix[1, 1] = float(factor)
+    matrix[0, 2] = matrix[1, 2] = (float(factor) - 1.0) / 2.0
+    return matrix
+
+
+def decimate_pixels(image: Array, factor: float, *, sigma: float
+                    ) -> Tuple[Array, np.ndarray]:
+    """Low-pass and decimate pixels onto a coarser grid.
+
+    Args:
+        image: Full-resolution ``float32`` pixels.
+        factor: Decimation factor in ``(0, 1]``.
+        sigma: Gaussian standard deviation applied before sampling.
+
+    Returns:
+        The decimated pixels and the 3x3 full-frame to coarse-frame matrix.
+    """
+    if not 0.0 < factor <= 1.0:
+        raise contract_error("contract.invalid_parameter",
+                             "factor must be in (0, 1]", "factor")
+    height, width = image.shape[:2]
+    affine = np.array([[factor, 0.0, (factor - 1.0) / 2.0],
+                       [0.0, factor, (factor - 1.0) / 2.0]], dtype=np.float64)
+    smoothed = cv2.GaussianBlur(image, (0, 0), float(sigma))
+    coarse = cv2.warpAffine(smoothed, affine,
+                            (max(1, int(round(width * factor))),
+                             max(1, int(round(height * factor)))))
+    matrix = np.eye(3, dtype=np.float64)
+    matrix[:2, :] = affine
+    return coarse, matrix
+
+
+def correlate(search: Array, template: Array, mask: Optional[Array] = None) -> Array:
+    """Return the normalised cross-correlation score map of one template.
+
+    Args:
+        search: Search-area pixels.
+        template: Rendered variant pixels.
+        mask: Optional variant footprint mask; ``None`` uses ordinary NCC.
+
+    Returns:
+        A score map with every non-finite value replaced by ``-1``, so masked
+        correlation over a constant background cannot produce a false peak.
+    """
+    area = np.ascontiguousarray(search, dtype=np.float32)
+    variant = np.ascontiguousarray(template, dtype=np.float32)
+    if mask is None:
+        scores = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED)
+    else:
+        scores = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED,
+                                   mask=np.ascontiguousarray(mask, dtype=np.float32))
+    return np.nan_to_num(scores, nan=-1.0, posinf=-1.0, neginf=-1.0)
+
+
 def _refine_peak(scores: Array, x: int, y: int) -> Tuple[float, float]:
     """Refine one correlation peak with two independent 1-D quadratic fits.
 

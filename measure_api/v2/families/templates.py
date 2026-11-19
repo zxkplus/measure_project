@@ -10,11 +10,19 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, List, Literal, Optional, Tuple
 
-import cv2
 import numpy as np
 from pydantic import Field, model_validator
 
-from measure.template_search import render_variant, variant_size
+from measure.computation_types import (
+    Space, invert_matrix, make_mapping, validate_mapping_matrix,
+)
+from measure.geometry_mapping import similarity_scale
+from measure.rectify import ResampleOptions, patch_source_corners, warp_mapped
+from measure.template_search import (
+    correlate, decimate_matrix, decimate_pixels, has_texture, peak_argmax,
+    render_variant,
+    rotated_box_overlap, variant_size,
+)
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.files import ArtifactWriter
 from measure_api.v2.models import (
@@ -93,12 +101,11 @@ def coordinate_mapping(
     """
     return CoordinateMapping(source_frame=source, destination_frame=destination,
                              type="similarity", matrix=matrix.tolist(),
-                             inverse_matrix=np.linalg.inv(matrix).tolist())
+                             inverse_matrix=invert_matrix(matrix).tolist())
 
 
 def _has_texture(pixels: np.ndarray) -> bool:
-    _, deviation = cv2.meanStdDev(pixels)
-    return bool(np.sum(deviation**2) > 1e-12)
+    return has_texture(pixels)
 
 
 @timed("template_build")
@@ -122,15 +129,16 @@ def build_template(
     if roi.width * roi.height > context.settings.max_image_pixels:
         raise ServiceError("template.too_large", "Template support exceeds pixel limit")
     matrix = roi_to_patch_matrix(roi)
-    corners = np.array([[0, 0, 1], [roi.width - 1, 0, 1],
-                        [0, roi.height - 1, 1], [roi.width - 1, roi.height - 1, 1]])
-    positions = (np.linalg.inv(matrix) @ corners.T).T
+    placed = make_mapping(matrix, source=Space("source", "px"),
+                          destination=Space("support", "px"), kind="affine")
+    positions = patch_source_corners(placed, (roi.width, roi.height))
     if (positions[:, 0].min() < -1e-6 or positions[:, 1].min() < -1e-6
             or positions[:, 0].max() > image.shape[1] - 1 + 1e-6
             or positions[:, 1].max() > image.shape[0] - 1 + 1e-6):
         raise ServiceError("template.roi_outside", "Support must lie inside source image")
     processed = apply_preprocessing(image, request.preprocessing)
-    pixels = cv2.warpAffine(processed, matrix[:2], (roi.width, roi.height))
+    pixels = warp_mapped(processed, placed, (roi.width, roi.height),
+                         options=ResampleOptions(compute_valid_mask=False)).pixels
     if not _has_texture(pixels):
         raise ServiceError("template.uninformative", "Constant templates cannot localize targets")
     metadata = TemplateMetadata(
@@ -270,13 +278,11 @@ def load_template(
             raise ValueError("Invalid template pixels")
         matrix = np.array(metadata.source_to_support.matrix)
         inverse = np.array(metadata.source_to_support.inverse_matrix)
-        if (matrix.shape != (3, 3) or inverse.shape != (3, 3)
-                or not np.allclose(matrix @ inverse, np.eye(3), atol=1e-6)
-                or not np.allclose(matrix[2], [0, 0, 1], atol=1e-7)):
+        if inverse.shape != (3, 3) or not np.allclose(matrix @ inverse, np.eye(3), atol=1e-6):
             raise ValueError("Invalid template mapping")
-        gram = matrix[:2, :2].T @ matrix[:2, :2]
-        if (not np.allclose(gram, np.eye(2), atol=1e-6)
-                or np.linalg.det(matrix[:2, :2]) <= 0):
+        # The support mapping must be a rigid (unit-scale) rectification.
+        validate_mapping_matrix(matrix, "similarity")
+        if abs(float(similarity_scale(matrix)) - 1.0) > 1e-6:
             raise ValueError("Template support mapping must be a rigid rectification")
     except (ValueError, TypeError, KeyError, IndexError, OSError, zipfile.BadZipFile) as error:
         raise ServiceError("template.invalid", "Invalid or incompatible template asset") from error
@@ -474,10 +480,9 @@ def _peaks(scores: np.ndarray, options: TemplateSearch, width: int, height: int)
     result = []
     limit = options.max_matches or 1000
     while len(result) < limit:
-        _, score, _, position = cv2.minMaxLoc(work)
+        x, y, score = peak_argmax(work)
         if score < options.score_threshold:
             break
-        x, y = position
         dx = dy = 0.0
         if options.subpixel:
             for axis in (0, 1):
@@ -588,13 +593,11 @@ def _scan(search: np.ndarray, pixels: np.ndarray, options: TemplateSearch,
     # rescans) once for each angle in the grid.
     area = np.ascontiguousarray(search, dtype=np.float32)
     with measure("ncc"):
-        scores = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED, mask=mask)
+        scores = correlate(area, variant, mask)
     counter("ncc_evaluations")
     counter("ncc_positions", float(scores.size))
     counter("ncc_template_pixels", float(w * h))
     counter("ncc_masked" if mask is not None else "ncc_unmasked")
-    # Masked NCC can divide by zero on constant backgrounds. They are invalid candidates.
-    scores[~np.isfinite(scores)] = -1
     settings = options.model_copy(update={"score_threshold": (
         options.score_threshold if threshold is None else threshold
     ), "max_matches": 1000})
@@ -673,15 +676,14 @@ def _suppress(candidates: list, pixels: np.ndarray, options: TemplateSearch) -> 
     for candidate in sorted(candidates, key=lambda item: item[0], reverse=True):
         score, angle, scale, matrix = candidate
         center = matrix @ [(w - 1) / 2, (h - 1) / 2, 1]
-        rect = ((float(center[0]), float(center[1])), (w * scale, h * scale), angle)
         overlapping = False
         for previous in kept:
             _, pa, ps, pm = previous
             pc = pm @ [(w - 1) / 2, (h - 1) / 2, 1]
-            other = ((float(pc[0]), float(pc[1])), (w * ps, h * ps), pa)
-            _, polygon = cv2.rotatedRectangleIntersection(rect, other)
-            area = 0 if polygon is None else cv2.contourArea(polygon)
-            if area / min(w * h * scale**2, w * h * ps**2) > options.overlap:
+            if rotated_box_overlap(
+                (float(center[0]), float(center[1])), (w * scale, h * scale), angle,
+                (float(pc[0]), float(pc[1])), (w * ps, h * ps), pa,
+            ) > options.overlap:
                 overlapping = True
                 break
         if not overlapping:
@@ -850,27 +852,17 @@ def _decimate(pixels: np.ndarray, search: np.ndarray, factor: float,
         where each 3x3 map takes full-resolution coordinates to that coarse
         frame.
     """
-    height, width = pixels.shape[:2]
-    affine = np.array([[factor, 0, (factor - 1) / 2],
-                       [0, factor, (factor - 1) / 2]])
-    mapping = np.array([[factor, 0, (factor - 1) / 2],
-                        [0, factor, (factor - 1) / 2], [0, 0, 1]])
+    sigma = 0.5 / factor
+    mapping = decimate_matrix(factor)
     coarse_pixels = _coarse_template_cached(template_key, factor)
     if coarse_pixels is None:
         with measure("pyramid_blur"):
-            smooth_pixels = cv2.GaussianBlur(pixels, (0, 0), 0.5 / factor)
-        with measure("pyramid_warp"):
-            coarse_pixels = cv2.warpAffine(
-                smooth_pixels, affine, (round(width * factor), round(height * factor)))
+            coarse_pixels, _ = decimate_pixels(pixels, factor, sigma=sigma)
         _coarse_template_store(template_key, factor, coarse_pixels)
     else:
         counter("pyramid_template_cache_hit")
     with measure("pyramid_blur"):
-        smooth_search = cv2.GaussianBlur(search, (0, 0), 0.5 / factor)
-    with measure("pyramid_warp"):
-        coarse_search = cv2.warpAffine(
-            smooth_search, affine,
-            (round(search.shape[1] * factor), round(search.shape[0] * factor)))
+        coarse_search, _ = decimate_pixels(search, factor, sigma=sigma)
     return coarse_pixels, coarse_search, mapping, mapping, "blur"
 
 
@@ -929,7 +921,7 @@ def match_template(
                                    threshold=coarse_threshold)
     if factor < 1:
         candidates = [(score, angle, scale,
-                       np.linalg.inv(search_map) @ matrix @ support_map)
+                       invert_matrix(search_map) @ matrix @ support_map)
                       for score, angle, scale, matrix in candidates]
     fine_windows = []
     skipped_poses = []
