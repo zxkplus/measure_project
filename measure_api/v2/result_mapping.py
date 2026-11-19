@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from typing import Callable, Tuple
 
-import cv2
 import numpy as np
 
+from measure.computation_types import Space, make_mapping
+from measure.geometry_mapping import (
+    LensStep, MappingChain, MatrixStep, map_sample_points,
+)
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.families.alignment import validated_matrix
 from measure_api.v2.models import CoordinateMapping
@@ -28,6 +31,37 @@ def perspective(points: np.ndarray, matrix: np.ndarray) -> np.ndarray:
             "visualization.point_at_infinity", "Curve crosses the projective horizon"
         )
     return values[:, :2] / values[:, 2:3]
+
+
+def _lens_chain(
+    mapping: CoordinateMapping, camera: np.ndarray, distortion: np.ndarray,
+    corrected_to_physical: np.ndarray, physical_to_corrected: np.ndarray, forward: bool,
+):
+    """Build the ordered lens + plane steps for one declared direction.
+
+    Args:
+        mapping: Declared nonlinear mapping carrying the frame and unit names.
+        camera: Pinhole camera matrix.
+        distortion: Distortion coefficients in OpenCV order.
+        corrected_to_physical: Plane transform applied after undistortion.
+        physical_to_corrected: Its declared inverse.
+        forward: Whether the chain runs observation to display frame.
+
+    Returns:
+        A mapping chain that maps ``(N, 2)`` samples into the destination frame.
+    """
+    observation = Space(mapping.source_frame, "px")
+    corrected = Space(mapping.source_frame + ":undistorted", "px")
+    display = Space(mapping.destination_frame, mapping.unit)
+    lens = LensStep(source=observation, destination=corrected, camera_matrix=camera,
+                    distortion=distortion, direction="undistort")
+    plane_out = MatrixStep(make_mapping(corrected_to_physical, source=corrected,
+                                        destination=display, kind="projective"))
+    plane_in = MatrixStep(make_mapping(physical_to_corrected, source=display,
+                                       destination=corrected, kind="projective"))
+    distort = LensStep(source=corrected, destination=observation, camera_matrix=camera,
+                       distortion=distortion, direction="distort")
+    return MappingChain((lens, plane_out) if forward else (plane_in, distort))
 
 
 def mapping_function(
@@ -83,19 +117,17 @@ def mapping_function(
             "visualization.mapping_invalid", "Invalid nonlinear lens mapping"
         ) from error
 
+    chain = _lens_chain(mapping, k, distortion, matrix, inverse, forward)
+
     def transform(points: np.ndarray) -> np.ndarray:
-        if forward:
-            corrected = cv2.undistortPoints(points.reshape(-1, 1, 2), k, distortion, P=k).reshape(
-                -1, 2
+        # The lens model, its direction and the projective plane step are owned
+        # by the shared mapping layer; only the frame/unit choice stays here.
+        mapped = map_sample_points(np.asarray(points, np.float64), chain)
+        if not mapped.valid:
+            raise ServiceError(
+                "visualization.point_at_infinity", "Curve crosses the projective horizon"
             )
-            return perspective(corrected, matrix)
-        corrected = perspective(points, inverse)
-        rays = np.column_stack([corrected, np.ones(len(corrected))]) @ np.linalg.inv(k).T
-        if np.any(np.abs(rays[:, 2]) <= 1e-12):
-            raise ServiceError("visualization.point_at_infinity", "Lens ray has no finite position")
-        rays /= rays[:, 2:3]
-        projected, _ = cv2.projectPoints(rays, np.zeros(3), np.zeros(3), k, distortion)
-        return projected.reshape(-1, 2)
+        return np.asarray(mapped.value, np.float64)
 
     return transform, None, unit
 
