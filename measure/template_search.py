@@ -427,7 +427,10 @@ def _search_coarse_fine(gray: Array, prepared: PreparedSupport, options: SearchO
                    "searched_variant_count": searched,
                    "unavailable_variant_count": 0,
                    "pruned_variant_count": len(coarse_angles) * len(coarse_scales),
-                   "search_complete": True}
+                   "search_complete": True,
+                   "ncc_evaluations": searched,
+                   "fine_neighborhoods": len(neighbourhoods[:limit]),
+                   "coarse_poses": len(coarse_angles) * len(coarse_scales)}
     if not selected:
         return invalid(image_space, "no_matches", diagnostics)
     return observed(image_space, MatchSet(matches=tuple(selected)), diagnostics)
@@ -499,7 +502,7 @@ def _search_pyramid(gray: Array, prepared: PreparedSupport, options: SearchOptio
         diagnostics.update({"searched_variant_count": 0, "pruned_variant_count": 0,
                             "search_complete": True})
         return invalid(image_space, "no_matches", diagnostics)
-    limit = options.max_matches if options.max_matches > 0 else len(coarse.value.matches)
+    limit = min(len(coarse.value.matches), max(4, options.max_matches or 4))
     height, width = gray.shape[:2]
     radius = max(options.fine_search_radius_px, max(support.shape[:2]) * 0.75)
     refined: List[TemplateMatch] = []
@@ -535,7 +538,10 @@ def _search_pyramid(gray: Array, prepared: PreparedSupport, options: SearchOptio
         selected = selected[: options.max_matches]
     diagnostics.update({"searched_variant_count": searched,
                         "pruned_variant_count": len(coarse.value.matches),
-                        "search_complete": True})
+                        "search_complete": True,
+                        "ncc_evaluations": searched,
+                        "fine_neighborhoods": len(coarse.value.matches[:limit]),
+                        "coarse_poses": len(coarse.value.matches)})
     if not selected:
         return invalid(image_space, "no_matches", diagnostics)
     return observed(image_space, MatchSet(matches=tuple(selected)), diagnostics)
@@ -651,6 +657,9 @@ def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
     diagnostics = {
         "requested_variant_count": requested,
         "searched_variant_count": searched,
+        "ncc_evaluations": searched,
+        "fine_neighborhoods": 0,
+        "coarse_poses": requested,
         "unavailable_variant_count": unavailable,
         "pruned_variant_count": 0,
         "search_complete": searched + unavailable == requested,
