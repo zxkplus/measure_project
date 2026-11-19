@@ -36,11 +36,25 @@ skippable instead of forcing every model through a template.
 from __future__ import annotations
 
 #from measure_api.config import Config
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+
+from measure.computation_types import (
+    Array,
+    Mapping2D,
+    Observation,
+    Space,
+    contract_error,
+    invalid,
+    make_mapping,
+    observed,
+    require_finite,
+    require_xy_array,
+)
 
 from measure.measure_template import (
     Preprocessor,
@@ -759,26 +773,38 @@ class MultiPointAlignment(AlignmentStrategy):
             else:
                 control_matches.append(None)
 
-        # Stage 3: compute affine refinement
-        MIN_AFFINE_POINTS = 3
-        if len(src_pts) >= MIN_AFFINE_POINTS:
-            src_arr = np.array(src_pts, dtype=np.float32)
-            dst_arr = np.array(dst_pts, dtype=np.float32)
-
-            # estimateAffinePartial2D: similarity with optional anisotropic
-            # scaling. For full 6-DOF affine use estimateAffine2D.
-            M_refine, inliers = cv2.estimateAffinePartial2D(
-                src_arr, dst_arr, method=cv2.RANSAC,
-                ransacReprojThreshold=3.0,
+        # Stage 3: control-point correction through the shared estimator.
+        # ``src_pts`` live in the reference patch, ``dst_pts`` in the rigid
+        # patch, so the estimated Q maps reference -> observed.  The correction
+        # back to the reference patch is therefore ``Q^-1 @ M_rigid``; the
+        # historical ``Q @ M_rigid`` applied the estimate in the wrong direction.
+        MIN_CONTROL_POINTS = 3
+        if len(src_pts) >= MIN_CONTROL_POINTS:
+            engine = Space("engine", "px")
+            initial = make_mapping(
+                np.vstack([M_rigid_2x3, [0.0, 0.0, 1.0]]),
+                source=engine, destination=engine, kind="similarity",
             )
-
-            if M_refine is not None and inliers is not None and inliers.sum() >= MIN_AFFINE_POINTS:
-                # Compose: M_final = M_refine @ M_rigid
-                # M_rigid maps inspection → rigid_patch
-                # M_refine maps rigid_patch → refined_patch (src→dst)
-                M_final = _compose_affine_2x3(M_refine, M_rigid_2x3)
-
-                # Rewarp with the refined transform
+            matched_ids = tuple(
+                cp.label for cp, match in zip(self._control_points, control_matches)
+                if match is not None
+            )
+            corrected = correct_alignment(
+                initial,
+                np.asarray(src_pts, dtype=np.float64),
+                np.asarray(dst_pts, dtype=np.float64),
+                reference_patch=engine,
+                control_ids=matched_ids,
+                options=AlignmentOptions(
+                    solver=SimilarityOptions(method="ransac", ransac_threshold=3.0,
+                                             max_residual=3.0,
+                                             minimum_inliers=MIN_CONTROL_POINTS),
+                    minimum_controls=MIN_CONTROL_POINTS,
+                    failure_policy="rigid_fallback",
+                ),
+            )
+            if corrected.valid and not corrected.diagnostics.get("fallback_used", False):
+                M_final = np.asarray(corrected.value.matrix, dtype=np.float64)[:2, :]
                 h, w = int(self._box_size[0]), int(self._box_size[1])
                 refined_patch = cv2.warpAffine(
                     inspection_image,
@@ -1218,3 +1244,408 @@ def strategy_from_roi_state(
             f"Known modes: {list(_ALIGNMENT_STRATEGY_REGISTRY.keys())}"
         )
     return cls_type.from_roi_state(data)
+
+
+# ===========================================================================
+# Shared similarity estimation and control-point correction
+# ===========================================================================
+#
+# These entry points are the single implementation behind ``SimilarityTransform``
+# (v1 objects), ``MultiPointAlignment`` (GUI/v1 strategies) and the v2 alignment
+# family.  They own no request state, never touch global RNG state and always
+# return typed observations.
+
+
+@dataclass(frozen=True)
+class SimilarityOptions:
+    """Declared estimator policy for a source-to-destination similarity.
+
+    Attributes:
+        method: ``least_squares`` or ``ransac``.
+        estimate_scale: Solve for scale; when false the correspondence is
+            treated as rigid (scale fixed to one).
+        allow_single_translation: Permit an explicitly declared one-point
+            translation (scale one, angle zero).
+        minimum_inliers: Minimum accepted correspondences after residual checks.
+        ransac_threshold: Inlier distance in destination units for RANSAC.
+        max_residual: Optional final residual ceiling; ``None`` skips the check.
+        max_iterations: RANSAC sampling budget.
+        confidence: Desired RANSAC confidence, used to stop early.
+        random_seed: Seed of the private sampler; global RNG is never used.
+    """
+
+    method: str = "least_squares"
+    estimate_scale: bool = True
+    allow_single_translation: bool = False
+    minimum_inliers: int = 2
+    ransac_threshold: float = 3.0
+    max_residual: Optional[float] = 3.0
+    max_iterations: int = 2000
+    confidence: float = 0.99
+    random_seed: int = 0
+
+    def __post_init__(self) -> None:
+        if self.method not in ("least_squares", "ransac"):
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown similarity method {self.method!r}", "options.method")
+        if self.minimum_inliers < 1:
+            raise contract_error("contract.invalid_parameter", "minimum_inliers must be >= 1",
+                                 "options.minimum_inliers")
+        if not math.isfinite(self.ransac_threshold) or self.ransac_threshold <= 0.0:
+            raise contract_error("contract.invalid_parameter", "ransac_threshold must be > 0",
+                                 "options.ransac_threshold")
+        if self.max_residual is not None and (
+            not math.isfinite(self.max_residual) or self.max_residual <= 0.0
+        ):
+            raise contract_error("contract.invalid_parameter", "max_residual must be > 0 or None",
+                                 "options.max_residual")
+        if self.max_iterations <= 0:
+            raise contract_error("contract.invalid_parameter", "max_iterations must be > 0",
+                                 "options.max_iterations")
+        if not (0.0 < self.confidence < 1.0):
+            raise contract_error("contract.invalid_parameter", "confidence must be in (0, 1)",
+                                 "options.confidence")
+
+
+@dataclass(frozen=True)
+class SimilarityValue:
+    """A solved similarity with every input residual and its inlier mask."""
+
+    mapping: Mapping2D
+    scale: float
+    angle_rad: float
+    residuals: Array
+    inliers: Array
+    rms_residual: float
+
+    def validate(self) -> None:
+        """Re-check finiteness of the solved quantities."""
+        require_finite(self.scale, "similarity.scale")
+        require_finite(self.angle_rad, "similarity.angle_rad")
+        require_finite(self.residuals, "similarity.residuals")
+        require_finite(self.rms_residual, "similarity.rms_residual")
+
+
+@dataclass(frozen=True)
+class AlignmentOptions:
+    """Business-level control-correction policy.
+
+    Attributes:
+        solver: Estimator policy for the control transform.
+        minimum_controls: Minimum accepted control pairs (business rule, kept
+            separate from the solver's own minimum).
+        failure_policy: ``fail`` or ``rigid_fallback``.
+    """
+
+    solver: SimilarityOptions = field(default_factory=SimilarityOptions)
+    minimum_controls: int = 3
+    failure_policy: str = "fail"
+
+    def __post_init__(self) -> None:
+        if self.failure_policy not in ("fail", "rigid_fallback"):
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown failure policy {self.failure_policy!r}",
+                                 "options.failure_policy")
+        if self.minimum_controls < 1:
+            raise contract_error("contract.invalid_parameter", "minimum_controls must be >= 1",
+                                 "options.minimum_controls")
+
+
+def _require_pairs(source_points: Array, destination_points: Array) -> Tuple[Array, Array]:
+    """Validate paired correspondence arrays.
+
+    Args:
+        source_points: Finite ``(N, 2)`` source points.
+        destination_points: Finite ``(N, 2)`` destination points.
+
+    Returns:
+        Both arrays as ``float64`` copies.
+
+    Raises:
+        ComputationContractError: On shape mismatch or non-finite values.
+    """
+    source = require_xy_array(source_points, "source_points_xy")
+    destination = require_xy_array(destination_points, "destination_points_xy")
+    if len(source) != len(destination):
+        raise contract_error("contract.invalid_shape",
+                             "source and destination point counts must match",
+                             "destination_points_xy")
+    return source, destination
+
+
+def _solve_similarity(source: Array, destination: Array, estimate_scale: bool
+                      ) -> Tuple[Array, float, float]:
+    """Solve the proper similarity that maps source onto destination.
+
+    Args:
+        source: ``(N, 2)`` source points with ``N >= 2``.
+        destination: ``(N, 2)`` destination points.
+        estimate_scale: Solve scale when true, otherwise fix it to one.
+
+    Returns:
+        ``(matrix, scale, angle_rad)`` of the source-to-destination transform.
+
+    Raises:
+        ValueError: ``degenerate_correspondences`` when the source collapses.
+    """
+    source_center = source.mean(axis=0)
+    destination_center = destination.mean(axis=0)
+    source_centered = source - source_center
+    destination_centered = destination - destination_center
+    variance = float(np.mean(np.sum(source_centered ** 2, axis=1)))
+    if variance <= 1e-24:
+        raise ValueError("degenerate_correspondences")
+    covariance = destination_centered.T @ source_centered / len(source)
+    u, singular, vt = np.linalg.svd(covariance)
+    orientation = 1.0 if np.linalg.det(u @ vt) >= 0.0 else -1.0
+    rotation = u @ np.diag([1.0, orientation]) @ vt
+    scale = 1.0
+    if estimate_scale:
+        scale = float(np.sum(singular) / variance)
+    if not math.isfinite(scale) or scale <= 1e-12:
+        raise ValueError("degenerate_correspondences")
+    translation = destination_center - scale * (rotation @ source_center)
+    matrix = np.array([
+        [scale * rotation[0, 0], scale * rotation[0, 1], translation[0]],
+        [scale * rotation[1, 0], scale * rotation[1, 1], translation[1]],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float64)
+    angle = math.atan2(rotation[1, 0], rotation[0, 0])
+    return matrix, scale, angle
+
+
+def _apply_matrix(matrix: Array, points: Array) -> Array:
+    """Apply a 3x3 homogeneous matrix to ``(N, 2)`` points."""
+    homogeneous = np.column_stack([points, np.ones(len(points))])
+    mapped = homogeneous @ matrix.T
+    return mapped[:, :2] / mapped[:, 2:3]
+
+
+def _residuals(matrix: Array, source: Array, destination: Array) -> Array:
+    """Return per-correspondence Euclidean residuals in destination units."""
+    return np.linalg.norm(_apply_matrix(matrix, source) - destination, axis=1)
+
+
+def _invalid_similarity(
+    space: Space, reason: str, diagnostics: Optional[dict] = None,
+) -> Observation[SimilarityValue]:
+    """Build the invalid observation used by every estimator failure."""
+    return invalid(space, reason, diagnostics or {})
+
+
+def estimate_similarity(
+    source_points_xy: Array,
+    destination_points_xy: Array,
+    *,
+    source: Space,
+    destination: Space,
+    options: Optional[SimilarityOptions] = None,
+) -> Observation[SimilarityValue]:
+    """Estimate the proper similarity mapping source points onto destination points.
+
+    Args:
+        source_points_xy: Finite ``(N, 2)`` points in ``source``.
+        destination_points_xy: Finite ``(N, 2)`` points in ``destination``.
+        source: Space of the source correspondences.
+        destination: Space of the destination correspondences.
+        options: Estimator policy; defaults to least squares with a 3-unit
+            residual ceiling.
+
+    Returns:
+        A valid observation carrying the mapping, scale, angle, every input
+        residual and the inlier mask, or an invalid observation whose reason is
+        one of ``degenerate_correspondences``, ``insufficient_correspondences``,
+        ``insufficient_inliers`` or ``excessive_residual``.
+    """
+    options = options or SimilarityOptions()
+    points_source, points_destination = _require_pairs(source_points_xy,
+                                                       destination_points_xy)
+    count = len(points_source)
+    if count == 0:
+        return _invalid_similarity(destination, "degenerate_correspondences")
+    if count == 1:
+        if not (options.allow_single_translation and options.minimum_inliers <= 1):
+            return _invalid_similarity(destination, "insufficient_correspondences")
+        delta = points_destination[0] - points_source[0]
+        matrix = np.array([[1.0, 0.0, delta[0]], [0.0, 1.0, delta[1]], [0.0, 0.0, 1.0]])
+        mapping = make_mapping(matrix, source=source, destination=destination,
+                               kind="similarity")
+        value = SimilarityValue(mapping=mapping, scale=1.0, angle_rad=0.0,
+                                residuals=np.zeros(1, dtype=np.float64),
+                                inliers=np.ones(1, dtype=bool), rms_residual=0.0)
+        return observed(destination, value, {"control_count": 1})
+    if count < options.minimum_inliers:
+        return _invalid_similarity(destination, "insufficient_inliers")
+
+    if options.method == "ransac":
+        matrix, mask, diagnostics = _ransac_similarity(
+            points_source, points_destination, options,
+        )
+        if matrix is None:
+            return _invalid_similarity(destination, "insufficient_inliers", diagnostics)
+    else:
+        try:
+            matrix, _, _ = _solve_similarity(points_source, points_destination,
+                                             options.estimate_scale)
+        except ValueError as error:
+            return _invalid_similarity(destination, str(error))
+        residuals_all = _residuals(matrix, points_source, points_destination)
+        if options.max_residual is not None and bool(
+            (residuals_all > options.max_residual).any()
+        ):
+            return _invalid_similarity(
+                destination, "excessive_residual",
+                {"residuals": residuals_all, "inliers": np.zeros(count, dtype=bool)},
+            )
+        mask = np.ones(count, dtype=bool)
+
+    residuals = _residuals(matrix, points_source, points_destination)
+    if options.max_residual is not None:
+        mask = np.asarray(mask, dtype=bool) & (residuals <= options.max_residual)
+    if int(mask.sum()) < options.minimum_inliers:
+        return _invalid_similarity(destination, "insufficient_inliers",
+                                   {"residuals": residuals, "inliers": mask})
+    scale = float(math.hypot(matrix[0, 0], matrix[1, 0]))
+    angle = math.atan2(matrix[1, 0], matrix[0, 0])
+    mapping = make_mapping(matrix, source=source, destination=destination, kind="similarity")
+    rms = float(np.sqrt(np.mean(residuals[mask] ** 2)))
+    value = SimilarityValue(mapping=mapping, scale=scale, angle_rad=angle,
+                            residuals=residuals, inliers=mask, rms_residual=rms)
+    diagnostics = {"residuals": residuals, "inliers": mask, "rms_residual": rms}
+    return observed(destination, value, diagnostics)
+
+
+def _ransac_similarity(
+    source: Array, destination: Array, options: SimilarityOptions,
+) -> Tuple[Optional[Array], Optional[Array], dict]:
+    """Sample minimal pairs with a private RNG and refit on the best inliers.
+
+    Args:
+        source: ``(N, 2)`` source points.
+        destination: ``(N, 2)`` destination points.
+        options: RANSAC policy.
+
+    Returns:
+        ``(matrix, inlier_mask, diagnostics)``; ``(None, None, diagnostics)``
+        when no sample produced a usable model.
+    """
+    generator = np.random.RandomState(options.random_seed % (2 ** 32))
+    count = len(source)
+    best_mask = None
+    best_error = float("inf")
+    best_matrix = None
+    iterations = 0
+    for _ in range(options.max_iterations):
+        iterations += 1
+        sample = generator.choice(count, size=2, replace=False)
+        try:
+            matrix, _, _ = _solve_similarity(source[sample], destination[sample],
+                                             options.estimate_scale)
+        except ValueError:
+            continue
+        residuals = _residuals(matrix, source, destination)
+        mask = residuals <= options.ransac_threshold
+        if int(mask.sum()) < 2:
+            continue
+        error = float(np.mean(residuals[mask] ** 2))
+        if error < best_error:
+            best_error = error
+            best_mask = mask
+            best_matrix = matrix
+            inlier_ratio = float(mask.mean())
+            if inlier_ratio >= 1.0:
+                break
+            required = math.log(1.0 - options.confidence) / max(
+                math.log(1.0 - inlier_ratio ** 2), -1e18)
+            if iterations >= required:
+                break
+    diagnostics = {"ransac_iterations": iterations}
+    if best_matrix is None or best_mask is None:
+        return None, None, diagnostics
+    refined_matrix, _, _ = _solve_similarity(source[best_mask], destination[best_mask],
+                                             options.estimate_scale)
+    return refined_matrix, best_mask, diagnostics
+
+
+def correct_alignment(
+    initial_source_to_patch: Mapping2D,
+    reference_controls_xy: Array,
+    observed_controls_xy: Array,
+    *,
+    reference_patch: Space,
+    control_ids: Tuple[str, ...],
+    options: Optional[AlignmentOptions] = None,
+) -> Observation[Mapping2D]:
+    """Correct a nominal crop with matched control points.
+
+    The control transform ``Q`` maps reference-patch points to the observed
+    patch; the correction is therefore ``Q.inverse @ P`` (source image to
+    reference patch), which fixes the historical ``Q @ P`` direction error.
+
+    Args:
+        initial_source_to_patch: Nominal mapping ``P`` from source to observed patch.
+        reference_controls_xy: Finite ``(N, 2)`` controls in ``reference_patch``.
+        observed_controls_xy: Finite ``(N, 2)`` controls in ``P.destination``.
+        reference_patch: Space of the reference patch.
+        control_ids: Non-empty unique identities of the matched controls.
+        options: Business policy; defaults to three controls and ``fail``.
+
+    Returns:
+        A valid mapping from ``P.source`` to ``reference_patch``, or an invalid
+        observation.  With ``rigid_fallback`` the nominal ``P`` matrix is
+        returned unchanged but retargeted to ``reference_patch`` and flagged in
+        diagnostics.
+    """
+    options = options or AlignmentOptions()
+    reference_points = require_xy_array(reference_controls_xy, "reference_controls_xy")
+    observed_points = require_xy_array(observed_controls_xy, "observed_controls_xy")
+    if len(reference_points) != len(observed_points):
+        raise contract_error("contract.invalid_shape",
+                             "control point counts must match", "observed_controls_xy")
+    if len(control_ids) != len(reference_points):
+        raise contract_error("contract.invalid_shape",
+                             "control_ids must describe every control pair",
+                             "control_ids")
+    if len(set(control_ids)) != len(control_ids) or any(not item for item in control_ids):
+        raise contract_error("contract.invalid_parameter",
+                             "control_ids must be non-empty and unique", "control_ids")
+
+    diagnostics: dict = {"initial_mapping": initial_source_to_patch,
+                         "controls": len(reference_points)}
+    if len(reference_points) < options.minimum_controls:
+        return _alignment_failure(initial_source_to_patch, reference_patch, options,
+                                  "insufficient_controls", diagnostics)
+
+    estimate = estimate_similarity(
+        reference_points, observed_points,
+        source=reference_patch, destination=initial_source_to_patch.destination,
+        options=options.solver,
+    )
+    if not estimate.valid:
+        diagnostics.update(estimate.diagnostics)
+        return _alignment_failure(initial_source_to_patch, reference_patch, options,
+                                  estimate.reason or "control_estimate_failed", diagnostics)
+
+    control_mapping = estimate.value.mapping
+    matrix = control_mapping.inverse_matrix @ initial_source_to_patch.matrix
+    corrected = make_mapping(matrix, source=initial_source_to_patch.source,
+                             destination=reference_patch, kind="similarity")
+    diagnostics.update({"control_mapping": control_mapping,
+                        "control_residuals": estimate.value.residuals})
+    return observed(reference_patch, corrected, diagnostics)
+
+
+def _alignment_failure(
+    initial: Mapping2D, reference_patch: Space, options: AlignmentOptions,
+    reason: str, diagnostics: dict,
+) -> Observation[Mapping2D]:
+    """Apply the declared failure policy to a control-correction failure."""
+    if options.failure_policy == "rigid_fallback":
+        fallback = make_mapping(initial.matrix, source=initial.source,
+                                destination=reference_patch, kind="similarity")
+        diagnostics = dict(diagnostics)
+        diagnostics.update({"fallback_used": True, "fallback_reason": reason})
+        return observed(reference_patch, fallback, diagnostics)
+    diagnostics = dict(diagnostics)
+    diagnostics["fallback_used"] = False
+    return invalid(reference_patch, reason, diagnostics)

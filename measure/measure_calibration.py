@@ -31,9 +31,21 @@ Usage:
 """
 
 import json
+import math
+from dataclasses import dataclass
+
 import numpy as np
 import cv2
 from typing import Tuple, List, Optional, Dict, Any
+from measure.computation_types import (
+    Observation,
+    Space,
+    contract_error,
+    invalid,
+    observed,
+    require_finite,
+    require_xy_array,
+)
 from measure.constants import EPS
 from measure.viz import to_bgr, draw_text_shadow
 
@@ -1191,3 +1203,378 @@ class StereoRigCalibration:
             obj.H_A = packed["H_A"]
             obj.H_B = packed["H_B"]
         return obj
+
+
+# ===========================================================================
+# Typed calibration contract
+# ===========================================================================
+#
+# ``CameraCalibration``/``StereoRigCalibration`` keep their teaching/serialisation
+# responsibilities; these entries are the single numeric implementation used by
+# the v1 GUI adapters and the v2 calibration operations.
+
+
+@dataclass(frozen=True)
+class CameraModel:
+    """A finite pinhole camera with explicit frame and image size."""
+
+    camera_id: str
+    image_space: Space
+    image_size_wh: Tuple[int, int]
+    matrix: np.ndarray
+    distortion: np.ndarray
+
+    def __post_init__(self) -> None:
+        if not self.camera_id:
+            raise contract_error("contract.invalid_parameter", "camera_id must be non-empty",
+                                 "camera.camera_id")
+        width, height = self.image_size_wh
+        if width <= 0 or height <= 0:
+            raise contract_error("contract.invalid_parameter", "image size must be positive",
+                                 "camera.image_size_wh")
+        matrix = np.asarray(self.matrix, dtype=np.float64)
+        if matrix.shape != (3, 3):
+            raise contract_error("contract.invalid_shape", "camera matrix must be 3x3",
+                                 "camera.matrix")
+        distortion = np.asarray(self.distortion, dtype=np.float64).reshape(-1)
+        require_finite((matrix, distortion), "camera.parameters")
+        object.__setattr__(self, "matrix", matrix.copy())
+        object.__setattr__(self, "distortion", distortion.copy())
+        object.__setattr__(self, "image_size_wh", (int(width), int(height)))
+
+
+@dataclass(frozen=True)
+class Pose3D:
+    """A rigid pose from one named frame to another."""
+
+    source_frame: str
+    destination_frame: str
+    unit: str
+    rotation: np.ndarray
+    translation: np.ndarray
+
+    def __post_init__(self) -> None:
+        for name in ("source_frame", "destination_frame", "unit"):
+            if not getattr(self, name):
+                raise contract_error("contract.invalid_parameter", f"{name} must be non-empty",
+                                     f"pose.{name}")
+        rotation = np.asarray(self.rotation, dtype=np.float64)
+        translation = np.asarray(self.translation, dtype=np.float64).reshape(-1)
+        if rotation.shape != (3, 3) or translation.size != 3:
+            raise contract_error("contract.invalid_shape",
+                                 "pose needs a 3x3 rotation and a 3-vector translation",
+                                 "pose")
+        require_finite((rotation, translation), "pose")
+        object.__setattr__(self, "rotation", rotation.copy())
+        object.__setattr__(self, "translation", translation.copy())
+
+
+@dataclass(frozen=True)
+class BoardSpec:
+    """A physical dot/chessboard grid."""
+
+    columns: int
+    rows: int
+    spacing: float
+    unit: str = "mm"
+    symmetric: bool = True
+
+    def __post_init__(self) -> None:
+        if self.columns < 2 or self.rows < 2:
+            raise contract_error("contract.invalid_parameter", "board needs at least 2x2 points",
+                                 "board")
+        require_finite(self.spacing, "board.spacing")
+        if self.spacing <= 0.0:
+            raise contract_error("contract.invalid_parameter", "spacing must be positive",
+                                 "board.spacing")
+
+
+@dataclass(frozen=True)
+class DotDetectionOptions:
+    """Blob-detection tuning for dot grids."""
+
+    min_area: float = 5.0
+    max_area: float = 2000.0
+    min_circularity: float = 0.3
+    min_convexity: float = 0.3
+
+
+@dataclass(frozen=True)
+class BoardObservation:
+    """One board view with ordered image and object correspondences."""
+
+    view_id: str
+    image_space: Space
+    object_space: Space
+    image_size_wh: Tuple[int, int]
+    image_points_xy: np.ndarray
+    object_points_xyz: np.ndarray
+    ordering: str = "row_major"
+
+    def __post_init__(self) -> None:
+        image_points = require_xy_array(self.image_points_xy, "board.image_points_xy")
+        object_points = np.asarray(self.object_points_xyz, dtype=np.float64)
+        if object_points.ndim != 2 or object_points.shape[1] != 3:
+            raise contract_error("contract.invalid_shape",
+                                 "object points must be (N, 3)", "board.object_points_xyz")
+        if len(image_points) != len(object_points):
+            raise contract_error("contract.invalid_shape",
+                                 "image and object point counts must match", "board")
+        require_finite(object_points, "board.object_points_xyz")
+        if self.ordering not in ("row_major", "column_major"):
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown ordering {self.ordering!r}", "board.ordering")
+        object.__setattr__(self, "image_points_xy", image_points)
+        object.__setattr__(self, "object_points_xyz", object_points.copy())
+
+
+@dataclass(frozen=True)
+class IntrinsicOptions:
+    """Pinhole calibration policy."""
+
+    fix_aspect_ratio: bool = False
+    fix_principal_point: bool = False
+    rational_model: bool = False
+
+
+@dataclass(frozen=True)
+class StereoObservationPair:
+    """One capture observed by both cameras."""
+
+    capture_id: str
+    a: BoardObservation
+    b: BoardObservation
+
+
+@dataclass(frozen=True)
+class StereoOptions:
+    """Stereo calibration policy."""
+
+    fix_intrinsics: bool = True
+    fix_principal_point: bool = False
+
+
+@dataclass(frozen=True)
+class IntrinsicResult:
+    """Solved intrinsics with per-view poses and residuals."""
+
+    camera: CameraModel
+    poses: Tuple[Pose3D, ...]
+    accepted_view_ids: Tuple[str, ...]
+    rms_error_px: float
+    per_view_errors_px: Tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class StereoResult:
+    """Relative pose between two calibrated cameras."""
+
+    a_to_b: Pose3D
+    baseline: float
+    essential: np.ndarray
+    rms_error_px: float
+    accepted_capture_ids: Tuple[str, ...]
+
+
+def validate_camera_model(camera: CameraModel) -> None:
+    """Validate the numeric invariants of a pinhole model.
+
+    Args:
+        camera: Candidate camera model.
+
+    Raises:
+        ComputationContractError: On non-finite or degenerate intrinsics.
+    """
+    matrix = np.asarray(camera.matrix, dtype=np.float64)
+    if float(matrix[0, 0]) <= 0.0 or float(matrix[1, 1]) <= 0.0:
+        raise contract_error("calibration.camera_invalid", "focal lengths must be positive",
+                             "camera.matrix")
+    if float(matrix[2, 2]) == 0.0:
+        raise contract_error("calibration.camera_invalid", "invalid homogeneous scale",
+                             "camera.matrix")
+
+
+def validate_pose(pose: Pose3D) -> None:
+    """Validate that a pose is a proper rigid transform.
+
+    Args:
+        pose: Candidate pose.
+
+    Raises:
+        ComputationContractError: When the rotation is not orthonormal with
+            determinant +1.
+    """
+    rotation = np.asarray(pose.rotation, dtype=np.float64)
+    if not np.allclose(rotation.T @ rotation, np.eye(3), rtol=1e-9, atol=1e-9):
+        raise contract_error("calibration.pose_invalid", "rotation is not orthonormal", "pose")
+    determinant = float(np.linalg.det(rotation))
+    if determinant <= 0.0:
+        raise contract_error("calibration.pose_invalid",
+                             "rotation must not reflect (det <= 0)", "pose")
+
+
+def detect_dot_grid(image: np.ndarray, spec: BoardSpec, options: DotDetectionOptions, *,
+                    image_space: Space, object_frame: str,
+                    view_id: str) -> Observation[BoardObservation]:
+    """Detect an ordered dot grid and build its physical correspondences.
+
+    Args:
+        image: ``uint8`` image containing the grid.
+        spec: Board geometry.
+        options: Blob-detection tuning.
+        image_space: Space of the image.
+        object_frame: Name of the board frame.
+        view_id: Caller capture identity.
+
+    Returns:
+        A valid board observation, or ``grid_not_found``.
+    """
+    if image.dtype != np.uint8:
+        raise contract_error("contract.invalid_parameter", "image must be uint8", "image")
+    parameters = cv2.SimpleBlobDetector_Params()
+    parameters.filterByArea = True
+    parameters.minArea = float(options.min_area)
+    parameters.maxArea = float(options.max_area)
+    parameters.filterByCircularity = True
+    parameters.minCircularity = float(options.min_circularity)
+    parameters.filterByConvexity = True
+    parameters.minConvexity = float(options.min_convexity)
+    parameters.filterByInertia = False
+    detector = cv2.SimpleBlobDetector_create(parameters)
+    flags = cv2.CALIB_CB_SYMMETRIC_GRID if spec.symmetric else cv2.CALIB_CB_ASYMMETRIC_GRID
+    found, centers = cv2.findCirclesGrid(image, (spec.columns, spec.rows), flags=flags,
+                                         blobDetector=detector)
+    if not found or centers is None:
+        return invalid(image_space, "grid_not_found")
+    image_points = np.asarray(centers, dtype=np.float64).reshape(-1, 2)
+    object_points = np.zeros((len(image_points), 3), dtype=np.float64)
+    for index in range(len(image_points)):
+        row, column = divmod(index, spec.columns)
+        object_points[index] = (column * spec.spacing, row * spec.spacing, 0.0)
+    observation = BoardObservation(
+        view_id=view_id, image_space=image_space,
+        object_space=Space(object_frame, spec.unit),
+        image_size_wh=(image.shape[1], image.shape[0]),
+        image_points_xy=image_points, object_points_xyz=object_points,
+        ordering="row_major",
+    )
+    return observed(image_space, observation, {"board": spec})
+
+
+def _solve_intrinsics(views, camera_id, image_space, image_size_wh, options):
+    """Run OpenCV's intrinsic solve on prepared board observations."""
+    object_points = [np.asarray(view.object_points_xyz, dtype=np.float32) for view in views]
+    image_points = [np.asarray(view.image_points_xy, dtype=np.float32) for view in views]
+    flags = 0
+    if options.fix_aspect_ratio:
+        flags |= cv2.CALIB_FIX_ASPECT_RATIO
+    if options.fix_principal_point:
+        flags |= cv2.CALIB_FIX_PRINCIPAL_POINT
+    if options.rational_model:
+        flags |= cv2.CALIB_RATIONAL_MODEL
+    rms, matrix, distortion, rvecs, tvecs = cv2.calibrateCamera(
+        object_points, image_points, tuple(image_size_wh), None, None, flags=flags,
+    )
+    camera = CameraModel(camera_id=camera_id, image_space=image_space,
+                         image_size_wh=image_size_wh, matrix=matrix,
+                         distortion=np.asarray(distortion).reshape(-1))
+    poses = tuple(
+        Pose3D(source_frame="board", destination_frame=camera.image_space.frame,
+               unit="mm", rotation=cv2.Rodrigues(rvec)[0], translation=np.asarray(tvec).reshape(3))
+        for rvec, tvec in zip(rvecs, tvecs)
+    )
+    per_view = []
+    for index, (view, rvec, tvec) in enumerate(zip(views, rvecs, tvecs)):
+        projected, _ = cv2.projectPoints(
+            np.asarray(view.object_points_xyz, dtype=np.float64), rvec, tvec,
+            np.asarray(matrix, dtype=np.float64), np.asarray(distortion, dtype=np.float64),
+        )
+        error = np.linalg.norm(projected.reshape(-1, 2) - view.image_points_xy, axis=1)
+        per_view.append(float(np.sqrt(np.mean(error ** 2))))
+    return float(rms), camera, poses, tuple(per_view)
+
+
+def fit_camera_intrinsics(views, *, camera_id: str, image_space: Space,
+                          image_size_wh: Tuple[int, int],
+                          options: Optional[IntrinsicOptions] = None
+                          ) -> Observation[IntrinsicResult]:
+    """Recover pinhole intrinsics from independent board views.
+
+    Args:
+        views: Board observations (at least three distinct views).
+        camera_id: Identity recorded in the solved model.
+        image_space: Space of every supplied view.
+        image_size_wh: Image size in whole pixels.
+        options: Solver policy.
+
+    Returns:
+        A valid result with camera, poses and residuals, or
+        ``insufficient_views`` when fewer than three distinct views exist.
+    """
+    options = options or IntrinsicOptions()
+    distinct = {}
+    for view in views:
+        distinct.setdefault((np.asarray(view.image_points_xy).round(9).tobytes(),
+                             np.asarray(view.object_points_xyz).round(9).tobytes()), view)
+    if len(distinct) < 3:
+        return invalid(image_space, "insufficient_views")
+    ordered = list(distinct.values())
+    rms, camera, poses, per_view = _solve_intrinsics(
+        ordered, camera_id, image_space, image_size_wh, options)
+    result = IntrinsicResult(camera=camera, poses=poses,
+                             accepted_view_ids=tuple(view.view_id for view in ordered),
+                             rms_error_px=rms, per_view_errors_px=per_view)
+    return observed(image_space, result, {"view_count": len(ordered)})
+
+
+def fit_stereo_rig(pairs, camera_a: CameraModel, camera_b: CameraModel, *,
+                   unit: str, options: Optional[StereoOptions] = None
+                   ) -> Observation[StereoResult]:
+    """Solve the relative pose between two calibrated cameras.
+
+    Args:
+        pairs: Paired observations; at least three distinct captures.
+        camera_a: Camera A intrinsics (never mutated).
+        camera_b: Camera B intrinsics (never mutated).
+        unit: Physical unit of the supplied object points.
+        options: Solver policy.
+
+    Returns:
+        A valid stereo result, or an invalid observation when too few distinct
+        pairs are supplied.
+    """
+    options = options or StereoOptions()
+    records = tuple(pairs)
+    distinct = {}
+    for pair in records:
+        distinct.setdefault(pair.capture_id, pair)
+    if len(distinct) < 3:
+        return invalid(camera_a.image_space, "insufficient_pairs")
+    ordered = list(distinct.values())
+    object_points = [np.asarray(pair.a.object_points_xyz, dtype=np.float32)
+                     for pair in ordered]
+    points_a = [np.asarray(pair.a.image_points_xy, dtype=np.float32) for pair in ordered]
+    points_b = [np.asarray(pair.b.image_points_xy, dtype=np.float32) for pair in ordered]
+    flags = cv2.CALIB_FIX_INTRINSIC if options.fix_intrinsics else 0
+    if options.fix_principal_point:
+        flags |= cv2.CALIB_FIX_PRINCIPAL_POINT
+    rms, k_a, d_a, k_b, d_b, rotation, translation, essential, fundamental = cv2.stereoCalibrate(
+        object_points, points_a, points_b,
+        np.array(camera_a.matrix, dtype=np.float64),
+        np.array(camera_a.distortion, dtype=np.float64),
+        np.array(camera_b.matrix, dtype=np.float64),
+        np.array(camera_b.distortion, dtype=np.float64),
+        tuple(camera_a.image_size_wh), flags=flags,
+    )
+    translation = np.asarray(translation, dtype=np.float64).reshape(3)
+    rotation = np.asarray(rotation, dtype=np.float64)
+    pose = Pose3D(source_frame=camera_a.image_space.frame,
+                  destination_frame=camera_b.image_space.frame, unit=unit,
+                  rotation=rotation, translation=translation)
+    result = StereoResult(
+        a_to_b=pose, baseline=float(np.linalg.norm(translation)),
+        essential=np.asarray(essential, dtype=np.float64),
+        rms_error_px=float(rms),
+        accepted_capture_ids=tuple(pair.capture_id for pair in ordered),
+    )
+    return observed(camera_a.image_space, result, {"pair_count": len(ordered)})

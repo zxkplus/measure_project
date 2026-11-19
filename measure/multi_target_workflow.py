@@ -38,6 +38,20 @@ import numpy as np
 
 from measure.constants import EPS
 from measure.viz import to_bgr, draw_text_shadow
+from measure.computation_types import (
+    CircleValue,
+    ComputationContractError,
+    LineValue,
+    Space,
+    observed,
+)
+from measure.geometry_ops import (
+    line_angle,
+    line_through_points,
+    point_circle_distance,
+    point_distance,
+    point_line_distance,
+)
 from measure.measure_workflow import (
     EdgePairObject,
     EdgePointObject,
@@ -1579,11 +1593,11 @@ class MultiTargetWorkflow:
         all_valid = True
         t_meas_start = time.perf_counter()
 
-        try:
-            for d in self._measurement_defs:
-                obj_type = d["object_type"]
-                label = d["label"]
-                params = d["params"]
+        for d in self._measurement_defs:
+            obj_type = d["object_type"]
+            label = d["label"]
+            params = d["params"]
+            try:
 
                 if obj_type in ("EdgePoint", "EdgePair", "FitLine", "FitCircle"):
                     # Primitive: create object and measure on patch
@@ -1640,108 +1654,115 @@ class MultiTargetWorkflow:
                         all_valid = False
 
                 elif obj_type == "TwoPointsLine":
+                    from measure.measure_workflow import LineResult
                     p1 = raw_results.get(params["point_a_label"])
                     p2 = raw_results.get(params["point_b_label"])
                     if p1 and p2 and p1.valid and p2.valid:
-                        dr = p2.row - p1.row
-                        dc = p2.col - p1.col
-                        norm = np.sqrt(dr**2 + dc**2)
-                        if norm > EPS:
-                            from measure.measure_workflow import LineResult
-                            a = dc / norm
-                            b = -dr / norm
-                            c = -(a * p1.row + b * p1.col)
-                            result = LineResult(
-                                label=label, a=a, b=b, c=c,
-                                start_row=p1.row, start_col=p1.col,
-                                end_row=p2.row, end_col=p2.col,
-                                valid=True,
-                                meta={"point_a_label": params["point_a_label"],
-                                      "point_b_label": params["point_b_label"],
-                                      "length": norm},
-                            )
-                        else:
-                            from measure.measure_workflow import LineResult
-                            result = LineResult(label=label, valid=False,
-                                               meta={"reason": "coincident points"})
+                        shared = line_through_points(
+                            observed(_ENGINE_SPACE, (p1.col, p1.row)),
+                            observed(_ENGINE_SPACE, (p2.col, p2.row)))
                     else:
-                        from measure.measure_workflow import LineResult
+                        shared = None
+                    if shared is not None and shared.valid:
+                        value = shared.value
+                        length = float(np.hypot(value.end[0] - value.start[0],
+                                                value.end[1] - value.start[1]))
+                        result = LineResult(
+                            label=label, a=value.coefficients[0],
+                            b=value.coefficients[1], c=value.coefficients[2],
+                            start_row=value.start[1], start_col=value.start[0],
+                            end_row=value.end[1], end_col=value.end[0], valid=True,
+                            meta={"point_a_label": params["point_a_label"],
+                                  "point_b_label": params["point_b_label"],
+                                  "length": length})
+                    else:
                         result = LineResult(label=label, valid=False,
-                                           meta={"reason": "input points invalid"})
+                                            meta={"reason": getattr(shared, "reason", None)
+                                                  or "input points invalid"})
                     raw_results[label] = result
 
                 elif obj_type == "TwoPointsDistance":
+                    from measure.measure_workflow import DistanceResult
                     p1 = raw_results.get(params["point_a_label"])
                     p2 = raw_results.get(params["point_b_label"])
                     if p1 and p2 and p1.valid and p2.valid:
-                        dr = p2.row - p1.row
-                        dc = p2.col - p1.col
-                        dist = np.sqrt(dr**2 + dc**2)
-                        from measure.measure_workflow import DistanceResult
-                        result = DistanceResult(label=label, value=dist, valid=True)
+                        shared = point_distance(
+                            observed(_ENGINE_SPACE, (p1.col, p1.row)),
+                            observed(_ENGINE_SPACE, (p2.col, p2.row)))
                     else:
-                        from measure.measure_workflow import DistanceResult
-                        result = DistanceResult(label=label, value=0.0, valid=False)
+                        shared = None
+                    result = DistanceResult(
+                        label=label,
+                        value=float(shared.value) if shared and shared.valid else 0.0,
+                        valid=bool(shared and shared.valid))
                     raw_results[label] = result
 
                 elif obj_type == "PointLineDistance":
+                    from measure.measure_workflow import DistanceResult
                     pt = raw_results.get(params["point_label"])
                     line = raw_results.get(params["line_label"])
+                    shared = None
                     if (pt and line and pt.valid and line.valid and
-                        hasattr(line, "a") and hasattr(line, "b") and hasattr(line, "c")):
-                        dist = abs(line.a * pt.row + line.b * pt.col + line.c) / \
-                               np.sqrt(line.a**2 + line.b**2 + EPS)
-                        from measure.measure_workflow import DistanceResult
-                        result = DistanceResult(label=label, value=dist, valid=True)
-                    else:
-                        from measure.measure_workflow import DistanceResult
-                        result = DistanceResult(label=label, value=0.0, valid=False)
+                            hasattr(line, "a") and hasattr(line, "b") and hasattr(line, "c")):
+                        try:
+                            shared = point_line_distance(
+                                observed(_ENGINE_SPACE, (pt.col, pt.row)),
+                                observed(_ENGINE_SPACE,
+                                         LineValue((line.a, line.b, line.c))))
+                        except ComputationContractError:
+                            shared = None
+                    result = DistanceResult(
+                        label=label,
+                        value=float(shared.value) if shared and shared.valid else 0.0,
+                        valid=bool(shared and shared.valid))
                     raw_results[label] = result
 
                 elif obj_type == "TwoLinesAngle":
+                    from measure.measure_workflow import AngleResult
                     l1 = raw_results.get(params["line_a_label"])
                     l2 = raw_results.get(params["line_b_label"])
+                    shared = None
                     if (l1 and l2 and l1.valid and l2.valid and
-                        hasattr(l1, "start_row") and hasattr(l2, "start_row")):
-                        # Compute angle between two lines
-                        dr1 = l1.end_row - l1.start_row
-                        dc1 = l1.end_col - l1.start_col
-                        dr2 = l2.end_row - l2.start_row
-                        dc2 = l2.end_col - l2.start_col
-                        a1 = np.arctan2(dc1, dr1)
-                        a2 = np.arctan2(dc2, dr2)
-                        angle_rad = a2 - a1
-                        # Normalize to [-pi/2, pi/2]
-                        while angle_rad > np.pi / 2:
-                            angle_rad -= np.pi
-                        while angle_rad < -np.pi / 2:
-                            angle_rad += np.pi
-                        from measure.measure_workflow import AngleResult
-                        result = AngleResult(label=label,
-                                            value_rad=abs(angle_rad), valid=True)
-                    else:
-                        from measure.measure_workflow import AngleResult
-                        result = AngleResult(label=label, value_rad=0.0, valid=False)
+                            hasattr(l1, "a") and hasattr(l2, "a")):
+                        try:
+                            shared = line_angle(
+                                observed(_ENGINE_SPACE, LineValue((l1.a, l1.b, l1.c))),
+                                observed(_ENGINE_SPACE, LineValue((l2.a, l2.b, l2.c))))
+                        except ComputationContractError:
+                            shared = None
+                    result = AngleResult(
+                        label=label,
+                        value_rad=float(shared.value) if shared and shared.valid else 0.0,
+                        valid=bool(shared and shared.valid))
                     raw_results[label] = result
 
                 elif obj_type == "PointCircleDistance":
+                    from measure.measure_workflow import DistanceResult
                     pt = raw_results.get(params["point_label"])
                     circ = raw_results.get(params["circle_label"])
+                    shared = None
                     if (pt and circ and pt.valid and circ.valid and
-                        hasattr(circ, "center_row") and hasattr(circ, "radius")):
-                        dr = pt.row - circ.center_row
-                        dc = pt.col - circ.center_col
-                        dist = abs(np.sqrt(dr**2 + dc**2) - circ.radius)
-                        from measure.measure_workflow import DistanceResult
-                        result = DistanceResult(label=label, value=dist, valid=True)
-                    else:
-                        from measure.measure_workflow import DistanceResult
-                        result = DistanceResult(label=label, value=0.0, valid=False)
+                            hasattr(circ, "center_row") and hasattr(circ, "radius")):
+                        try:
+                            shared = point_circle_distance(
+                                observed(_ENGINE_SPACE, (pt.col, pt.row)),
+                                observed(_ENGINE_SPACE,
+                                         CircleValue((circ.center_col, circ.center_row),
+                                                     circ.radius)))
+                        except ComputationContractError:
+                            shared = None
+                    result = DistanceResult(
+                        label=label,
+                        value=float(shared.value) if shared and shared.valid else 0.0,
+                        valid=bool(shared and shared.valid))
                     raw_results[label] = result
 
-        except Exception as e:
-            all_valid = False
-            raw_results["_error"] = str(e)
+            except Exception as error:
+                # Isolate the failure to this tool (D06).  Independent tools keep
+                # their results; dependants read an invalid typed placeholder
+                # instead of a string ``_error`` entry.
+                all_valid = False
+                raw_results[label] = _failed_tool_result(obj_type, label, error)
         t_meas_end = time.perf_counter()
         logger.info("[TIMING]   target=%d: align=%+.1fms  measurements=%+.1fms  patch=%dx%d",
                      index,
@@ -2424,15 +2445,61 @@ def _compute_target_box_corners(
     )
 
 
-def _map_result_to_original(result, M_inv: np.ndarray):
-    """Map a GeometricResult's point coordinates back to the original image.
+_ENGINE_SPACE = Space("engine", "px")
 
-    Returns a dict (serializable) instead of modifying the GeometricResult
-    (which is a frozen dataclass).
 
-    Handles both 2x3 affine matrices (from :class:`AlignmentStrategy`) and
-    legacy 3x3 rigid matrices (from :func:`crop_and_straighten`).
+def _failed_tool_result(obj_type: str, label: str, error: Exception):
+    """Build a typed invalid result for one failed tool.
+
+    Args:
+        obj_type: Registry object type, e.g. ``EdgePoint``.
+        label: Measurement label.
+        error: The exception raised while measuring.
+
+    Returns:
+        A ``GeometricResult`` whose ``type`` matches the tool's declared result
+        type, so downstream serialization and dependency checks keep working.
     """
+    from measure.measure_workflow import GeometricResult
+
+    result_type = "point"
+    try:
+        from measure.object_specs import OBJECT_SPECS
+
+        spec = OBJECT_SPECS.get(obj_type)
+        if spec is not None:
+            result_type = spec.result_type
+    except Exception:  # pragma: no cover - registry import must never mask the tool error
+        pass
+    return GeometricResult(
+        type=result_type,
+        label=label,
+        valid=False,
+        meta={"reason": "tool_failed", "error": str(error),
+              "error_type": type(error).__name__},
+    )
+
+
+def _map_result_to_original(result, M_inv: np.ndarray):
+    """Map a GeometricResult's geometry back to the original image frame.
+
+    Returns a serializable dict (the results are frozen dataclasses).  The
+    geometry is transformed through :func:`measure.geometry_mapping.transform_geometry`,
+    so line coefficients move together with their endpoints and a circle's
+    radius scales with its centre — the two defects the old inline mapper had.
+
+    ``M_inv`` keeps its historical meaning: a 2x3 or 3x3 matrix mapping
+    **original -> patch** (the matrix passed to ``cv2.warpAffine``).
+    """
+    from measure.computation_types import (
+        CircleValue,
+        ComputationContractError,
+        LineValue,
+        Space,
+        make_mapping,
+        observed,
+    )
+    from measure.geometry_mapping import transform_geometry
     from measure.measure_workflow import (
         CircleResult,
         DistanceResult,
@@ -2440,60 +2507,88 @@ def _map_result_to_original(result, M_inv: np.ndarray):
         PointResult,
     )
 
-    # Pick the right mapper based on M_inv shape
-    if M_inv.shape == (2, 3):
-        mapper = map_point_via_affine
-    else:
-        mapper = map_point_to_original
+    engine = Space("engine", "px")
+
+    def _matrix_3x3(matrix: np.ndarray) -> np.ndarray:
+        promoted = np.eye(3, dtype=np.float64)
+        promoted[:2, :] = np.asarray(matrix, dtype=np.float64)[:2, :]
+        return promoted
+
+    def _invalid(kind: str, label: str, reason: str):
+        return {"type": kind, "label": label, "valid": False, "reason": reason}
+
+    try:
+        # ``M_inv`` maps original -> patch; invert it so the mapping used below
+        # and by ``transform_geometry`` runs patch -> original, matching the
+        # historical ``map_point_via_affine`` direction.
+        mapping = make_mapping(np.linalg.inv(_matrix_3x3(M_inv)),
+                               source=engine, destination=engine, kind="affine")
+    except ComputationContractError as error:
+        return _invalid(getattr(result, "type", "unknown"), getattr(result, "label", ""),
+                        f"invalid_mapping: {error.code}")
+
+    def _mapped_points(*points):
+        return mapping.apply([[point[0], point[1]] for point in points])
 
     if isinstance(result, PointResult):
-        if result.valid:
-            orig_row, orig_col = mapper(
-                (result.row, result.col), M_inv
-            )
-            return {
-                "type": "point",
-                "label": result.label,
-                "valid": True,
-                "row": orig_row,
-                "col": orig_col,
-                "meta": result.meta,
-            }
-        return {"type": "point", "label": result.label, "valid": False}
+        if not result.valid:
+            return {"type": "point", "label": result.label, "valid": False}
+        transformed = transform_geometry(observed(engine, (result.col, result.row)), mapping)
+        if not transformed.valid:
+            return _invalid("point", result.label, transformed.reason or "mapping_failed")
+        col, row = transformed.value
+        return {
+            "type": "point",
+            "label": result.label,
+            "valid": True,
+            "row": row,
+            "col": col,
+            "meta": result.meta,
+        }
 
     elif isinstance(result, LineResult):
-        if result.valid:
-            sr, sc = mapper(
-                (result.start_row, result.start_col), M_inv
-            )
-            er, ec = mapper(
-                (result.end_row, result.end_col), M_inv
-            )
-            return {
-                "type": "line",
-                "label": result.label,
-                "valid": True,
-                "start_row": sr, "start_col": sc,
-                "end_row": er, "end_col": ec,
-                "a": result.a, "b": result.b, "c": result.c,
-                "meta": result.meta,
-            }
-        return {"type": "line", "label": result.label, "valid": False}
+        if not result.valid:
+            return {"type": "line", "label": result.label, "valid": False}
+        try:
+            line_value = LineValue((result.a, result.b, result.c))
+        except ComputationContractError as error:
+            return _invalid("line", result.label, error.code)
+        transformed = transform_geometry(observed(engine, line_value), mapping)
+        if not transformed.valid:
+            return _invalid("line", result.label, transformed.reason or "mapping_failed")
+        endpoints = _mapped_points((result.start_col, result.start_row),
+                                   (result.end_col, result.end_row))
+        return {
+            "type": "line",
+            "label": result.label,
+            "valid": True,
+            "start_row": float(endpoints[0][1]), "start_col": float(endpoints[0][0]),
+            "end_row": float(endpoints[1][1]), "end_col": float(endpoints[1][0]),
+            "a": transformed.value.coefficients[0],
+            "b": transformed.value.coefficients[1],
+            "c": transformed.value.coefficients[2],
+            "meta": result.meta,
+        }
 
     elif isinstance(result, CircleResult):
-        if result.valid:
-            cr, cc = mapper(
-                (result.center_row, result.center_col), M_inv
-            )
-            return {
-                "type": "circle",
-                "label": result.label,
-                "valid": True,
-                "center_row": cr, "center_col": cc,
-                "radius": result.radius,
-                "meta": result.meta,
-            }
-        return {"type": "circle", "label": result.label, "valid": False}
+        if not result.valid:
+            return {"type": "circle", "label": result.label, "valid": False}
+        try:
+            circle_value = CircleValue((result.center_col, result.center_row), result.radius)
+        except ComputationContractError as error:
+            return _invalid("circle", result.label, error.code)
+        transformed = transform_geometry(observed(engine, circle_value), mapping)
+        if not transformed.valid:
+            return _invalid("circle", result.label, transformed.reason or "mapping_failed")
+        center = transformed.value.center
+        return {
+            "type": "circle",
+            "label": result.label,
+            "valid": True,
+            "center_row": center[1], "center_col": center[0],
+            "radius": transformed.value.radius,
+            "meta": result.meta,
+        }
 
     elif isinstance(result, DistanceResult):
         return {
@@ -2508,6 +2603,7 @@ def _map_result_to_original(result, M_inv: np.ndarray):
             "type": result.type,
             "label": result.label,
             "valid": result.valid,
+            "meta": result.meta,
         }
         # Only include a field that exists.  Writing ``"value": None`` for an angle
         # (which stores its number in ``value_deg``) makes ``dict.get("value",

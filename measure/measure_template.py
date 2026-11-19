@@ -458,10 +458,7 @@ class TemplatePoint:
         self.edge_template = self.preprocessor(crop)
 
         # Pre-compute pyramid scale factor for coarse matching
-        if self.pyramid_decimate > 0 and self.pyramid_max_template_size > 0:
-            self._pyramid_scale = self._compute_pyramid_scale()
-        else:
-            self._pyramid_scale = 1.0
+        self.set_pyramid(self.pyramid_decimate, self.pyramid_max_template_size)
 
         # Canny-specific: warn if edge content is too sparse
         if isinstance(self.preprocessor, CannyPreprocessor):
@@ -476,6 +473,26 @@ class TemplatePoint:
     # ------------------------------------------------------------------
     # Pyramid (image pyramid) helpers
     # ------------------------------------------------------------------
+
+    def set_pyramid(self, decimate: int, max_template_size: int) -> None:
+        """Set pyramid decimation and recompute the coarse-search scale factor.
+
+        ``decimate`` keeps its historical semantics: any non-zero value enables
+        the pyramid coarse search and the level number itself is not used. The
+        real downsampling ratio comes from ``max_template_size``.
+
+        Args:
+            decimate: Non-zero enables the pyramid coarse search.
+            max_template_size: Longest template side allowed on the coarse
+                level. Zero or negative disables the size cap, so the factor
+                becomes 1.0 (no downsampling).
+        """
+        self.pyramid_decimate = int(decimate)
+        self.pyramid_max_template_size = int(max_template_size)
+        if self.pyramid_decimate > 0 and self.pyramid_max_template_size > 0:
+            self._pyramid_scale = self._compute_pyramid_scale()
+        else:
+            self._pyramid_scale = 1.0
 
     def _compute_pyramid_scale(self) -> float:
         """
@@ -978,79 +995,149 @@ class TemplatePoint:
 
     def _match_translation_only(self, search_img: np.ndarray,
                                  r1: int, c1: int) -> Dict[str, Any]:
-        """Fast path: single translation-only matchTemplate (existing logic)."""
-        heatmap = cv2.matchTemplate(search_img, self.edge_template, cv2.TM_CCOEFF_NORMED)
+        """Fast path: delegate the single-pose NCC peak search to the shared engine.
 
-        # Find integer peak
-        _, max_val, _, max_loc = cv2.minMaxLoc(heatmap)
-        int_peak_x = max_loc[0]
-        int_peak_y = max_loc[1]
+        The correlation peak, its subpixel refinement and the score threshold are
+        owned by :func:`measure.template_search.search_support`; this method only
+        converts the legacy row/column ROI offset into the returned dictionary.
+        """
+        from measure.computation_types import Space, make_mapping
+        from measure.template_search import (
+            PreparedSupport,
+            SearchOptions,
+            search_support,
+        )
 
-        # Subpixel refinement
-        if self.use_subpixel:
-            subpixel_x, subpixel_y = self._refine_subpixel_2d(heatmap, int_peak_y, int_peak_x)
-        else:
-            subpixel_x = float(int_peak_x)
-            subpixel_y = float(int_peak_y)
-
-        # Compute matched center in the full inspection image coordinates
-        matched_row = r1 + subpixel_y + self._crop_h / 2.0
-        matched_col = c1 + subpixel_x + self._crop_w / 2.0
-
+        space = Space("engine", "px")
+        template = np.ascontiguousarray(self.edge_template, dtype=np.float32)
+        prepared = PreparedSupport(
+            pixels=template,
+            valid_mask=np.ones(template.shape[:2], dtype=bool),
+            anchor_support=(self._crop_w / 2.0, self._crop_h / 2.0),
+            support_to_reference=make_mapping(
+                np.eye(3, dtype=np.float64), source=space, destination=space,
+                kind="similarity"),
+            reference_space=space,
+            support_space=space,
+            mask=None,
+        )
+        options = SearchOptions(
+            score_threshold=-1.0,
+            max_matches=1,
+            max_overlap=float(getattr(self, 'overlap', 0.3)),
+            subpixel=self.use_subpixel,
+            coarse_fine=False,
+            angle_min_rad=0.0,
+            angle_max_rad=0.0,
+            angle_step_rad=1.0,
+            scale_min=1.0,
+            scale_max=1.0,
+            scale_step=1.0,
+        )
+        found = search_support(search_img, prepared, options, image_space=space)
+        matches = found.value.matches if found.valid and found.value is not None else ()
+        if not matches:
+            return {
+                'matched_row': float(r1),
+                'matched_col': float(c1),
+                'dx': 0.0,
+                'dy': 0.0,
+                'match_score': -1.0,
+                'valid': False,
+                'int_peak_y': 0,
+                'int_peak_x': 0,
+                'best_rotation_deg': 0.0,
+                'best_scale': 1.0,
+            }
+        match = matches[0]
+        matched_row = r1 + match.center[1]
+        matched_col = c1 + match.center[0]
+        peak_x, peak_y = match.peak_xy if match.peak_xy else (0, 0)
         return {
             'matched_row': matched_row,
             'matched_col': matched_col,
             'dx': matched_col - self.click_col,
             'dy': matched_row - self.click_row,
-            'match_score': float(max_val),
-            'valid': max_val >= self.match_score_threshold,
-            'int_peak_y': int_peak_y,
-            'int_peak_x': int_peak_x,
+            'match_score': float(match.score),
+            'valid': match.score >= self.match_score_threshold,
+            'int_peak_y': peak_y,
+            'int_peak_x': peak_x,
             'best_rotation_deg': 0.0,
             'best_scale': 1.0,
         }
 
     def _match_translation_multi(self, search_img: np.ndarray,
                                   r1: int, c1: int) -> Dict[str, Any]:
+        """Multi-target translation-only matching, delegated to the shared engine.
+
+        Finds every instance above the score threshold, suppresses overlapping
+        detections with IoU, and returns the legacy dictionary shape.
         """
-        Multi-target translation-only matching.
+        matches = self._shared_matches(
+            search_img, r1, c1, max_matches=int(getattr(self, 'max_matches', 0)))
+        return self._build_multi_result(matches)
 
-        Finds ALL local maxima in the NCC heatmap above the score threshold,
-        applies spatial NMS, and returns a list of matches plus backward-
-        compatible top-level best-match fields.
-        """
-        heatmap = cv2.matchTemplate(search_img, self.edge_template,
-                                    cv2.TM_CCOEFF_NORMED)
+    def _shared_support(self):
+        """Build the immutable support view of the current template."""
+        from measure.computation_types import Space, make_mapping
+        from measure.template_search import PreparedSupport
 
-        peaks = self._find_peaks(heatmap, self.match_score_threshold)
+        space = Space("engine", "px")
+        template = np.ascontiguousarray(self.edge_template, dtype=np.float32)
+        return PreparedSupport(
+            pixels=template,
+            valid_mask=np.ones(template.shape[:2], dtype=bool),
+            anchor_support=(self._crop_w / 2.0, self._crop_h / 2.0),
+            support_to_reference=make_mapping(
+                np.eye(3, dtype=np.float64), source=space, destination=space,
+                kind="similarity"),
+            reference_space=space,
+            support_space=space,
+            mask=None,
+        )
 
-        # Build NMS input: (score, row, col, angle=0, scale=1, w, h)
-        candidates = [(s, r, c, 0.0, 1.0, self._crop_w, self._crop_h)
-                      for s, r, c in peaks]
-        selected = self._spatial_nms(candidates, self.overlap, self.max_matches)
+    def _shared_matches(self, search_img: np.ndarray, r1: int, c1: int,
+                        *, max_matches: int) -> List[Dict[str, Any]]:
+        """Run the shared support search and convert matches to legacy dicts."""
+        from measure.computation_types import Space
+        from measure.template_search import SearchOptions, search_support
 
+        space = Space("engine", "px")
+        options = SearchOptions(
+            score_threshold=float(self.match_score_threshold),
+            max_matches=int(max_matches),
+            max_overlap=float(getattr(self, 'overlap', 0.3)),
+            subpixel=self.use_subpixel,
+            coarse_fine=False,
+            angle_min_rad=0.0,
+            angle_max_rad=0.0,
+            angle_step_rad=1.0,
+            scale_min=1.0,
+            scale_max=1.0,
+            scale_step=1.0,
+        )
+        found = search_support(search_img, self._shared_support(), options,
+                               image_space=space)
+        if not found.valid or found.value is None:
+            return []
         matches = []
-        for score, py, px, angle, scale, ww, wh in selected:
-            if self.use_subpixel:
-                spx, spy = self._refine_subpixel_2d(heatmap, py, px)
-            else:
-                spx, spy = float(px), float(py)
-            matched_row = r1 + spy + wh / 2.0
-            matched_col = c1 + spx + ww / 2.0
+        for match in found.value.matches:
+            matched_row = r1 + match.center[1]
+            matched_col = c1 + match.center[0]
+            peak_x, peak_y = match.peak_xy if match.peak_xy else (0, 0)
             matches.append({
                 'matched_row': matched_row,
                 'matched_col': matched_col,
                 'dx': matched_col - self.click_col,
                 'dy': matched_row - self.click_row,
-                'match_score': float(score),
+                'match_score': float(match.score),
                 'valid': True,
-                'int_peak_y': py,
-                'int_peak_x': px,
+                'int_peak_y': peak_y,
+                'int_peak_x': peak_x,
                 'best_rotation_deg': 0.0,
                 'best_scale': 1.0,
             })
-
-        return self._build_multi_result(matches)
+        return matches
 
     def _match_multi_angle_scale_multi(self, search_img: np.ndarray,
                                         r1: int, c1: int) -> Dict[str, Any]:
@@ -1355,6 +1442,177 @@ class TemplatePoint:
             'best_rotation_deg': float(refined_angle),
             'best_scale': float(refined_scale),
         }
+
+    def _match_multi_angle_scale_multi(self, search_img: np.ndarray,
+                                        r1: int, c1: int) -> Dict[str, Any]:
+        """
+        Multi-target multi-angle / multi-scale matching.
+
+        Enumerates (angle, scale) combinations, finds ALL local maxima in
+        each heatmap, pools all candidates, applies global spatial NMS to
+        deduplicate across angles/scales, then subpixel-refines each
+        surviving match.
+        """
+        H, W = search_img.shape
+        tmpl_h, tmpl_w = self.edge_template.shape
+
+        # ---- 1. Build search grids (reuse _build_grid helper) ----
+        def _build_grid(invariant, range_tuple, step):
+            if not invariant:
+                if range_tuple[0] == 0.0 and abs(range_tuple[1] - 1.0) < 1e-6:
+                    return [0.0]
+                avg = (range_tuple[0] + range_tuple[1]) / 2.0
+                return [avg]
+            vals = []
+            v = range_tuple[0]
+            eps = step * 0.01
+            while v <= range_tuple[1] + eps:
+                vals.append(v)
+                v += step
+            return vals
+
+        if self.coarse_fine:
+            # Coarse grid
+            coarse_angles = _build_grid(self.rotation_invariant, self.angle_range,
+                                        self.coarse_angle_step)
+            coarse_scales = _build_grid(self.scale_invariant, self.scale_range,
+                                        self.coarse_scale_step)
+
+            # Step 1: Coarse search — collect all peaks from all heatmaps
+            coarse_results = self._enumerate_angles_scales(
+                search_img, coarse_angles, coarse_scales, W, H, tmpl_w, tmpl_h,
+                multi_peak=True, score_threshold=self.match_score_threshold
+            )
+            if not coarse_results:
+                return self._build_multi_result([])
+
+            # Normalise candidates: (score, (py,px,hm), angle, scale, w, h)
+            #                -> (score, py, px, angle, scale, w, h)
+            coarse_flat = [(s, loc[0], loc[1], a, sc, ww, wh)
+                           for s, loc, a, sc, ww, wh in coarse_results]
+
+            # Step 2: NMS on coarse results to find distinct candidate regions
+            coarse_nms = self._spatial_nms(coarse_flat, self.overlap, max_matches=0)
+            # Take top-K for fine refinement (K=5 to cover sparse targets well)
+            coarse_nms.sort(key=lambda x: x[0], reverse=True)
+            K = min(5, len(coarse_nms))
+            top_candidates = coarse_nms[:K]
+
+            # Step 3: Fine search around each candidate's angle/scale
+            fine_angles_set = set()
+            fine_scales_set = set()
+            for _, _, _, angle, scale, _, _ in top_candidates:
+                fine_angles_set.add(angle)
+                fine_scales_set.add(scale)
+                if self.rotation_invariant:
+                    for offset in [-1, 1]:
+                        na = angle + offset * self.angle_step
+                        if self.angle_range[0] - 1e-6 <= na <= self.angle_range[1] + 1e-6:
+                            fine_angles_set.add(na)
+                if self.scale_invariant:
+                    for offset in [-1, 1]:
+                        ns = scale + offset * self.scale_step
+                        if self.scale_range[0] - 1e-6 <= ns <= self.scale_range[1] + 1e-6:
+                            fine_scales_set.add(ns)
+
+            fine_angles = sorted(fine_angles_set) if self.rotation_invariant else [0.0]
+            fine_scales = sorted(fine_scales_set) if self.scale_invariant else [1.0]
+        else:
+            fine_angles = _build_grid(self.rotation_invariant, self.angle_range,
+                                      self.angle_step)
+            fine_scales = _build_grid(self.scale_invariant, self.scale_range,
+                                      self.scale_step)
+
+        # ---- 2. Fine enumeration (multi-peak) ----
+        all_results = self._enumerate_angles_scales(
+            search_img, fine_angles, fine_scales, W, H, tmpl_w, tmpl_h,
+            multi_peak=True, score_threshold=self.match_score_threshold
+        )
+        if not all_results:
+            return self._build_multi_result([])
+
+        # Normalise: (score, (py,px,hm), angle, scale, w, h)
+        #        -> (score, py, px, hm, angle, scale, w, h)
+        all_flat = [(s, loc[0], loc[1], loc[2] if len(loc) > 2 else None,
+                      a, sc, ww, wh)
+                     for s, loc, a, sc, ww, wh in all_results]
+
+        # ---- 3. Global spatial NMS ----
+        selected = self._spatial_nms(all_flat, self.overlap, self.max_matches)
+
+        # ---- 4. Subpixel refinement per selected match ----
+        matches = []
+        for score, py, px, heatmap, angle, scale, ww, wh in selected:
+            # Position refinement
+            if self.use_subpixel and heatmap is not None:
+                spx, spy = self._refine_subpixel_2d(heatmap, py, px)
+            else:
+                spx, spy = float(px), float(py)
+
+            # Angle refinement via 1D quadratic interpolation
+            if self.rotation_invariant and len(fine_angles) >= 3:
+                refined_angle = self._refine_1d_subpixel(
+                    all_results, angle, self.rotation_invariant, self.scale_invariant,
+                    index_dim=2, value_dim=0
+                )
+            else:
+                refined_angle = angle
+
+            # Scale refinement
+            if self.scale_invariant and len(fine_scales) >= 3:
+                refined_scale = self._refine_1d_subpixel(
+                    all_results, scale, self.rotation_invariant, self.scale_invariant,
+                    index_dim=3, value_dim=0
+                )
+            else:
+                refined_scale = scale
+
+            matched_row = r1 + spy + wh / 2.0
+            matched_col = c1 + spx + ww / 2.0
+
+            matches.append({
+                'matched_row': matched_row,
+                'matched_col': matched_col,
+                'dx': matched_col - self.click_col,
+                'dy': matched_row - self.click_row,
+                'match_score': float(score),
+                'valid': True,
+                'int_peak_y': py,
+                'int_peak_x': px,
+                'best_rotation_deg': float(refined_angle),
+                'best_scale': float(refined_scale),
+            })
+
+        return self._build_multi_result(matches)
+
+    def _build_multi_result(self, matches: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Build the result dict for multi-target mode.
+
+        The top-level fields contain the best match (for backward compatibility).
+        The 'matches' key holds all matches sorted by score descending.
+        """
+        if matches:
+            best = matches[0]
+            return {
+                'matched_row': best['matched_row'],
+                'matched_col': best['matched_col'],
+                'dx': best['dx'],
+                'dy': best['dy'],
+                'match_score': best['match_score'],
+                'valid': True,
+                'int_peak_y': best['int_peak_y'],
+                'int_peak_x': best['int_peak_x'],
+                'best_rotation_deg': best['best_rotation_deg'],
+                'best_scale': best['best_scale'],
+                'matches': matches,
+                'num_matches': len(matches),
+            }
+        else:
+            result = self._make_invalid_result()
+            result['matches'] = []
+            result['num_matches'] = 0
+            return result
 
     def _enumerate_angles_scales(self, search_img, angles, scales,
                                   W, H, tmpl_w, tmpl_h,
@@ -1933,10 +2191,7 @@ class TemplatePoint:
         obj.overlap = float(data.get('overlap', 0.3))
         obj.pyramid_decimate = int(data.get('pyramid_decimate', 0))
         obj.pyramid_max_template_size = int(data.get('pyramid_max_template_size', 400))
-        if obj.pyramid_decimate > 0 and obj.pyramid_max_template_size > 0:
-            obj._pyramid_scale = obj._compute_pyramid_scale()
-        else:
-            obj._pyramid_scale = 1.0
+        obj.set_pyramid(obj.pyramid_decimate, obj.pyramid_max_template_size)
 
         return obj
 
@@ -2055,10 +2310,7 @@ class TemplatePoint:
         obj.overlap = float(data.get("overlap", 0.3))
         obj.pyramid_decimate = int(data.get("pyramid_decimate", 0))
         obj.pyramid_max_template_size = int(data.get("pyramid_max_template_size", 400))
-        if obj.pyramid_decimate > 0 and obj.pyramid_max_template_size > 0:
-            obj._pyramid_scale = obj._compute_pyramid_scale()
-        else:
-            obj._pyramid_scale = 1.0
+        obj.set_pyramid(obj.pyramid_decimate, obj.pyramid_max_template_size)
 
         return obj
 

@@ -502,9 +502,13 @@ class TestComposedObjects:
 
         assert isinstance(result, LineResult)
         assert result.valid
-        # Line through (100,100) and (100,300) is horizontal
-        assert abs(result.a) > 0.01  # x-normal (col component)
-        assert abs(result.b) < 0.01  # near-zero y-normal (row component)
+        # Line through two points on row=100 is horizontal: a*x + b*y + c = 0
+        # with x = col and y = row, so the normal is (0, 1).
+        assert abs(result.a) < 1e-9
+        assert abs(result.b - 1.0) < 1e-9
+        for col, row in ((result.start_col, result.start_row),
+                         (result.end_col, result.end_row)):
+            assert abs(result.a * col + result.b * row + result.c) < 1e-9
 
     @staticmethod
     def test_two_points_line_coincident():
@@ -554,9 +558,9 @@ class TestComposedObjects:
         class MockLine(MeasureObject):
             def __init__(self):
                 super().__init__("line")
-                # a*row + b*col + c = 0
-                # For row=200: 1*row + 0*col - 200 = 0, so a=1, b=0, c=-200
-                self.result = LineResult(label="line", a=1.0, b=0.0, c=-200,
+                # a*x + b*y + c = 0 with x = col and y = row.
+                # For row=200: 0*col + 1*row - 200 = 0, so a=0, b=1, c=-200.
+                self.result = LineResult(label="line", a=0.0, b=1.0, c=-200,
                                          start_row=200, start_col=50,
                                          end_row=200, end_col=350, valid=True)
 

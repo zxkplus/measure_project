@@ -4,10 +4,24 @@ Geometric transform utilities for rotated box crop/straighten and coordinate map
 These are pure math functions with no GUI dependency — only numpy + OpenCV.
 """
 
-from typing import Tuple
+import math
+from dataclasses import dataclass
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
+
+from measure.computation_types import (
+    Mapping2D,
+    RotatedBox,
+    Space,
+    contract_error,
+    make_mapping,
+    require_finite,
+)
+
+#: Output ``(width, height)`` in whole pixels.
+TraceWh = Tuple[float, float]
 
 
 def compute_rotated_box_corners(
@@ -243,3 +257,179 @@ def map_point_via_affine(
     )
     return (orig_row, orig_col)
 
+
+
+# ===========================================================================
+# Typed resampling contract
+# ===========================================================================
+#
+# ``crop_and_straighten`` keeps its historical signature for existing callers;
+# these entries expose the same geometry with an explicit mapping and a validity
+# mask instead of silently trusting replicated border pixels.
+
+INTERPOLATIONS = {"nearest", "linear", "cubic"}
+BORDER_MODES = {"constant", "replicate", "reflect"}
+
+_CV_INTERPOLATION = {
+    "nearest": cv2.INTER_NEAREST,
+    "linear": cv2.INTER_LINEAR,
+    "cubic": cv2.INTER_CUBIC,
+}
+_CV_BORDER = {
+    "constant": cv2.BORDER_CONSTANT,
+    "replicate": cv2.BORDER_REPLICATE,
+    "reflect": cv2.BORDER_REFLECT,
+}
+
+
+@dataclass(frozen=True)
+class ResampleOptions:
+    """Interpolation and border policy for one resampling operation."""
+
+    interpolation: str = "linear"
+    border_mode: str = "constant"
+    border_value: int = 0
+
+    def __post_init__(self) -> None:
+        if self.interpolation not in INTERPOLATIONS:
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown interpolation {self.interpolation!r}",
+                                 "resample.interpolation")
+        if self.border_mode not in BORDER_MODES:
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown border mode {self.border_mode!r}",
+                                 "resample.border_mode")
+        if not isinstance(self.border_value, (int, np.integer)):
+            raise contract_error("contract.invalid_parameter", "border_value must be an integer",
+                                 "resample.border_value")
+
+
+@dataclass(frozen=True)
+class ResampleResult:
+    """Resampled pixels, the source-to-patch mapping and the real-pixel mask."""
+
+    pixels: np.ndarray
+    mapping: Mapping2D
+    valid_mask: np.ndarray
+
+
+def _resample(image: np.ndarray, matrix: np.ndarray, size_wh: TraceWh,
+              options: ResampleOptions, *, source: Space, destination: Space) -> ResampleResult:
+    """Warp with a source-to-patch matrix and compute which output pixels are real."""
+    width, height = int(size_wh[0]), int(size_wh[1])
+    if width <= 0 or height <= 0:
+        raise contract_error("contract.invalid_parameter", "output size must be positive",
+                             "size_wh")
+    mapping = make_mapping(matrix, source=source, destination=destination, kind="affine")
+    pixels = cv2.warpAffine(
+        image, np.asarray(matrix, dtype=np.float64)[:2, :], (width, height),
+        flags=_CV_INTERPOLATION[options.interpolation],
+        borderMode=_CV_BORDER[options.border_mode],
+        borderValue=options.border_value,
+    )
+    grid_x, grid_y = np.meshgrid(np.arange(width, dtype=np.float64),
+                                 np.arange(height, dtype=np.float64))
+    homogeneous = np.stack([grid_x, grid_y, np.ones_like(grid_x)], axis=-1)
+    source_points = homogeneous @ np.asarray(mapping.inverse_matrix, dtype=np.float64).T
+    source_points = source_points[..., :2] / source_points[..., 2:3]
+    image_height, image_width = image.shape[:2]
+    valid_mask = (
+        (source_points[..., 0] >= -0.5) & (source_points[..., 0] <= image_width - 0.5)
+        & (source_points[..., 1] >= -0.5) & (source_points[..., 1] <= image_height - 0.5)
+    )
+    return ResampleResult(pixels=pixels, mapping=mapping, valid_mask=valid_mask)
+
+
+def rotated_patch_matrix(center: Tuple[float, float], size_wh: Tuple[float, float],
+                         angle_rad: float, *, origin: str = "continuous") -> np.ndarray:
+    """Return the source-to-patch matrix of a rotated rectangle.
+
+    Args:
+        center: Rectangle centre in source xy.
+        size_wh: Full ``(width, height)`` in whole pixels.
+        angle_rad: Clockwise rotation in radians.
+        origin: ``continuous`` places the patch origin at ``size / 2`` (the
+            sampling convention), ``pixel_center`` at ``(size - 1) / 2`` (the
+            exact pixel-centre convention used by image cropping).
+
+    Returns:
+        A 3x3 invertible source-to-patch transform.
+    """
+    width, height = float(size_wh[0]), float(size_wh[1])
+    if origin == "pixel_center":
+        offset_x, offset_y = (width - 1.0) / 2.0, (height - 1.0) / 2.0
+    elif origin == "continuous":
+        offset_x, offset_y = width / 2.0, height / 2.0
+    else:
+        raise contract_error("contract.invalid_parameter",
+                             f"unknown origin policy {origin!r}", "origin")
+    cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+    cx, cy = center
+    return np.array([
+        [cos_a, sin_a, offset_x - (cos_a * cx + sin_a * cy)],
+        [-sin_a, cos_a, offset_y - (-sin_a * cx + cos_a * cy)],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float64)
+
+
+def crop_region(
+    image: np.ndarray, box: RotatedBox, *, source: Space, destination: Space,
+    options: Optional[ResampleOptions] = None,
+) -> ResampleResult:
+    """Straighten one rotated box with the continuous ``size/2`` local origin.
+
+    Args:
+        image: ``uint8`` source image.
+        box: Rotated box in ``source``; ``size_wh`` are the full output dimensions.
+        source: Space of the input image.
+        destination: Space of the produced patch.
+        options: Interpolation and border policy.
+
+    Returns:
+        The straightened patch, its source-to-patch mapping and validity mask.
+    """
+    options = options or ResampleOptions()
+    width, height = box.size_wh
+    matrix = rotated_patch_matrix(box.center, box.size_wh, box.angle_rad)
+    return _resample(image, matrix, (width, height), options,
+                     source=source, destination=destination)
+
+
+def warp_mapped(
+    image: np.ndarray, mapping: Mapping2D, size_wh: TraceWh, *,
+    options: Optional[ResampleOptions] = None,
+) -> ResampleResult:
+    """Warp an image through an existing mapping.
+
+    Args:
+        image: ``uint8`` image in ``mapping.source``.
+        mapping: Explicit source-to-destination mapping.
+        size_wh: Output ``(width, height)`` in whole pixels.
+        options: Interpolation and border policy.
+
+    Returns:
+        The warped pixels, the same mapping and the validity mask of real pixels.
+    """
+    options = options or ResampleOptions()
+    return _resample(image, mapping.matrix, size_wh, options,
+                     source=mapping.source, destination=mapping.destination)
+
+
+def legacy_roi_to_box(row: float, col: float, width: float, height: float,
+                      angle_deg: float) -> RotatedBox:
+    """Convert a legacy row/column ROI into a typed rotated box.
+
+    Args:
+        row: ROI centre row.
+        col: ROI centre column.
+        width: Full width in pixels.
+        height: Full height in pixels.
+        angle_deg: Rotation in degrees, clockwise positive.
+
+    Returns:
+        The equivalent :class:`RotatedBox` in xy coordinates.
+    """
+    require_finite((row, col, width, height, angle_deg), "legacy_roi")
+    return RotatedBox(center=(float(col), float(row)),
+                      size_wh=(float(width), float(height)),
+                      angle_rad=math.radians(float(angle_deg)))

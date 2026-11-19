@@ -10,10 +10,18 @@ across many call sites.  The goal is a single source of truth for:
 
 from __future__ import annotations
 
-from typing import Tuple
+import math
+from dataclasses import dataclass
+from typing import Any, Optional, Tuple
 
 import cv2
 import numpy as np
+
+from measure.computation_types import (
+    Observation,
+    contract_error,
+    require_space_match,
+)
 
 from measure.constants import (
     BLACK,
@@ -179,3 +187,153 @@ def display_or_save(
         cv2.imshow(window_name, image)
         cv2.waitKey(wait_time)
         cv2.destroyAllWindows()
+
+
+# ===========================================================================
+# Typed raster rendering
+# ===========================================================================
+#
+# Rendering never encodes, writes files or opens windows: every entry returns
+# owned BGR pixels so adapters can choose how to publish them.
+
+DEFAULT_PRIMITIVE_COLOR = (0, 220, 0)
+
+
+@dataclass(frozen=True)
+class RasterPrimitive:
+    """One geometry observation plus its display policy."""
+
+    geometry: "Observation[Any]"
+    visible: bool = True
+    color: Optional[Tuple[int, int, int]] = None
+
+
+def _primitive_color(primitive: "RasterPrimitive") -> Tuple[int, int, int]:
+    return tuple(primitive.color) if primitive.color else DEFAULT_PRIMITIVE_COLOR
+
+
+def rasterize_geometry(image: np.ndarray, primitives, *, image_space) -> np.ndarray:
+    """Draw typed geometry onto an owned BGR copy of the image.
+
+    Args:
+        image: Grayscale or BGR source image.
+        primitives: Raster primitives to draw.
+        image_space: Space of the image; every primitive must share it.
+
+    Returns:
+        A new BGR ``uint8`` image.
+
+    Raises:
+        ComputationContractError: When a primitive uses another frame or unit,
+            even if it is invisible.
+    """
+    if not isinstance(image, np.ndarray) or image.ndim not in (2, 3):
+        raise contract_error("contract.invalid_shape", "image must be 2D or 3D", "image")
+    canvas = np.array(to_bgr(image), dtype=np.uint8, copy=True)
+    for primitive in primitives:
+        require_space_match(primitive.geometry.space, image_space, "primitive.space")
+    for primitive in primitives:
+        if not primitive.visible or not primitive.geometry.valid:
+            continue
+        color = _primitive_color(primitive)
+        value = primitive.geometry.value
+        if isinstance(value, tuple) and len(value) == 2:
+            center = (int(round(value[0])), int(round(value[1])))
+            cv2.drawMarker(canvas, center, color, markerType=cv2.MARKER_CROSS,
+                            markerSize=9, thickness=1)
+        elif hasattr(value, "coefficients"):
+            _draw_line_value(canvas, value, color)
+        elif hasattr(value, "radius") and hasattr(value, "center"):
+            cv2.circle(canvas, (int(round(value.center[0])), int(round(value.center[1]))),
+                       max(1, int(round(value.radius))), color, 1)
+        elif hasattr(value, "points_xy"):
+            points = np.asarray(value.points_xy, dtype=np.int32).reshape(-1, 1, 2)
+            cv2.polylines(canvas, [points], bool(getattr(value, "closed", False)), color, 1)
+    return canvas
+
+
+def _draw_line_value(canvas: np.ndarray, value, color) -> None:
+    """Draw a line value, using its endpoints when present."""
+    if getattr(value, "start", None) is not None and getattr(value, "end", None) is not None:
+        start = (int(round(value.start[0])), int(round(value.start[1])))
+        end = (int(round(value.end[0])), int(round(value.end[1])))
+        cv2.line(canvas, start, end, color, 1)
+        return
+    a, b, c = value.coefficients
+    height, width = canvas.shape[:2]
+    points = []
+    if abs(b) > 1e-12:
+        for x in (0, width - 1):
+            points.append((x, int(round(-(a * x + c) / b))))
+    if abs(a) > 1e-12:
+        for y in (0, height - 1):
+            points.append((int(round(-(b * y + c) / a)), y))
+    if len(points) >= 2:
+        cv2.line(canvas, points[-2], points[-1], color, 1)
+
+
+def render_profile(profile, *, threshold_gray: float, size_wh: Tuple[int, int]) -> np.ndarray:
+    """Render gray/smoothed/gradient curves as BGR pixels.
+
+    Args:
+        profile: Profile value carrying the three curves.
+        threshold_gray: Threshold line drawn for reference.
+        size_wh: Output ``(width, height)``.
+
+    Returns:
+        A new BGR ``uint8`` canvas.
+    """
+    width, height = int(size_wh[0]), int(size_wh[1])
+    if width <= 0 or height <= 0:
+        raise contract_error("contract.invalid_parameter", "size must be positive", "size_wh")
+    canvas = np.full((height, width, 3), 255, dtype=np.uint8)
+    curves = (
+        (np.asarray(profile.gray, dtype=np.float64), (255, 0, 0)),
+        (np.asarray(profile.smoothed, dtype=np.float64), (0, 160, 0)),
+        (np.asarray(profile.gradient, dtype=np.float64), (0, 0, 255)),
+    )
+    for values, color in curves:
+        if values.size < 2:
+            continue
+        low, high = float(values.min()), float(values.max())
+        span = high - low
+        scaled = np.zeros_like(values) if span <= 1e-12 else (values - low) / span
+        xs = np.linspace(0, width - 1, values.size).astype(np.int32)
+        ys = (height - 1 - scaled * (height - 1)).astype(np.int32)
+        points = np.column_stack([xs, ys]).reshape(-1, 1, 2)
+        cv2.polylines(canvas, [points], False, color, 1)
+    return canvas
+
+
+def render_probes(image: np.ndarray, records, *, image_space) -> np.ndarray:
+    """Overlay real probe records on an owned BGR copy.
+
+    Args:
+        image: Source image.
+        records: Probe records with a ``spec`` describing each probe.
+        image_space: Space of the image.
+
+    Returns:
+        A new BGR ``uint8`` image.
+    """
+    canvas = np.array(to_bgr(image), dtype=np.uint8, copy=True)
+    for record in records:
+        spec = record.spec
+        center = (int(round(spec.center[0])), int(round(spec.center[1])))
+        dx = math.cos(spec.angle_rad) * spec.search_half_length
+        dy = math.sin(spec.angle_rad) * spec.search_half_length
+        start = (int(round(center[0] - dx)), int(round(center[1] - dy)))
+        end = (int(round(center[0] + dx)), int(round(center[1] + dy)))
+        status = getattr(record, "status", "")
+        color = (0, 200, 0) if status == "selected" else (0, 120, 255)
+        cv2.line(canvas, start, end, color, 1)
+        cv2.drawMarker(canvas, center, (0, 0, 255), markerType=cv2.MARKER_CROSS,
+                       markerSize=5, thickness=1)
+        selected = getattr(record, "selected", ()) or ()
+        for edge in selected:
+            point = (int(round(edge.point[0])), int(round(edge.point[1])))
+            cv2.circle(canvas, point, 2, (255, 0, 255), -1)
+    return canvas
+
+
+

@@ -38,7 +38,11 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
+import math
+
 import numpy as np
+
+from measure.computation_types import contract_error, require_finite
 
 from measure.viz import to_bgr
 
@@ -528,3 +532,35 @@ def format_length(
 ) -> str:
     """Format a physical + pixel length pair, e.g. '12.345 mm (123.5 px)'."""
     return f"{value_mm:.{decimals}f} mm ({value_px:.{decimals}f} px)"
+
+
+def validate_scalar_scale(scale: float, *, square_size: Optional[float] = None,
+                          spacing_px: Optional[float] = None) -> None:
+    """Validate a scalar mm/px scale and its optional physical derivation.
+
+    Args:
+        scale: Candidate millimetres-per-pixel scale.
+        square_size: Optional physical square size in millimetres.
+        spacing_px: Optional measured spacing in pixels.
+
+    Raises:
+        ComputationContractError: When the scale is not finite and positive, when
+            only one derivation input is supplied, or when the derivation and
+            the scale disagree.
+    """
+    require_finite(scale, "scale")
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise contract_error("calibration.scale_required",
+                             "scale must be finite and positive", "scale")
+    if (square_size is None) != (spacing_px is None):
+        raise contract_error("calibration.scale_required",
+                             "square_size and spacing_px must be supplied together", "scale")
+    if square_size is not None:
+        require_finite((square_size, spacing_px), "scale.derivation")
+        if square_size <= 0.0 or spacing_px <= 0.0:
+            raise contract_error("calibration.scale_required",
+                                 "physical derivation inputs must be positive", "scale")
+        derived = square_size / spacing_px
+        if not math.isclose(scale, derived, rel_tol=1e-9, abs_tol=1e-12):
+            raise contract_error("calibration.scale_required",
+                                 "scale disagrees with square_size / spacing_px", "scale")

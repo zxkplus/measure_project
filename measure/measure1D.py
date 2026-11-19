@@ -1,7 +1,20 @@
+import math
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
 from typing import Tuple, List, Optional
 from scipy.ndimage import gaussian_filter1d
+from measure.computation_types import (
+    Observation,
+    Space,
+    contract_error,
+    invalid,
+    observed,
+    require_finite,
+    require_finite_xy,
+    require_xy_array,
+)
 from measure.constants import EPS
 from measure.viz import to_bgr, draw_text_shadow
 from measure.signal_ops import find_peaks_vectorized, batch_refine_subpixel
@@ -1078,3 +1091,339 @@ if __name__ == "__main__":
     print("\n按任意键退出...")
     cv2.waitKey(0)
     cv2.destroyAllWindows()
+
+
+# ===========================================================================
+# Shared 1D probe contract
+# ===========================================================================
+#
+# ``Halcon1DMeasure`` remains the teaching/debug class; these functions are the
+# single implementation behind the v1 ``EdgePoint``/``EdgePair`` objects and the
+# v2 probe operations.  Coordinates are ``(x, y) = (col, row)`` and angles are
+# radians clockwise from +x, matching the rest of the shared engine.
+
+
+@dataclass(frozen=True)
+class ProbeSpec:
+    """One straight probe: centre, direction, search half-length and averaging width."""
+
+    center: Tuple[float, float]
+    angle_rad: float
+    search_half_length: float
+    average_half_width: float
+    interpolation: str = "linear"
+    border_policy: str = "replicate"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "center", require_finite_xy(self.center, "probe.center"))
+        require_finite(self.angle_rad, "probe.angle_rad")
+        require_finite(self.search_half_length, "probe.search_half_length")
+        require_finite(self.average_half_width, "probe.average_half_width")
+        if self.search_half_length < 1.0:
+            raise contract_error("contract.invalid_parameter",
+                                 "search_half_length must be at least one pixel",
+                                 "probe.search_half_length")
+        if self.average_half_width <= 0.0:
+            raise contract_error("contract.invalid_parameter",
+                                 "average_half_width must be positive",
+                                 "probe.average_half_width")
+        if self.interpolation not in ("nearest", "linear", "cubic"):
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown interpolation {self.interpolation!r}",
+                                 "probe.interpolation")
+        if self.border_policy not in ("reject", "replicate"):
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown border policy {self.border_policy!r}",
+                                 "probe.border_policy")
+
+    @property
+    def width(self) -> int:
+        """Return the averaged ROI width in whole pixels."""
+        return int(self.average_half_width * 2)
+
+    @property
+    def length(self) -> int:
+        """Return the search length in whole pixels."""
+        return int(self.search_half_length * 2)
+
+    def support_corners(self) -> Tuple[Tuple[float, float], ...]:
+        """Return the probe rectangle corners in source-image xy.
+
+        The order is clockwise from the ``-along/-across`` corner, which is what
+        the historical ``measure_rectangles`` overlays consumed.
+
+        Returns:
+            Four ``(x, y)`` corners of the sampled rectangle.
+        """
+        cos_a, sin_a = math.cos(self.angle_rad), math.sin(self.angle_rad)
+        cx, cy = self.center
+        corners = []
+        for along in (-self.search_half_length, self.search_half_length):
+            for across in (-self.average_half_width, self.average_half_width):
+                corners.append((cx + along * cos_a - across * sin_a,
+                                cy + along * sin_a + across * cos_a))
+        return (corners[0], corners[1], corners[3], corners[2])
+
+
+@dataclass(frozen=True)
+class EdgeOptions:
+    """Edge detection policy shared by every caller."""
+
+    sigma: float = 1.0
+    threshold: float = 30.0
+    threshold_unit: str = "gray"
+    polarity: str = "all"
+    selection: str = "all"
+
+    def __post_init__(self) -> None:
+        require_finite((self.sigma, self.threshold), "edge.options")
+        if self.sigma < 0.0:
+            raise contract_error("contract.invalid_parameter", "sigma must be non-negative",
+                                 "options.sigma")
+        if self.threshold_unit not in ("gray", "fraction"):
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown threshold unit {self.threshold_unit!r}",
+                                 "options.threshold_unit")
+        if self.threshold_unit == "fraction" and self.threshold > 1.0:
+            raise contract_error("contract.invalid_parameter",
+                                 "fraction threshold must not exceed one",
+                                 "options.threshold")
+        if self.polarity not in ("positive", "negative", "all"):
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown polarity {self.polarity!r}", "options.polarity")
+        if self.selection not in ("first", "last", "all"):
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown selection {self.selection!r}", "options.selection")
+
+    def gray_threshold(self) -> float:
+        """Return the derivative threshold in gray levels."""
+        return self.threshold * 255.0 if self.threshold_unit == "fraction" else self.threshold
+
+
+@dataclass(frozen=True)
+class PairOptions:
+    """Complete-pair policy; polarity and selection apply to whole pairs."""
+
+    sigma: float = 1.0
+    threshold: float = 30.0
+    threshold_unit: str = "gray"
+    polarity: str = "all"
+    selection: str = "all"
+
+    def __post_init__(self) -> None:
+        EdgeOptions(self.sigma, self.threshold, self.threshold_unit, "all", "all")
+
+    def gray_threshold(self) -> float:
+        """Return the derivative threshold in gray levels."""
+        return self.threshold * 255.0 if self.threshold_unit == "fraction" else self.threshold
+
+
+@dataclass(frozen=True)
+class EdgeValue:
+    """One subpixel boundary with its signed derivative amplitude."""
+
+    point: Tuple[float, float]
+    amplitude: float
+    profile_position: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class EdgeSet:
+    """Selected edges plus the distances between consecutive edges."""
+
+    edges: Tuple[EdgeValue, ...]
+    distances: Tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class PairValue:
+    """One complete opposite-sign edge pair with its centre and width."""
+
+    edge_a: EdgeValue
+    edge_b: EdgeValue
+    center: Tuple[float, float]
+    width: float
+
+
+@dataclass(frozen=True)
+class PairSet:
+    """Selected pairs plus the distances between consecutive pair centres."""
+
+    pairs: Tuple[PairValue, ...]
+    center_distances: Tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class ProfileValue:
+    """Averaged gray profile, its derivative and the exact sampled points."""
+
+    gray: np.ndarray
+    smoothed: np.ndarray
+    gradient: np.ndarray
+    sample_points_xy: np.ndarray
+    roi_pixels: np.ndarray
+
+
+def _probe_measure(probe: ProbeSpec) -> Halcon1DMeasure:
+    """Build the numeric core for one probe."""
+    return Halcon1DMeasure(
+        row=probe.center[1], col=probe.center[0], angle=probe.angle_rad,
+        length1=probe.search_half_length, length2=probe.average_half_width,
+        interpolation=probe.interpolation,
+    )
+
+
+def _probe_inside(image: np.ndarray, probe: ProbeSpec) -> bool:
+    """Return whether the whole probe rectangle lies inside the image."""
+    height, width = image.shape[:2]
+    cos_a, sin_a = math.cos(probe.angle_rad), math.sin(probe.angle_rad)
+    cx, cy = probe.center
+    for along in (-probe.search_half_length, probe.search_half_length):
+        for across in (-probe.average_half_width, probe.average_half_width):
+            x = cx + along * cos_a - across * sin_a
+            y = cy + along * sin_a + across * cos_a
+            if not (-0.5 <= x <= width - 0.5 and -0.5 <= y <= height - 0.5):
+                return False
+    return True
+
+
+def _sample_points(measure: Halcon1DMeasure, probe: ProbeSpec) -> np.ndarray:
+    """Return the original-frame xy of every profile column centre.
+
+    The centreline uses the *continuous* averaging half-width, not ``height/2``
+    of the integer ROI, so a 3.7 px half-width still samples the probe centre
+    instead of drifting by the rounding remainder.
+    """
+    width = probe.length
+    columns = np.column_stack([
+        np.arange(width, dtype=np.float64),
+        np.full(width, probe.average_half_width, dtype=np.float64),
+    ])
+    return measure._transform_points_to_original(columns)
+
+
+def sample_profile(
+    image: np.ndarray, probe: ProbeSpec, *, space: Space, sigma: float = 1.0,
+) -> Observation[ProfileValue]:
+    """Sample the averaged gray profile of one probe.
+
+    Args:
+        image: Finite ``uint8`` grayscale or BGR image.
+        probe: Probe geometry in ``space``.
+        space: Frame and unit of the probe.
+        sigma: Gaussian smoothing applied to the averaged profile.
+
+    Returns:
+        A valid profile observation, or an invalid one when the probe leaves the
+        image and ``border_policy`` is ``reject``.
+
+    Raises:
+        ComputationContractError: On malformed image or probe parameters.
+    """
+    _require_image(image)
+    if probe.border_policy == "reject" and not _probe_inside(image, probe):
+        return invalid(space, "probe_outside_image")
+    measure = _probe_measure(probe)
+    roi = measure.extract_roi(image)
+    profile = np.mean(roi, axis=0)
+    smoothed = (gaussian_filter1d(profile.astype(np.float64), sigma=sigma)
+                if sigma > 0 else profile.astype(np.float64))
+    gradient = np.gradient(smoothed)
+    value = ProfileValue(gray=profile, smoothed=smoothed, gradient=gradient,
+                         sample_points_xy=_sample_points(measure, probe),
+                         roi_pixels=roi)
+    return observed(space, value, {"roi_shape": roi.shape})
+
+
+def detect_edges(
+    image: np.ndarray, probe: ProbeSpec, options: EdgeOptions, *, space: Space,
+) -> Observation[EdgeSet]:
+    """Detect the selected subpixel edges along one probe.
+
+    Args:
+        image: Finite ``uint8`` image.
+        probe: Probe geometry.
+        options: Threshold, polarity and selection policy.
+        space: Frame and unit of the probe.
+
+    Returns:
+        Selected edges and consecutive distances, or ``no_edges``.
+    """
+    _require_image(image)
+    if probe.border_policy == "reject" and not _probe_inside(image, probe):
+        return invalid(space, "probe_outside_image")
+    profile = sample_profile(image, probe, space=space, sigma=options.sigma)
+    diagnostics = {"threshold_gray": options.gray_threshold(),
+                   "profile": profile.value if profile.valid else None}
+    if not profile.valid:
+        return invalid(space, profile.reason or "invalid_input", diagnostics)
+    measure = _probe_measure(probe)
+    rows, cols, amplitudes, distances = measure.measure_pos(
+        image, options.sigma, options.gray_threshold(), options.polarity,
+        options.selection, False,
+    )
+    edges = tuple(EdgeValue(point=(float(col), float(row)), amplitude=float(amp))
+                  for row, col, amp in zip(rows, cols, amplitudes))
+    if not edges:
+        return invalid(space, "no_edges", diagnostics)
+    return observed(space, EdgeSet(edges=edges, distances=tuple(float(d) for d in distances)),
+                    diagnostics)
+
+
+def detect_edge_pairs(
+    image: np.ndarray, probe: ProbeSpec, options: PairOptions, *, space: Space,
+) -> Observation[PairSet]:
+    """Detect complete opposite-sign edge pairs along one probe.
+
+    Args:
+        image: Finite ``uint8`` image.
+        probe: Probe geometry.
+        options: Threshold, polarity and selection policy applied to whole pairs.
+        space: Frame and unit of the probe.
+
+    Returns:
+        Selected pairs and consecutive centre distances, or ``no_pairs``.
+    """
+    _require_image(image)
+    if probe.border_policy == "reject" and not _probe_inside(image, probe):
+        return invalid(space, "probe_outside_image")
+    measure = _probe_measure(probe)
+    (rows_a, cols_a, amps_a, rows_b, cols_b, amps_b,
+     centers_row, centers_col, widths, inter) = measure.measure_pairs(
+        image, options.sigma, options.gray_threshold(), options.polarity,
+        options.selection,
+    )
+    diagnostics = {"threshold_gray": options.gray_threshold(),
+                   "pairing_mode": "endpoints" if options.selection == "endpoints"
+                   else "polarity"}
+    if not rows_a:
+        return invalid(space, "no_pairs", diagnostics)
+    pairs = tuple(
+        PairValue(
+            edge_a=EdgeValue((float(col_a), float(row_a)), float(amp_a)),
+            edge_b=EdgeValue((float(col_b), float(row_b)), float(amp_b)),
+            center=(float(center_col), float(center_row)),
+            width=float(width),
+        )
+        for row_a, col_a, amp_a, row_b, col_b, amp_b, center_row, center_col, width
+        in zip(rows_a, cols_a, amps_a, rows_b, cols_b, amps_b,
+               centers_row, centers_col, widths)
+    )
+    centers = [pair.center for pair in pairs]
+    center_distances = tuple(
+        math.hypot(right[0] - left[0], right[1] - left[1])
+        for left, right in zip(centers, centers[1:])
+    )
+    return observed(space, PairSet(pairs=pairs, center_distances=center_distances),
+                    diagnostics)
+
+
+def _require_image(image: np.ndarray) -> None:
+    """Reject images the numeric core cannot sample."""
+    if not isinstance(image, np.ndarray) or image.ndim not in (2, 3):
+        raise contract_error("contract.invalid_shape", "image must be a 2D or 3D array",
+                             "image")
+    if image.dtype != np.uint8:
+        raise contract_error("contract.invalid_parameter", "image must be uint8", "image")
+    if image.size == 0:
+        raise contract_error("contract.invalid_shape", "image must not be empty", "image")

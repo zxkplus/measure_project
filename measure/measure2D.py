@@ -10,12 +10,38 @@ Halcon Metrology 模块 - 直线与圆测量
 from __future__ import annotations
 
 import json
+import math
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
 from typing import Tuple, List, Optional, Dict, Any
-from measure.measure1D import Halcon1DMeasure
+from measure.computation_types import (
+    CircleValue,
+    LineValue,
+    Observation,
+    Space,
+    contract_error,
+    invalid,
+    observed,
+    require_finite,
+    require_finite_xy,
+)
+from measure.measure1D import (
+    EdgeOptions,
+    EdgeValue,
+    Halcon1DMeasure,
+    ProbeSpec,
+    detect_edges,
+)
 from measure.constants import EPS
-from measure.geometric_fits import fit_circle_points, fit_line_points
+from measure.geometric_fits import (
+    FitDiagnostics,
+    fit_circle_observation,
+    fit_circle_points,
+    fit_line_observation,
+    fit_line_points,
+)
 from measure.viz import to_bgr, draw_text_shadow
 
 
@@ -1261,3 +1287,315 @@ _MEASURE2D_TYPE_REGISTRY.update({
     "LineMeasureObject": LineMeasureObject,
     "CircleMeasureObject": CircleMeasureObject,
 })
+
+
+# ===========================================================================
+# Shared probe-to-fit metrology contract
+# ===========================================================================
+#
+# ``LineMeasureObject``/``CircleMeasureObject`` stay as teaching/drawing
+# adapters; these functions are the single implementation behind the v1
+# ``FitLine``/``FitCircle`` objects and the v2 image measurement operations.
+
+
+@dataclass(frozen=True)
+class LineSpec:
+    """Expected line segment and the number of probes placed along it."""
+
+    start: Tuple[float, float]
+    end: Tuple[float, float]
+    probe_count: int = 10
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "start", require_finite_xy(self.start, "line.start"))
+        object.__setattr__(self, "end", require_finite_xy(self.end, "line.end"))
+        if self.probe_count < 2:
+            raise contract_error("contract.invalid_parameter", "probe_count must be at least 2",
+                                 "line.probe_count")
+        if math.hypot(self.end[0] - self.start[0], self.end[1] - self.start[1]) <= 0.0:
+            raise contract_error("contract.invalid_parameter", "line endpoints must differ",
+                                 "line.end")
+
+
+@dataclass(frozen=True)
+class CircleSpec:
+    """Expected circle/arc and the radial probes placed around it."""
+
+    center: Tuple[float, float]
+    radius: float
+    probe_count: int = 12
+    radius_limits: Optional[Tuple[float, float]] = None
+    start_angle_rad: float = 0.0
+    end_angle_rad: float = 2.0 * math.pi
+    include_end: bool = True
+    radial_offset_rad: float = 0.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "center", require_finite_xy(self.center, "circle.center"))
+        require_finite(self.radius, "circle.radius")
+        if self.radius <= 0.0:
+            raise contract_error("contract.invalid_parameter", "radius must be positive",
+                                 "circle.radius")
+        if self.probe_count < 3:
+            raise contract_error("contract.invalid_parameter", "probe_count must be at least 3",
+                                 "circle.probe_count")
+        if self.radius_limits is not None:
+            low, high = self.radius_limits
+            require_finite((low, high), "circle.radius_limits")
+            if low <= 0.0 or high < low:
+                raise contract_error("contract.invalid_parameter",
+                                     "radius_limits must be positive and ordered",
+                                     "circle.radius_limits")
+            object.__setattr__(self, "radius_limits", (float(low), float(high)))
+        require_finite((self.start_angle_rad, self.end_angle_rad), "circle.angles")
+        if self.end_angle_rad < self.start_angle_rad:
+            raise contract_error("contract.invalid_parameter",
+                                 "end angle must not precede start angle", "circle.angles")
+
+
+@dataclass(frozen=True)
+class ProbeFitOptions:
+    """Probe geometry and edge policy for one probe-to-fit measurement."""
+
+    search_half_length: float = 20.0
+    average_half_width: float = 4.0
+    sigma: float = 1.0
+    threshold: float = 30.0
+    threshold_unit: str = "gray"
+    polarity: str = "all"
+    selection: str = "nearest"
+    interpolation: str = "linear"
+    border_policy: str = "replicate"
+
+    def __post_init__(self) -> None:
+        EdgeOptions(self.sigma, self.threshold, self.threshold_unit, self.polarity, "all")
+        if self.selection not in ("nearest", "first", "last", "all"):
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown selection {self.selection!r}", "options.selection")
+        if self.border_policy not in ("reject", "replicate"):
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown border policy {self.border_policy!r}",
+                                 "options.border_policy")
+
+    @property
+    def edge_options(self) -> EdgeOptions:
+        """Return the equivalent per-probe edge policy (all edges are needed)."""
+        return EdgeOptions(self.sigma, self.threshold, self.threshold_unit,
+                           self.polarity, "all")
+
+
+@dataclass(frozen=True)
+class ProbeRecord:
+    """One probe's sampling geometry, detected edges and chosen point."""
+
+    spec: ProbeSpec
+    edge_count: int = 0
+    point: Optional[Tuple[float, float]] = None
+    valid: bool = False
+    reason: Optional[str] = None
+    index: int = 0
+    status: str = "no_edge"
+    candidates: Tuple[EdgeValue, ...] = ()
+    selected: Tuple[EdgeValue, ...] = ()
+
+
+def _probe_spec(center: Tuple[float, float], angle: float, options: ProbeFitOptions) -> ProbeSpec:
+    """Build one probe spec from the shared options."""
+    return ProbeSpec(center=center, angle_rad=angle,
+                     search_half_length=options.search_half_length,
+                     average_half_width=options.average_half_width,
+                     interpolation=options.interpolation,
+                     border_policy=options.border_policy)
+
+
+def _select_edge(edges, reference_distance: float, selection: str):
+    """Choose one edge by distance to the expected position."""
+    if not edges:
+        return None
+    if selection == "first":
+        return edges[0]
+    if selection == "last":
+        return edges[-1]
+    return min(edges, key=lambda edge: abs(reference_distance))
+
+
+def _fit_diagnostics(fit_value, requested: int, successful: int, indices,
+                     space: Space, residuals: Optional[np.ndarray]):
+    """Replace the pure-point diagnostics with probe accounting."""
+    from dataclasses import replace
+
+    base = fit_value.diagnostics["fit"]
+    return replace(base, requested_probe_count=requested,
+                   successful_probe_count=successful,
+                   sample_probe_indices=None if indices is None else np.asarray(indices))
+
+
+def probe_and_fit_line(
+    image: np.ndarray, expected: LineSpec, options: ProbeFitOptions, *, space: Space,
+) -> Observation[LineValue]:
+    """Place perpendicular probes along a segment and fit the detected edge line.
+
+    Args:
+        image: Finite ``uint8`` image.
+        expected: Expected segment and probe count.
+        options: Probe geometry and edge policy.
+        space: Frame and unit of the inputs.
+
+    Returns:
+        A line observation with per-probe diagnostics, or an invalid observation
+        carrying the requested/successful probe counts.
+    """
+    _require_uint8(image)
+    dx = expected.end[0] - expected.start[0]
+    dy = expected.end[1] - expected.start[1]
+    angle = math.atan2(dy, dx) + math.pi / 2.0
+    records: List[ProbeRecord] = []
+    points: List[Tuple[float, float]] = []
+    indices: List[int] = []
+    for index in range(expected.probe_count):
+        fraction = index / (expected.probe_count - 1)
+        center = (expected.start[0] + fraction * dx, expected.start[1] + fraction * dy)
+        spec = _probe_spec(center, angle, options)
+        detected = detect_edges(image, spec, options.edge_options, space=space)
+        edges = detected.value.edges if detected.valid else ()
+        if options.selection == "all":
+            chosen = tuple(edges)
+        else:
+            selected = _select_edge(
+                edges, math.hypot(edges[0].point[0] - center[0],
+                                  edges[0].point[1] - center[1]) if edges else 0.0,
+                options.selection,
+            )
+            # "nearest" is measured from the probe centre, not from the first edge.
+            if options.selection == "nearest" and edges:
+                selected = min(edges, key=lambda edge: math.hypot(
+                    edge.point[0] - center[0], edge.point[1] - center[1]))
+            chosen = () if selected is None else (selected,)
+        for edge in chosen:
+            points.append(edge.point)
+            indices.append(index)
+        records.append(ProbeRecord(spec=spec, edge_count=len(edges),
+                                   point=chosen[0].point if chosen else None,
+                                   valid=bool(chosen),
+                                   reason=None if chosen else "no_edges",
+                                   index=index, status="selected" if chosen else "no_edge",
+                                   candidates=tuple(edges), selected=chosen))
+    return _fit_observation(points, indices, expected.probe_count, records, space,
+                            model="line")
+
+
+def probe_and_fit_circle(
+    image: np.ndarray, expected: CircleSpec, options: ProbeFitOptions, *, space: Space,
+) -> Observation[CircleValue]:
+    """Place radial probes around a circle/arc and fit the detected edge circle.
+
+    Args:
+        image: Finite ``uint8`` image.
+        expected: Expected circle and probe count.
+        options: Probe geometry and edge policy.
+        space: Frame and unit of the inputs.
+
+    Returns:
+        A circle observation with per-probe diagnostics, or an invalid one.
+    """
+    _require_uint8(image)
+    records: List[ProbeRecord] = []
+    points: List[Tuple[float, float]] = []
+    indices: List[int] = []
+    span = expected.end_angle_rad - expected.start_angle_rad
+    closed = abs(span - 2.0 * math.pi) <= 1e-12
+    for index in range(expected.probe_count):
+        if closed or not expected.include_end:
+            fraction = index / expected.probe_count
+        else:
+            fraction = index / (expected.probe_count - 1) if expected.probe_count > 1 else 0.0
+        angle = expected.start_angle_rad + fraction * span
+        center = (expected.center[0] + expected.radius * math.cos(angle),
+                  expected.center[1] + expected.radius * math.sin(angle))
+        spec = _probe_spec(center, angle + expected.radial_offset_rad, options)
+        detected = detect_edges(image, spec, options.edge_options, space=space)
+        edges = detected.value.edges if detected.valid else ()
+        candidates = []
+        for edge in edges:
+            radius = math.hypot(edge.point[0] - expected.center[0],
+                                edge.point[1] - expected.center[1])
+            if expected.radius_limits is not None:
+                low, high = expected.radius_limits
+                if not (low <= radius <= high):
+                    continue
+            candidates.append((abs(radius - expected.radius), edge))
+        if options.selection == "all":
+            chosen = tuple(edge for _, edge in candidates)
+        elif not candidates:
+            chosen = ()
+        elif options.selection == "first":
+            chosen = (candidates[0][1],)
+        elif options.selection == "last":
+            chosen = (candidates[-1][1],)
+        else:
+            chosen = (min(candidates, key=lambda item: item[0])[1],)
+        for edge in chosen:
+            points.append(edge.point)
+            indices.append(index)
+        records.append(ProbeRecord(spec=spec, edge_count=len(edges),
+                                   point=chosen[0].point if chosen else None,
+                                   valid=bool(chosen),
+                                   reason=None if chosen else "no_edges",
+                                   index=index, status="selected" if chosen else "no_edge",
+                                   candidates=tuple(edge for _, edge in candidates),
+                                   selected=chosen))
+    return _fit_observation(points, indices, expected.probe_count, records, space,
+                            model="circle")
+
+
+def _fit_observation(points, indices, requested, records, space, model):
+    """Fit the selected points and wrap the result with probe diagnostics."""
+    if model == "circle":
+        fit = fit_circle_observation(np.asarray(points, dtype=np.float64).reshape(-1, 2),
+                                     space=space) if len(points) >= 3 else \
+            invalid(space, "insufficient_samples")
+    else:
+        fit = fit_line_observation(np.asarray(points, dtype=np.float64).reshape(-1, 2),
+                                   space=space) if len(points) >= 2 else \
+            invalid(space, "insufficient_samples")
+    if not fit.valid:
+        base = fit.value if fit.valid else None
+        diagnostics = dict(fit.diagnostics)
+        template = _empty_fit_diagnostics(space, len(points))
+        diagnostics["fit"] = replace_counts(template, requested, len(points), indices)
+        diagnostics["probes"] = records
+        return invalid(space, fit.reason or "insufficient_samples", diagnostics)
+    diagnostics = dict(fit.diagnostics)
+    diagnostics["fit"] = replace_counts(diagnostics["fit"], requested, len(points), indices)
+    diagnostics["probes"] = records
+    return observed(space, fit.value, diagnostics)
+
+
+def _empty_fit_diagnostics(space: Space, sample_count: int):
+    """Build a successful-shape diagnostics record for a failed fit."""
+    return FitDiagnostics(
+        samples_xy=np.empty((0, 2), dtype=np.float64), sample_count=sample_count,
+        residuals=None, mean_absolute_error=None, max_absolute_error=None,
+        rms_error=None, residual_space=space,
+    )
+
+
+def replace_counts(diagnostics, requested: int, successful: int, indices):
+    """Attach probe accounting to a diagnostics record."""
+    from dataclasses import replace
+
+    return replace(
+        diagnostics,
+        requested_probe_count=int(requested),
+        successful_probe_count=int(successful),
+        sample_probe_indices=None if not indices else np.asarray(indices, dtype=np.int64),
+    )
+
+
+def _require_uint8(image: np.ndarray) -> None:
+    """Reject images the probe core cannot sample."""
+    if not isinstance(image, np.ndarray) or image.ndim not in (2, 3):
+        raise contract_error("contract.invalid_shape", "image must be a 2D or 3D array",
+                             "image")
+    if image.dtype != np.uint8:
+        raise contract_error("contract.invalid_parameter", "image must be uint8", "image")

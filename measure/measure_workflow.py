@@ -54,6 +54,20 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 import cv2
 import numpy as np
 
+from measure.computation_types import (
+    CircleValue,
+    ComputationContractError,
+    LineValue,
+    Space,
+    observed,
+)
+from measure.geometry_ops import (
+    line_angle,
+    line_through_points,
+    point_circle_distance,
+    point_distance,
+    point_line_distance,
+)
 from measure.measure1D import Halcon1DMeasure
 from measure.measure2D import CircleMeasureObject, LineMeasureObject
 from measure.constants import EPS
@@ -121,6 +135,11 @@ def _draw_legend(image: np.ndarray, entries: List[Tuple[str, Tuple[int, int, int
         y += line_height
 
 
+#: Internal frame identity for engine-owned numeric values.  Public adapters
+#: replace it with the real frame before exposing a result.
+_ENGINE_SPACE = Space("engine", "px")
+
+
 # ===========================================================================
 # Geometric result types — the output vocabulary of the system
 # ===========================================================================
@@ -160,8 +179,18 @@ class LineResult(GeometricResult):
 
     @property
     def angle_rad(self) -> float:
-        """Angle of the line direction in radians (0 = right, pi/2 = down)."""
-        return np.arctan2(-self.b, self.a)
+        """Undirected line direction in ``[0, pi)`` (0 = right, pi/2 = down).
+
+        The direction of ``a*x + b*y + c = 0`` is ``d = (-b, a)``.  The previous
+        ``atan2(-b, a)`` treated the normal as the direction and therefore
+        reported a horizontal line as -90 degrees.
+        """
+        angle = float(np.arctan2(self.a, -self.b))
+        if angle < 0.0:
+            angle += np.pi
+        if angle >= np.pi:
+            angle -= np.pi
+        return angle
 
     @property
     def angle_deg(self) -> float:
@@ -278,6 +307,9 @@ class SimilarityTransform:
         if n == 0:
             return t  # invalid
 
+        # Imported here to keep module import order independent of alignment.
+        from measure.alignment import SimilarityOptions, estimate_similarity
+
         src = np.array(source_points, dtype=np.float64)
         dst = np.array(target_points, dtype=np.float64)
         t._num_points = n
@@ -290,39 +322,25 @@ class SimilarityTransform:
             t._valid = True
             return t
 
-        # Umeyama algorithm for similarity (rotation + scale + translation)
-        src_mean = np.mean(src, axis=0)
-        dst_mean = np.mean(dst, axis=0)
-        src_centered = src - src_mean
-        dst_centered = dst - dst_mean
-
-        # Covariance matrix: dst_centered.T @ src_centered / n
-        cov = (dst_centered.T @ src_centered) / n
-        U, S, Vt = np.linalg.svd(cov)
-
-        # Handle reflection case (ensure det(R) = 1)
-        d = np.ones(2)
-        if np.linalg.det(U) * np.linalg.det(Vt) < 0:
-            d[-1] = -1
-
-        # Rotation matrix
-        R = U @ np.diag(d) @ Vt
-
-        # Scale
-        src_var = np.sum(src_centered**2) / n
-        if src_var > EPS:
-            scale = np.sum(S * d) / src_var
-        else:
-            scale = 1.0
-
-        t.rotation = np.arctan2(R[1, 0], R[0, 0])
-        t.scale = scale
-        t.translation_row = dst_mean[0] - scale * (
-            R[0, 0] * src_mean[0] + R[0, 1] * src_mean[1]
+        # Delegate to the shared estimator.  ``SimilarityTransform`` keeps its
+        # historical (row, column) fields, so the solved xy matrix is conjugated
+        # by the axis-swap matrix instead of duplicating Umeyama here.
+        source_xy = np.array([(col, row) for row, col in source_points], dtype=np.float64)
+        destination_xy = np.array([(col, row) for row, col in target_points],
+                                  dtype=np.float64)
+        estimate = estimate_similarity(
+            source_xy, destination_xy, source=_ENGINE_SPACE, destination=_ENGINE_SPACE,
+            options=SimilarityOptions(allow_single_translation=True, minimum_inliers=1,
+                                      max_residual=None),
         )
-        t.translation_col = dst_mean[1] - scale * (
-            R[1, 0] * src_mean[0] + R[1, 1] * src_mean[1]
-        )
+        if not estimate.valid:
+            return t
+        swap = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        matrix = swap @ estimate.value.mapping.matrix @ swap
+        t.scale = float(np.hypot(matrix[0, 0], matrix[1, 0]))
+        t.rotation = float(np.arctan2(matrix[1, 0], matrix[0, 0]))
+        t.translation_row = float(matrix[0, 2])
+        t.translation_col = float(matrix[1, 2])
         t._valid = True
         return t
 
@@ -1617,38 +1635,37 @@ class TwoPointsLineObject(MeasureObject):
             self.result = result
             return result
 
-        dr = p2.row - p1.row
-        dc = p2.col - p1.col
-        norm = np.sqrt(dr**2 + dc**2)
-
-        if norm < EPS:
+        shared = line_through_points(
+            observed(_ENGINE_SPACE, (p1.col, p1.row)),
+            observed(_ENGINE_SPACE, (p2.col, p2.row)),
+        )
+        if not shared.valid:
             result = LineResult(
                 label=self.label,
                 valid=False,
-                meta={"reason": "points are coincident"},
+                meta={"reason": shared.reason},
             )
             self.result = result
             return result
 
-        # Line normal: (dc, -dr) normalized
-        a = dc / norm
-        b = -dr / norm
-        c = -(a * p1.row + b * p1.col)
-
+        value = shared.value
+        start_x, start_y = value.start
+        end_x, end_y = value.end
+        length = float(np.hypot(end_x - start_x, end_y - start_y))
         result = LineResult(
             label=self.label,
-            a=a,
-            b=b,
-            c=c,
-            start_row=p1.row,
-            start_col=p1.col,
-            end_row=p2.row,
-            end_col=p2.col,
+            a=value.coefficients[0],
+            b=value.coefficients[1],
+            c=value.coefficients[2],
+            start_row=start_y,
+            start_col=start_x,
+            end_row=end_y,
+            end_col=end_x,
             valid=True,
             meta={
                 "point_a_label": self._input_labels[0],
                 "point_b_label": self._input_labels[1],
-                "length": norm,
+                "length": length,
             },
         )
         self.result = result
@@ -1695,11 +1712,15 @@ class TwoPointsDistanceObject(MeasureObject):
     def measure(self, image: np.ndarray) -> GeometricResult:
         p1 = self.get_input_result(0)
         p2 = self.get_input_result(1)
-        valid = p1.valid and p2.valid
-        dr = p2.row - p1.row
-        dc = p2.col - p1.col
-        dist = np.sqrt(dr**2 + dc**2)
-        result = DistanceResult(label=self.label, value=dist, valid=valid)
+        if not (p1.valid and p2.valid):
+            result = DistanceResult(label=self.label, value=0.0, valid=False)
+            self.result = result
+            return result
+        shared = point_distance(observed(_ENGINE_SPACE, (p1.col, p1.row)),
+                                observed(_ENGINE_SPACE, (p2.col, p2.row)))
+        result = DistanceResult(label=self.label,
+                                value=float(shared.value) if shared.valid else 0.0,
+                                valid=shared.valid)
         self.result = result
         return result
 
@@ -1753,11 +1774,20 @@ class PointLineDistanceObject(MeasureObject):
             result = DistanceResult(label=self.label, value=0.0, valid=False)
             self.result = result
             return result
-        # Distance = |a*row + b*col + c| / sqrt(a^2 + b^2)
-        dist = abs(line.a * pt.row + line.b * pt.col + line.c) / np.sqrt(
-            line.a**2 + line.b**2 + EPS
-        )
-        result = DistanceResult(label=self.label, value=dist, valid=True)
+        # Delegate to the shared xy composition (fixes the historical
+        # row/column coefficient mix-up).
+        try:
+            shared = point_line_distance(
+                observed(_ENGINE_SPACE, (pt.col, pt.row)),
+                observed(_ENGINE_SPACE, LineValue((line.a, line.b, line.c))),
+            )
+        except ComputationContractError:
+            shared = None
+        if shared is None or not shared.valid:
+            result = DistanceResult(label=self.label, value=0.0, valid=False)
+            self.result = result
+            return result
+        result = DistanceResult(label=self.label, value=shared.value, valid=True)
         self.result = result
         return result
 
@@ -1821,16 +1851,17 @@ class TwoLinesAngleObject(MeasureObject):
             result = AngleResult(label=self.label, value_rad=0.0, valid=False)
             self.result = result
             return result
-        # Angle between normal vectors (a, b)
-        dot = line1.a * line2.a + line1.b * line2.b
-        norm1 = np.sqrt(line1.a**2 + line1.b**2)
-        norm2 = np.sqrt(line2.a**2 + line2.b**2)
-        cos_angle = np.clip(dot / (norm1 * norm2 + EPS), -1.0, 1.0)
-        angle = np.arccos(cos_angle)
-        # Return acute angle
-        if angle > np.pi / 2:
-            angle = np.pi - angle
-        result = AngleResult(label=self.label, value_rad=angle, valid=True)
+        try:
+            shared = line_angle(
+                observed(_ENGINE_SPACE, LineValue((line1.a, line1.b, line1.c))),
+                observed(_ENGINE_SPACE, LineValue((line2.a, line2.b, line2.c))),
+            )
+        except ComputationContractError:
+            shared = None
+        if shared is None or not shared.valid:
+            result = AngleResult(label=self.label, value_rad=0.0, valid=False)
+        else:
+            result = AngleResult(label=self.label, value_rad=float(shared.value), valid=True)
         self.result = result
         return result
 
@@ -1890,13 +1921,15 @@ class PointCircleDistanceObject(MeasureObject):
             result = DistanceResult(label=self.label, value=0.0, valid=False)
             self.result = result
             return result
-        dist_to_center = np.sqrt(
-            (pt.row - circle.center_row) ** 2 + (pt.col - circle.center_col) ** 2
+        shared = point_circle_distance(
+            observed(_ENGINE_SPACE, (pt.col, pt.row)),
+            observed(_ENGINE_SPACE,
+                     CircleValue((circle.center_col, circle.center_row), circle.radius)),
         )
         result = DistanceResult(
             label=self.label,
-            value=abs(dist_to_center - circle.radius),
-            valid=True,
+            value=float(shared.value) if shared.valid else 0.0,
+            valid=shared.valid,
         )
         self.result = result
         return result
@@ -2147,6 +2180,13 @@ class MeasurementWorkflow:
         if not self._resolved:
             self.resolve()
 
+        # Every run starts from a fresh result table.  A previous frame's
+        # observation must never be reused as this frame's dependency input
+        # (D05): a failed tool has to invalidate the frame, not expose stale
+        # numbers that look current.
+        for label in self._registration_order:
+            self._objects[label].result = None
+
         # Step 1: Compute localization transform
         try:
             self._transform = self._compute_localization_transform(image)
@@ -2181,13 +2221,14 @@ class MeasurementWorkflow:
             try:
                 obj.measure(image)
             except Exception as e:
-                if obj.result is None:
-                    obj.result = GeometricResult(
-                        type=obj.result_type(),
-                        label=label,
-                        valid=False,
-                        meta={"error": str(e), "reason": "measurement raised exception"},
-                    )
+                # Override unconditionally: the stale-result branch this replaces
+                # was exactly the D05 defect.
+                obj.result = GeometricResult(
+                    type=obj.result_type(),
+                    label=label,
+                    valid=False,
+                    meta={"error": str(e), "reason": "measurement raised exception"},
+                )
 
         self._results = {
             label: self._objects[label].result
