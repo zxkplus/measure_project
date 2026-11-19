@@ -183,3 +183,43 @@ def test_light_dots_on_a_dark_board_are_detected(api, space):
     assert result.value.image_points_xy.shape == (20, 2)
     assert result.diagnostics["refined"] is True
     assert result.value.image_points_xy[6] == pytest.approx([60 + 30, 40 + 30], abs=0.2)
+
+
+def test_undistortion_returns_a_complete_inverse_map(api, camera_model):
+    camera = camera_model()
+    distorted = api("measure_calibration", "CameraModel")(
+        camera_id="wide", image_space=camera.image_space,
+        image_size_wh=camera.image_size_wh,
+        matrix=np.array([[260.0, 0.0, 160.0], [0.0, 250.0, 120.0], [0.0, 0.0, 1.0]]),
+        distortion=np.array([-0.28, 0.09, 0.0, 0.0, 0.0]),
+    )
+    rng = np.random.RandomState(5)
+    image = (rng.rand(240, 320, 3) * 255).astype(np.uint8)
+    result = api("measure_calibration", "undistort_image")(image, distorted, alpha=0.0)
+    assert result.pixels.shape == image.shape and result.pixels.dtype == image.dtype
+    assert not np.array_equal(result.pixels, image)
+    assert result.camera_matrix.shape == (3, 3)
+    assert result.inverse_map_x.shape == (240, 320)
+    assert result.inverse_map_y.shape == (240, 320)
+    assert 0 <= result.valid_roi_xywh[0] < 320 and 0 <= result.valid_roi_xywh[1] < 240
+
+
+def test_undistortion_of_a_distortion_free_camera_is_the_identity(api, camera_model):
+    camera = camera_model()
+    image = np.zeros((240, 320), np.uint8)
+    result = api("measure_calibration", "undistort_image")(image, camera, alpha=0.0)
+    # No distortion means the inverse map is the identity grid, so a wrong
+    # direction or a transposed map cannot pass.
+    np.testing.assert_allclose(result.inverse_map_x,
+                               np.tile(np.arange(320.0), (240, 1)), atol=1e-3)
+    np.testing.assert_allclose(result.inverse_map_y,
+                               np.tile(np.arange(240.0)[:, None], (1, 320)), atol=1e-3)
+    np.testing.assert_allclose(result.camera_matrix, camera.matrix, atol=1e-9)
+
+
+def test_undistortion_rejects_a_size_mismatch(api, camera_model):
+    camera = camera_model()
+    with pytest.raises(Exception) as error:
+        api("measure_calibration", "undistort_image")(
+            np.zeros((100, 100), np.uint8), camera)
+    assert "image size" in str(error.value)

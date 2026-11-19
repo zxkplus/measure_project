@@ -11,9 +11,9 @@ from pydantic import Field, model_validator
 
 from measure.computation_types import Space
 from measure.measure_calibration import (
-    BoardSpec, DotDetectionOptions, board_object_points, detect_dot_grid as shared_detect_dot_grid,
+    BoardSpec, CameraModel, DotDetectionOptions, board_object_points,
+    detect_dot_grid as shared_detect_dot_grid, undistort_image as shared_undistort_image,
 )
-from measure.measure_calibration import CameraCalibration as CoreCameraCalibration
 from measure.pixel_calibration import CheckerboardScaleCalibration
 from measure_api.v2.calibration_assets import (
     UNIT_MM, CameraCalibration, CameraParameters, CalibrationApplicability, CalibrationAsset,
@@ -665,18 +665,18 @@ def undistort_image(
         raise ServiceError("calibration.image_size_mismatch",
                            "Decoded image dimensions do not match camera calibration")
     parameters = asset.parameters
-    camera = CoreCameraCalibration.from_dict({
-        "grid_size": [2, 2], "circle_spacing_mm": 1,
-        "K": parameters.camera_matrix, "D": parameters.distortion,
-        "image_size": [size.height, size.width],
-    })
-    corrected = camera.undistort(image, alpha=request.alpha)
-    new_matrix, valid_roi = cv2.getOptimalNewCameraMatrix(
-        camera.K, camera.D, (size.width, size.height), request.alpha,
+    camera = CameraModel(
+        camera_id=asset.applicability.frame,
+        image_space=Space(asset.applicability.frame, "px"),
+        image_size_wh=(size.width, size.height),
+        matrix=np.asarray(parameters.camera_matrix, dtype=np.float64),
+        distortion=np.asarray(parameters.distortion, dtype=np.float64),
     )
-    map_x, map_y = cv2.initUndistortRectifyMap(
-        camera.K, camera.D, None, new_matrix, (size.width, size.height), cv2.CV_32FC1,
-    )
+    undistorted = shared_undistort_image(image, camera, alpha=request.alpha)
+    corrected = undistorted.pixels
+    new_matrix = undistorted.camera_matrix
+    valid_roi = undistorted.valid_roi_xywh
+    map_x, map_y = undistorted.inverse_map_x, undistorted.inverse_map_y
     stream = io.BytesIO()
     np.savez_compressed(stream, source_x=map_x, source_y=map_y)
     writer = ArtifactWriter(context.files, request.output, context.operation_id)

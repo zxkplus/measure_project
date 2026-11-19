@@ -1420,6 +1420,56 @@ def validate_camera_model(camera: CameraModel) -> None:
                              "camera.matrix")
 
 
+@dataclass(frozen=True)
+class Undistortion:
+    """Corrected pixels plus the complete inverse map of one camera."""
+
+    pixels: np.ndarray
+    #: Corrected camera matrix used for both the pixels and the inverse map.
+    camera_matrix: np.ndarray
+    #: Valid destination ``(x, y, width, height)`` after cropping.
+    valid_roi_xywh: Tuple[int, int, int, int]
+    #: Destination-to-source column map.
+    inverse_map_x: np.ndarray
+    #: Destination-to-source row map.
+    inverse_map_y: np.ndarray
+
+
+def undistort_image(image: np.ndarray, camera: CameraModel, *,
+                    alpha: float = 0.0) -> Undistortion:
+    """Remove lens distortion and return the destination-to-source inverse map.
+
+    Args:
+        image: ``uint8`` image whose size matches ``camera.image_size_wh``.
+        camera: Validated pinhole camera with distortion coefficients.
+        alpha: ``0`` keeps only valid pixels, ``1`` keeps every source pixel.
+
+    Returns:
+        Corrected pixels, the corrected camera matrix, the valid destination
+        ROI and the inverse map arrays.
+
+    Raises:
+        ComputationContractError: On an image size mismatch or an alpha outside
+            ``[0, 1]``.
+    """
+    width, height = camera.image_size_wh
+    if image.shape[:2] != (height, width):
+        raise contract_error("contract.invalid_shape",
+                             "image size must match the camera image size", "image")
+    require_finite(alpha, "undistort.alpha")
+    if not 0.0 <= float(alpha) <= 1.0:
+        raise contract_error("contract.invalid_parameter", "alpha must be in [0, 1]", "alpha")
+    matrix, distortion = camera.matrix, camera.distortion
+    corrected_matrix, roi = cv2.getOptimalNewCameraMatrix(
+        matrix, distortion, (width, height), float(alpha))
+    pixels = cv2.undistort(image, matrix, distortion, None, corrected_matrix)
+    map_x, map_y = cv2.initUndistortRectifyMap(
+        matrix, distortion, None, corrected_matrix, (width, height), cv2.CV_32FC1)
+    return Undistortion(pixels=pixels, camera_matrix=corrected_matrix,
+                        valid_roi_xywh=tuple(int(value) for value in roi),
+                        inverse_map_x=map_x, inverse_map_y=map_y)
+
+
 def validate_pose(pose: Pose3D) -> None:
     """Validate that a pose is a proper rigid transform.
 
