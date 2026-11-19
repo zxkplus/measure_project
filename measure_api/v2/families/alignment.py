@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
+import math
 from typing import Annotated, List, Literal, Optional, Union
 
-import cv2
 import numpy as np
 from pydantic import Field, model_validator
 
 from measure.alignment import SimilarityOptions, estimate_similarity as shared_estimate_similarity
-from measure.computation_types import Space
+from measure.computation_types import (
+    ComputationContractError, Space, make_mapping, require_proper_similarity,
+    validate_mapping_matrix,
+)
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.models import (
     CalculationRequest, CoordinateMapping, FileDescriptor, FileReference, OutputSpec,
     Point, StrictModel,
 )
 from measure_api.v2.registry import CalculationContext, Operation
+from measure.computation_types import invert_matrix
+from measure.geometry_mapping import (
+    map_line_coefficients, mapping_rotation_rad, similarity_scale,
+)
+from measure.rectify import ResampleOptions, patch_source_corners, warp_mapped
 from measure_api.v2.families.templates import coordinate_mapping
 
 
@@ -98,41 +106,47 @@ def estimate_similarity(
     """
     source = np.array([[p.x, p.y] for p in request.source_points], np.float64)
     destination = np.array([[p.x, p.y] for p in request.destination_points], np.float64)
-    inliers = np.ones(len(source), bool)
-    try:
-        if request.robust:
-            matrix, mask = cv2.estimateAffinePartial2D(
-                source, destination, method=cv2.RANSAC,
-                ransacReprojThreshold=request.ransac_threshold,
-                maxIters=2000, confidence=0.99,
-            )
-            if matrix is None or mask is None:
-                raise ValueError("No robust model")
-            inliers = mask.reshape(-1).astype(bool)
-        if inliers.sum() < request.minimum_inliers:
-            return SimilarityEstimateResult(valid=False, reason="insufficient_inliers")
-        matrix = _fit_similarity(source[inliers], destination[inliers], request.estimate_scale)
-        observed = source @ matrix[:2, :2].T + matrix[:2, 2]
-        residuals = np.linalg.norm(observed - destination, axis=1)
-        accepted = inliers & (residuals <= request.max_residual)
-        if accepted.sum() < request.minimum_inliers:
-            return SimilarityEstimateResult(valid=False, reason="excessive_residual",
-                                             residuals=residuals.tolist(),
-                                             inliers=accepted.tolist())
-        if not request.robust and not accepted.all():
-            return SimilarityEstimateResult(valid=False, reason="excessive_residual",
-                                             residuals=residuals.tolist(),
-                                             inliers=accepted.tolist())
-        factor = np.linalg.norm(matrix[:2, 0])
-        angle = np.rad2deg(np.arctan2(matrix[1, 0], matrix[0, 0]))
+    fitted = shared_estimate_similarity(
+        source, destination,
+        source=Space(request.source_frame, "px"),
+        destination=Space(request.destination_frame, "px"),
+        options=SimilarityOptions(
+            # The robust route keeps OpenCV's hypothesis search: its inlier
+            # answers are what this API published before the shared estimator
+            # existed, and the refit still runs through the shared solver.
+            method="opencv_ransac" if request.robust else "least_squares",
+            estimate_scale=request.estimate_scale,
+            minimum_inliers=request.minimum_inliers,
+            ransac_threshold=request.ransac_threshold,
+            max_residual=request.max_residual,
+            max_iterations=2000, confidence=0.99,
+        ),
+    )
+    if not fitted.valid:
+        diagnostics = fitted.diagnostics or {}
+        reason = fitted.reason
+        # A residual rejection after the robust stage keeps its historical name.
+        if reason == "insufficient_inliers" and diagnostics.get("stage") == "residual":
+            reason = "excessive_residual"
         return SimilarityEstimateResult(
-            valid=True, mapping=coordinate_mapping(
-                matrix, request.source_frame, request.destination_frame,
-            ), scale=factor, angle_degrees=angle, residuals=residuals.tolist(),
-            inliers=accepted.tolist(), rms_residual=float(np.sqrt(np.mean(residuals[accepted]**2))),
+            valid=False, reason=reason,
+            residuals=[float(value) for value in diagnostics.get("residuals", [])],
+            inliers=[bool(value) for value in diagnostics.get("inliers", [])],
         )
-    except (ValueError, np.linalg.LinAlgError):
-        return SimilarityEstimateResult(valid=False, reason="degenerate_correspondences")
+    value = fitted.value
+    return SimilarityEstimateResult(
+        valid=True,
+        mapping=CoordinateMapping(
+            source_frame=request.source_frame,
+            destination_frame=request.destination_frame, type="similarity",
+            matrix=value.mapping.matrix.tolist(),
+            inverse_matrix=value.mapping.inverse_matrix.tolist(),
+        ),
+        scale=value.scale, angle_degrees=math.degrees(value.angle_rad),
+        residuals=[float(item) for item in value.residuals],
+        inliers=[bool(item) for item in value.inliers],
+        rms_residual=value.rms_residual,
+    )
 
 
 class PointGeometry(StrictModel):
@@ -206,18 +220,21 @@ def validated_matrix(mapping: CoordinateMapping, similarity: bool = False) -> np
         )
     matrix = np.array(mapping.matrix, np.float64)
     inverse = np.array(mapping.inverse_matrix, np.float64)
-    if (matrix.shape != (3, 3) or inverse.shape != (3, 3)
-            or abs(np.linalg.det(matrix)) < 1e-12
+    try:
+        validate_mapping_matrix(matrix, "projective")
+    except ComputationContractError as error:
+        raise ServiceError("transform.invalid",
+                           "Mapping matrix or inverse is inconsistent") from error
+    if (inverse.shape != (3, 3)
             or not np.allclose(matrix @ inverse, np.eye(3), atol=1e-6)):
         raise ServiceError("transform.invalid", "Mapping matrix or inverse is inconsistent")
     if similarity:
-        gram = matrix[:2, :2].T @ matrix[:2, :2]
-        if (not np.allclose(matrix[2], [0, 0, 1], atol=1e-7)
-                or not np.allclose(gram, np.eye(2) * gram[0, 0], atol=1e-7)
-                or np.linalg.det(matrix[:2, :2]) <= 0):
+        try:
+            require_proper_similarity(matrix)
+        except ComputationContractError as error:
             raise ServiceError(
                 "transform.similarity_required", "Geometry requires a similarity mapping",
-            )
+            ) from error
     return matrix
 
 
@@ -250,20 +267,22 @@ def transform_geometry(
                 points=[_map_point(p, matrix) for p in geometry.points],
             ))
         elif geometry.type == "line":
-            coefficients = np.linalg.inv(matrix).T @ [geometry.a, geometry.b, geometry.c]
-            norm = np.linalg.norm(coefficients[:2])
-            if norm < 1e-12:
-                raise ServiceError("transform.line_at_infinity", "Line has no finite mapped normal")
-            results.append(LineGeometry(a=coefficients[0]/norm, b=coefficients[1]/norm,
-                                        c=coefficients[2]/norm))
+            try:
+                coefficients = map_line_coefficients(
+                    [geometry.a, geometry.b, geometry.c], matrix)
+            except ComputationContractError as error:
+                raise ServiceError(
+                    "transform.line_at_infinity", "Line has no finite mapped normal") from error
+            results.append(LineGeometry(a=coefficients[0], b=coefficients[1],
+                                        c=coefficients[2]))
         else:
             validated_matrix(request.mapping, similarity=True)
-            factor = np.linalg.norm(matrix[:2, 0])
+            factor = similarity_scale(matrix)
             center = _map_point(geometry.center, matrix)
             if geometry.type == "circle":
                 results.append(CircleGeometry(center=center, radius=geometry.radius * factor))
             else:
-                angle = np.rad2deg(np.arctan2(matrix[1, 0], matrix[0, 0]))
+                angle = math.degrees(mapping_rotation_rad(matrix))
                 results.append(RectangleGeometry(center=center, width=geometry.width * factor,
                                                   height=geometry.height * factor,
                                                   angle_degrees=geometry.angle_degrees + angle))
@@ -356,20 +375,25 @@ def _warp_alignment(image: np.ndarray, matrix: np.ndarray,
                     request: RigidAlignmentRequest, context: CalculationContext) -> np.ndarray:
     if request.width * request.height > context.settings.max_image_pixels:
         raise ServiceError("alignment.too_large", "Aligned image exceeds configured pixel limit")
+    source_space = Space("source", "px")
+    target_space = Space("aligned", "px")
+    placed = make_mapping(matrix, source=source_space, destination=target_space, kind="affine")
     if request.border_policy == "reject":
-        inverse = np.linalg.inv(matrix)
-        corners = np.array([[0, 0, 1], [request.width-1, 0, 1],
-                            [0, request.height-1, 1], [request.width-1, request.height-1, 1]])
-        points = (inverse @ corners.T).T
-        if (points[:, 0].min() < -1e-6 or points[:, 1].min() < -1e-6
-                or points[:, 0].max() > image.shape[1]-1+1e-6
-                or points[:, 1].max() > image.shape[0]-1+1e-6):
+        corners = patch_source_corners(placed, (request.width, request.height))
+        if (corners[:, 0].min() < -1e-6 or corners[:, 1].min() < -1e-6
+                or corners[:, 0].max() > image.shape[1]-1+1e-6
+                or corners[:, 1].max() > image.shape[0]-1+1e-6):
             raise ServiceError("alignment.outside_image", "Aligned patch includes source border")
-    interpolation = {"nearest": cv2.INTER_NEAREST, "linear": cv2.INTER_LINEAR,
-                     "cubic": cv2.INTER_CUBIC}[request.interpolation]
-    border = cv2.BORDER_REPLICATE if request.border_policy == "replicate" else cv2.BORDER_CONSTANT
-    return cv2.warpAffine(image, matrix[:2], (request.width, request.height), flags=interpolation,
-                          borderMode=border, borderValue=(request.border_value,)*3)
+    warped = warp_mapped(
+        image, placed, (request.width, request.height),
+        options=ResampleOptions(
+            interpolation=request.interpolation,
+            border_mode="replicate" if request.border_policy == "replicate" else "constant",
+            border_value=int(request.border_value),
+            compute_valid_mask=False,
+        ),
+    )
+    return warped.pixels
 
 
 def _commit_alignment(image: np.ndarray, source: FileReference, matrix: np.ndarray,
@@ -385,7 +409,7 @@ def _commit_alignment(image: np.ndarray, source: FileReference, matrix: np.ndarr
     ])
     mapping = coordinate_mapping(matrix, request.initial_mapping.source_frame,
                                  request.initial_mapping.destination_frame)
-    metric = coordinate_mapping(np.linalg.inv(matrix), mapping.destination_frame,
+    metric = coordinate_mapping(invert_matrix(matrix), mapping.destination_frame,
                                 mapping.source_frame)
     metric.details = {"purpose": "Recover actual dimensions in original inspection pixels"}
     return AlignmentResult(valid=True, source=source, image=artifacts[0].file,

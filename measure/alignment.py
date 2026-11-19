@@ -1261,7 +1261,9 @@ class SimilarityOptions:
     """Declared estimator policy for a source-to-destination similarity.
 
     Attributes:
-        method: ``least_squares`` or ``ransac``.
+        method: ``least_squares``, ``ransac`` (this engine's private sampler)
+            or ``opencv_ransac`` (OpenCV's hypothesis search, kept for the
+            callers whose robust answers are pinned to it).
         estimate_scale: Solve for scale; when false the correspondence is
             treated as rigid (scale fixed to one).
         allow_single_translation: Permit an explicitly declared one-point
@@ -1285,7 +1287,7 @@ class SimilarityOptions:
     random_seed: int = 0
 
     def __post_init__(self) -> None:
-        if self.method not in ("least_squares", "ransac"):
+        if self.method not in ("least_squares", "ransac", "opencv_ransac"):
             raise contract_error("contract.invalid_parameter",
                                  f"unknown similarity method {self.method!r}", "options.method")
         if self.minimum_inliers < 1:
@@ -1477,12 +1479,20 @@ def estimate_similarity(
     if count < options.minimum_inliers:
         return _invalid_similarity(destination, "insufficient_inliers")
 
-    if options.method == "ransac":
+    if options.method == "opencv_ransac":
+        matrix, mask, diagnostics = _opencv_ransac_similarity(
+            points_source, points_destination, options,
+        )
+        if matrix is None:
+            return _invalid_similarity(destination, "insufficient_inliers",
+                                       {**diagnostics, "stage": "ransac"})
+    elif options.method == "ransac":
         matrix, mask, diagnostics = _ransac_similarity(
             points_source, points_destination, options,
         )
         if matrix is None:
-            return _invalid_similarity(destination, "insufficient_inliers", diagnostics)
+            return _invalid_similarity(destination, "insufficient_inliers",
+                                       {**diagnostics, "stage": "ransac"})
     else:
         try:
             matrix, _, _ = _solve_similarity(points_source, points_destination,
@@ -1495,7 +1505,9 @@ def estimate_similarity(
         ):
             return _invalid_similarity(
                 destination, "excessive_residual",
-                {"residuals": residuals_all, "inliers": np.zeros(count, dtype=bool)},
+                {"residuals": residuals_all,
+                 "inliers": residuals_all <= options.max_residual,
+                 "stage": "residual"},
             )
         mask = np.ones(count, dtype=bool)
 
@@ -1504,7 +1516,8 @@ def estimate_similarity(
         mask = np.asarray(mask, dtype=bool) & (residuals <= options.max_residual)
     if int(mask.sum()) < options.minimum_inliers:
         return _invalid_similarity(destination, "insufficient_inliers",
-                                   {"residuals": residuals, "inliers": mask})
+                                   {"residuals": residuals, "inliers": mask,
+                                    "stage": "residual"})
     scale = float(math.hypot(matrix[0, 0], matrix[1, 0]))
     angle = math.atan2(matrix[1, 0], matrix[0, 0])
     mapping = make_mapping(matrix, source=source, destination=destination, kind="similarity")
@@ -1513,6 +1526,36 @@ def estimate_similarity(
                             residuals=residuals, inliers=mask, rms_residual=rms)
     diagnostics = {"residuals": residuals, "inliers": mask, "rms_residual": rms}
     return observed(destination, value, diagnostics)
+
+
+def _opencv_ransac_similarity(
+    source: Array, destination: Array, options: SimilarityOptions,
+) -> Tuple[Optional[Array], Optional[Array], dict]:
+    """Take OpenCV's robust hypotheses, then refit with this engine's solver.
+
+    Args:
+        source: ``(N, 2)`` source points.
+        destination: ``(N, 2)`` destination points.
+        options: RANSAC policy.
+
+    Returns:
+        ``(matrix, inlier_mask, diagnostics)``; ``(None, None, diagnostics)``
+        when OpenCV found no model or too few inliers.
+    """
+    affine, mask = cv2.estimateAffinePartial2D(
+        np.asarray(source, dtype=np.float32), np.asarray(destination, dtype=np.float32),
+        method=cv2.RANSAC, ransacReprojThreshold=float(options.ransac_threshold),
+        maxIters=int(options.max_iterations), confidence=float(options.confidence),
+    )
+    if affine is None or mask is None:
+        return None, None, {"ransac_inliers": 0}
+    inliers = np.asarray(mask).reshape(-1).astype(bool)
+    diagnostics = {"ransac_inliers": int(inliers.sum())}
+    if int(inliers.sum()) < options.minimum_inliers:
+        return None, None, diagnostics
+    matrix, _, _ = _solve_similarity(source[inliers], destination[inliers],
+                                     options.estimate_scale)
+    return matrix, inliers, diagnostics
 
 
 def _ransac_similarity(

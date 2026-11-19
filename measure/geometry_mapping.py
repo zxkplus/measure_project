@@ -297,6 +297,30 @@ def _similarity_scale(matrix: Array) -> Optional[float]:
     return math.sqrt(scale_squared)
 
 
+def similarity_scale(matrix: Array) -> Optional[float]:
+    """Return the uniform scale of a similarity matrix, or ``None``.
+
+    Args:
+        matrix: 3x3 homogeneous transform.
+
+    Returns:
+        The positive scale factor when the linear part is a scaled rotation.
+    """
+    return _similarity_scale(np.asarray(matrix, dtype=np.float64))
+
+
+def mapping_rotation_rad(matrix: Array) -> float:
+    """Return the rotation of a mapping's linear part in radians.
+
+    Args:
+        matrix: 3x3 homogeneous transform.
+
+    Returns:
+        The clockwise-positive rotation encoded by the linear part.
+    """
+    return _rotation_angle(np.asarray(matrix, dtype=np.float64))
+
+
 def map_line_coefficients(coefficients: Array, matrix: Array) -> np.ndarray:
     """Transform infinite-line coefficients with ``H^-T`` and renormalise them.
 

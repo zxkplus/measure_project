@@ -289,6 +289,9 @@ class ResampleOptions:
     interpolation: str = "linear"
     border_mode: str = "constant"
     border_value: int = 0
+    #: Compute the per-pixel real-pixel mask. Callers that only need pixels and
+    #: the mapping disable it to keep large outputs off a ``(H, W, 3)`` grid.
+    compute_valid_mask: bool = True
 
     def __post_init__(self) -> None:
         if self.interpolation not in INTERPOLATIONS:
@@ -325,8 +328,13 @@ def _resample(image: np.ndarray, matrix: np.ndarray, size_wh: TraceWh,
         image, np.asarray(matrix, dtype=np.float64)[:2, :], (width, height),
         flags=_CV_INTERPOLATION[options.interpolation],
         borderMode=_CV_BORDER[options.border_mode],
-        borderValue=options.border_value,
+        # A scalar border value is a gray level for every channel; passing the
+        # bare int would make OpenCV fill blue only.
+        borderValue=(options.border_value,) * 4,
     )
+    if not options.compute_valid_mask:
+        return ResampleResult(pixels=pixels, mapping=mapping,
+                              valid_mask=np.ones((height, width), dtype=bool))
     grid_x, grid_y = np.meshgrid(np.arange(width, dtype=np.float64),
                                  np.arange(height, dtype=np.float64))
     homogeneous = np.stack([grid_x, grid_y, np.ones_like(grid_x)], axis=-1)

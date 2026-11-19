@@ -550,6 +550,23 @@ def _normalised_singular_range(matrix: Array) -> Tuple[float, float]:
     return float(singular.min()), float(singular.max())
 
 
+def require_proper_similarity(matrix: Array) -> None:
+    """Validate a non-reflecting similarity: rotation, uniform scale, translation.
+
+    Args:
+        matrix: 3x3 homogeneous transform.
+
+    Raises:
+        ComputationContractError: When the matrix is not an invertible
+            orientation-preserving similarity.
+    """
+    validate_mapping_matrix(matrix, "similarity")
+    linear = np.asarray(matrix, dtype=np.float64)[:2, :2]
+    if float(np.linalg.det(linear)) <= 0.0:
+        raise contract_error("contract.false_mapping_kind",
+                             "matrix reflects rather than rotates", "mapping.kind")
+
+
 def invert_matrix(matrix: Array) -> np.ndarray:
     """Return the inverse of a finite, non-singular 3x3 homogeneous transform.
 
