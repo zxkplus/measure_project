@@ -7,8 +7,12 @@ import cv2
 import numpy as np
 from pydantic import Field
 
+from measure.computation_types import Mapping2D, RotatedBox, Space, make_mapping
+from measure.rectify import (
+    ResampleOptions, crop_region, patch_source_corners, rotated_patch_matrix,
+    scale_to_fit,
+)
 from measure_api.v2.errors import ServiceError
-from measure.rectify import rotated_patch_matrix
 from measure_api.v2.files import ArtifactWriter, image_metadata
 from measure_api.v2.models import (
     CalculationRequest, CoordinateMapping, FileDescriptor, FileReference, ImageMetadata,
@@ -74,13 +78,13 @@ class ImageOutputResult(StrictModel):
     manifest: FileDescriptor
 
 
-def matrix_mapping(
-    matrix: np.ndarray, destination: str, kind: str = "similarity",
+def mapping_payload(
+    mapping: Mapping2D, destination: str, kind: str = "similarity",
 ) -> CoordinateMapping:
-    """Describe an invertible source-to-destination image transformation.
+    """Publish a shared mapping as this API's coordinate-mapping field.
 
     Args:
-        matrix: Finite 3-by-3 forward transform in homogeneous xy coordinates.
+        mapping: Shared source-to-destination mapping.
         destination: Coordinate-frame name assigned to the transformed image or patch.
         kind: Supported transformation or legacy measurement kind to interpret.
 
@@ -89,7 +93,7 @@ def matrix_mapping(
     """
     return CoordinateMapping(
         source_frame="source", destination_frame=destination, type=kind,
-        matrix=matrix.tolist(), inverse_matrix=np.linalg.inv(matrix).tolist(),
+        matrix=mapping.matrix.tolist(), inverse_matrix=mapping.inverse_matrix.tolist(),
     )
 
 
@@ -122,19 +126,17 @@ def preview_image(
         Image data descriptors plus frame provenance and a completion marker.
     """
     image, verified = context.files.read_image(request.image)
-    height, width = image.shape[:2]
-    scale = min(1.0, request.max_width / width, request.max_height / height)
-    new_width, new_height = max(1, round(width * scale)), max(1, round(height * scale))
-    preview = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
-    sx, sy = new_width / width, new_height / height
-    matrix = np.array([[sx, 0, (sx - 1) / 2], [0, sy, (sy - 1) / 2], [0, 0, 1]])
+    preview = scale_to_fit(
+        image, (request.max_width, request.max_height),
+        source=Space("source", "px"), destination=Space("preview", "px"),
+    )
     writer = ArtifactWriter(context.files, request.output, context.operation_id)
     artifacts, manifest = writer.commit(
-        [("preview.png", "preview", "png", encode_png(preview))],
+        [("preview.png", "preview", "png", encode_png(preview.pixels))],
     )
     return ImageOutputResult(
-        metadata=image_metadata(preview, "preview"), source=verified,
-        mapping=matrix_mapping(matrix, "preview", "affine"),
+        metadata=image_metadata(preview.pixels, "preview"), source=verified,
+        mapping=mapping_payload(preview.mapping, "preview", "affine"),
         artifacts=artifacts, manifest=manifest,
     )
 
@@ -182,7 +184,10 @@ def preprocess_image(
     )
     return ImageOutputResult(
         metadata=metadata, source=verified,
-        mapping=matrix_mapping(np.eye(3), "preprocessed", "identity"),
+        mapping=mapping_payload(
+            make_mapping(np.eye(3), source=Space("source", "px"),
+                         destination=Space("preprocessed", "px"), kind="similarity"),
+            "preprocessed", "identity"),
         artifacts=artifacts, manifest=manifest,
     )
 
@@ -244,34 +249,36 @@ def crop_image(
     roi = request.roi
     if roi.width * roi.height > context.settings.max_image_pixels:
         raise ServiceError("image.too_large", "Crop exceeds configured pixel limit")
-    matrix = roi_to_patch_matrix(roi)
-    inverse = np.linalg.inv(matrix)
-    corners = np.array([[0, 0, 1], [roi.width - 1, 0, 1],
-                        [0, roi.height - 1, 1], [roi.width - 1, roi.height - 1, 1]])
-    source = (inverse @ corners.T).T
+    box = RotatedBox(center=(roi.center.x, roi.center.y),
+                     size_wh=(float(roi.width), float(roi.height)),
+                     angle_rad=float(np.deg2rad(roi.angle_degrees)))
+    crop = crop_region(
+        image, box, source=Space("source", "px"), destination=Space("crop", "px"),
+        options=ResampleOptions(
+            interpolation=request.interpolation,
+            border_mode="replicate" if request.border_policy == "replicate" else "constant",
+            border_value=int(request.border_value),
+        ),
+        origin="pixel_center",
+    )
     if request.border_policy == "reject":
+        # The contract rejects a patch whose corner pixels leave the source,
+        # which is stricter than the resample validity mask by half a pixel.
+        source_corners = patch_source_corners(crop.mapping, (roi.width, roi.height))
         tolerance = 1e-8
-        if (source[:, 0].min() < -tolerance or source[:, 1].min() < -tolerance
-                or source[:, 0].max() > image.shape[1] - 1 + tolerance
-                or source[:, 1].max() > image.shape[0] - 1 + tolerance):
+        if (source_corners[:, 0].min() < -tolerance or source_corners[:, 1].min() < -tolerance
+                or source_corners[:, 0].max() > image.shape[1] - 1 + tolerance
+                or source_corners[:, 1].max() > image.shape[0] - 1 + tolerance):
             raise ServiceError(
                 "image.roi_outside", "Rotated crop includes pixels outside the source",
             )
-    modes = {"nearest": cv2.INTER_NEAREST, "linear": cv2.INTER_LINEAR, "cubic": cv2.INTER_CUBIC}
-    border_mode = (
-        cv2.BORDER_REPLICATE if request.border_policy == "replicate" else cv2.BORDER_CONSTANT
-    )
-    cropped = cv2.warpAffine(
-        image, matrix[:2], (roi.width, roi.height), flags=modes[request.interpolation],
-        borderMode=border_mode, borderValue=(request.border_value,) * 3,
-    )
     writer = ArtifactWriter(context.files, request.output, context.operation_id)
     artifacts, manifest = writer.commit([
-        ("crop.png", "crop", "png", encode_png(cropped)),
+        ("crop.png", "crop", "png", encode_png(crop.pixels)),
     ])
     return ImageOutputResult(
-        metadata=image_metadata(cropped, "crop"), source=verified,
-        mapping=matrix_mapping(matrix, "crop"), artifacts=artifacts, manifest=manifest,
+        metadata=image_metadata(crop.pixels, "crop"), source=verified,
+        mapping=mapping_payload(crop.mapping, "crop"), artifacts=artifacts, manifest=manifest,
     )
 
 

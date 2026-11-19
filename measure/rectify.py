@@ -415,6 +415,59 @@ def warp_mapped(
                      source=mapping.source, destination=mapping.destination)
 
 
+def patch_source_corners(mapping: "Mapping2D", size_wh: TraceWh) -> np.ndarray:
+    """Return a patch's four corners in source pixel coordinates.
+
+    Args:
+        mapping: Source-to-patch mapping; its declared inverse is reused.
+        size_wh: Patch size in whole pixels.
+
+    Returns:
+        A ``(4, 2)`` array ordered top-left, top-right, bottom-left, bottom-right.
+    """
+    width, height = int(size_wh[0]), int(size_wh[1])
+    inverse = np.asarray(mapping.inverse_matrix, dtype=np.float64)
+    corners = np.array([[0.0, 0.0, 1.0], [width - 1.0, 0.0, 1.0],
+                        [0.0, height - 1.0, 1.0], [width - 1.0, height - 1.0, 1.0]])
+    mapped = corners @ inverse.T
+    return mapped[:, :2] / mapped[:, 2:3]
+
+
+def scale_to_fit(image: np.ndarray, bounds_wh: TraceWh, *, source: Space,
+                 destination: Space) -> ResampleResult:
+    """Downscale an image to fit bounds, keeping pixel centres aligned.
+
+    Area interpolation is deliberate: this is the antialiased reduction used for
+    display previews, not a nearest or bilinear warp.
+
+    Args:
+        image: Source pixels; never upscaled.
+        bounds_wh: Largest allowed ``(width, height)``.
+        source: Space of the input image.
+        destination: Space of the produced preview.
+
+    Returns:
+        The preview pixels and their source-to-preview mapping.
+    """
+    height, width = image.shape[:2]
+    max_width, max_height = int(bounds_wh[0]), int(bounds_wh[1])
+    if max_width <= 0 or max_height <= 0:
+        raise contract_error("contract.invalid_parameter",
+                             "preview bounds must be positive", "bounds_wh")
+    scale = min(1.0, max_width / width, max_height / height)
+    new_width = max(1, int(round(width * scale)))
+    new_height = max(1, int(round(height * scale)))
+    pixels = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
+    scale_x, scale_y = new_width / width, new_height / height
+    # A factor resize that keeps pixel centres aligned: x' = s * x + (s - 1) / 2.
+    matrix = np.array([[scale_x, 0.0, (scale_x - 1.0) / 2.0],
+                       [0.0, scale_y, (scale_y - 1.0) / 2.0],
+                       [0.0, 0.0, 1.0]], dtype=np.float64)
+    mapping = make_mapping(matrix, source=source, destination=destination, kind="affine")
+    return ResampleResult(pixels=pixels, mapping=mapping,
+                          valid_mask=np.ones((new_height, new_width), dtype=bool))
+
+
 def legacy_roi_to_box(row: float, col: float, width: float, height: float,
                       angle_deg: float) -> RotatedBox:
     """Convert a legacy row/column ROI into a typed rotated box.
