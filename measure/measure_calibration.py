@@ -1347,7 +1347,9 @@ class BoardObservation:
             raise contract_error("contract.invalid_shape",
                                  "image and object point counts must match", "board")
         require_finite(object_points, "board.object_points_xyz")
-        if self.ordering not in ("row_major", "column_major"):
+        # ``explicit_correspondences`` means the caller supplied the pairing
+        # directly instead of relying on a row-major board layout.
+        if self.ordering not in ("row_major", "column_major", "explicit_correspondences"):
             raise contract_error("contract.invalid_parameter",
                                  f"unknown ordering {self.ordering!r}", "board.ordering")
         object.__setattr__(self, "image_points_xy", image_points)

@@ -120,10 +120,18 @@ def build_plane_view(camera: CameraModel, pose: Pose3D, *, plane_space: Space) -
     validate_camera_model(camera)
     validate_pose(pose)
     homography = _homography(pose, camera)
+    # Publish the inverse plane map with a unit homogeneous scale, then derive
+    # the forward map from it, so both matrices are reproducible numbers rather
+    # than arbitrary multiples of each other.
+    corrected_to_plane_matrix = np.linalg.inv(homography)
+    if abs(float(corrected_to_plane_matrix[2, 2])) > 1e-12:
+        corrected_to_plane_matrix = (corrected_to_plane_matrix
+                                     / float(corrected_to_plane_matrix[2, 2]))
     plane_to_corrected = make_mapping(
-        homography, source=plane_space, destination=camera.image_space, kind="projective")
+        np.linalg.inv(corrected_to_plane_matrix), source=plane_space,
+        destination=camera.image_space, kind="projective")
     corrected_to_plane = make_mapping(
-        plane_to_corrected.inverse_matrix, source=camera.image_space,
+        corrected_to_plane_matrix, source=camera.image_space,
         destination=plane_space, kind="projective")
     return PlaneView(camera=camera, board_to_camera=pose, plane_space=plane_space,
                      plane_to_corrected=plane_to_corrected,
@@ -151,6 +159,11 @@ def solve_plane_pose(view: BoardObservation, camera: CameraModel) -> Observation
     )
     if not solved:
         return invalid(camera.image_space, "solver_failed")
+    rotation = cv2.Rodrigues(rvec)[0]
+    translation = np.asarray(tvec, dtype=np.float64).reshape(3)
+    depth = (rotation @ object_points.T + translation[:, None])[2]
+    if bool((depth <= 0.0).any()):
+        return invalid(camera.image_space, "board_behind_camera")
     projected, _ = cv2.projectPoints(object_points, rvec, tvec,
                                      np.asarray(camera.matrix, dtype=np.float64),
                                      np.asarray(camera.distortion, dtype=np.float64))
@@ -158,9 +171,9 @@ def solve_plane_pose(view: BoardObservation, camera: CameraModel) -> Observation
     rms = float(np.sqrt(np.mean(error ** 2)))
     pose = Pose3D(source_frame=view.object_space.frame,
                   destination_frame=camera.image_space.frame, unit=view.object_space.unit,
-                  rotation=cv2.Rodrigues(rvec)[0],
-                  translation=np.asarray(tvec, dtype=np.float64).reshape(3))
-    return observed(camera.image_space, pose, {"rms_error_px": rms})
+                  rotation=rotation, translation=translation)
+    return observed(camera.image_space, pose,
+                    {"rms_error_px": rms, "residuals_px": error})
 
 
 def _plane_bounds(views: Sequence[PlaneView]) -> Tuple[float, float, float, float]:

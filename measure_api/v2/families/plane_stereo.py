@@ -14,6 +14,13 @@ from measure_api.v2.calibration_assets import (
     UNIT_MM, CalibrationApplicability, CalibrationAsset, CalibrationInput, CameraCalibration,
     ImageSize, PhysicalUnit, calibration_digest, check_applicability, load_calibration,
 )
+from measure.computation_types import (
+    ComputationContractError, Space, invert_matrix,
+)
+from measure.measure_calibration import (
+    BoardObservation, CameraModel, Pose3D, point_set_rank,
+)
+from measure.plane_geometry import build_plane_view, solve_plane_pose
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.families.calibrations import (
     BlobOptions, BoardGrid, CalibrationResult, CameraObservation, DotGridRequest, ObjectPoint,
@@ -285,8 +292,8 @@ def observation_arrays(observation: CameraObservation, camera: CameraCalibration
         raise ServiceError("calibration.image_size_mismatch", "Observation dimensions mismatch")
     if (len(obj) != len(img) or len(obj) < 6 or len(np.unique(obj, axis=0)) != len(obj)
             or len(np.unique(img, axis=0)) != len(img) or not np.allclose(obj[:, 2], 0)
-            or np.linalg.matrix_rank(obj[:, :2] - obj[:, :2].mean(axis=0)) != 2
-            or np.linalg.matrix_rank(img - img.mean(axis=0)) != 2):
+            or point_set_rank(obj[:, :2]) != 2
+            or point_set_rank(img) != 2):
         raise ServiceError("calibration.invalid_observation",
                            "Require six unique noncollinear ordered z=0 board correspondences")
     if np.any(img < 0) or np.any(img[:, 0] >= size.width) or np.any(img[:, 1] >= size.height):
@@ -305,19 +312,46 @@ def pose(observation: CameraObservation, camera: CameraCalibration) -> tuple:
         Board-to-camera rotation, translation and per-point reprojection residuals.
     """
     obj, img = observation_arrays(observation, camera)
-    k = np.array(camera.parameters.camera_matrix)
-    d = np.array(camera.parameters.distortion)
     try:
-        success, rv, tv = cv2.solvePnP(obj, img, k, d, flags=cv2.SOLVEPNP_ITERATIVE)
+        solved = solve_plane_pose(
+            BoardObservation(view_id=observation.view_id,
+                             image_space=Space("camera", "px"),
+                             object_space=Space("board", "mm"),
+                             image_size_wh=(camera.applicability.image_size.width,
+                                            camera.applicability.image_size.height),
+                             image_points_xy=img, object_points_xyz=obj,
+                             ordering="explicit_correspondences"),
+            camera_model(camera),
+        )
     except cv2.error as error:
         raise ServiceError("calibration.pose_failed", "Board pose could not be solved") from error
-    if not success or not np.isfinite(rv).all() or not np.isfinite(tv).all():
+    if not solved.valid:
+        if solved.reason == "board_behind_camera":
+            raise ServiceError("calibration.board_behind_camera",
+                               "Solved board is behind camera")
         raise ServiceError("calibration.pose_failed", "Board pose could not be solved")
-    rotation = cv2.Rodrigues(rv)[0]
-    if np.any((rotation @ obj.T + tv)[2] <= 0):
-        raise ServiceError("calibration.board_behind_camera", "Solved board is behind camera")
-    projected = cv2.projectPoints(obj, rv, tv, k, d)[0].reshape(-1, 2)
-    return rotation, tv.reshape(3), np.linalg.norm(projected - img, axis=1)
+    pose = solved.value
+    return (pose.rotation, pose.translation,
+            np.asarray(solved.diagnostics["residuals_px"], dtype=np.float64))
+
+
+def camera_model(camera: CameraCalibration) -> CameraModel:
+    """Build the shared camera model of one calibration asset.
+
+    Args:
+        camera: Applicable intrinsic calibration asset.
+
+    Returns:
+        The equivalent shared pinhole camera in the asset's frame.
+    """
+    size = camera.applicability.image_size
+    return CameraModel(
+        camera_id=camera.applicability.camera_id,
+        image_space=Space(camera.applicability.frame, "px"),
+        image_size_wh=(size.width, size.height),
+        matrix=np.array(camera.parameters.camera_matrix, dtype=np.float64),
+        distortion=np.array(camera.parameters.distortion, dtype=np.float64),
+    )
 
 
 def perspective(points: np.ndarray, matrix: np.ndarray) -> np.ndarray:
@@ -343,12 +377,14 @@ def make_plane_view(
     camera: CameraCalibration, observation: CameraObservation, unit: PhysicalUnit,
 ) -> tuple:
     rotation, translation, errors = pose(observation, camera)
-    k = np.array(camera.parameters.camera_matrix)
-    plane_to_camera = k @ np.column_stack((rotation[:, :2], translation))
-    camera_to_plane = np.linalg.inv(plane_to_camera)
-    if abs(camera_to_plane[2, 2]) > 1e-12:
-        camera_to_plane /= camera_to_plane[2, 2]
-    plane_to_camera = np.linalg.inv(camera_to_plane)
+    shared_view = build_plane_view(
+        camera_model(camera),
+        Pose3D(source_frame="board", destination_frame=camera.applicability.frame,
+               unit=unit, rotation=rotation, translation=translation),
+        plane_space=Space("plane", unit),
+    )
+    plane_to_camera = shared_view.plane_to_corrected.matrix
+    camera_to_plane = shared_view.corrected_to_plane.matrix
     view = PlaneView(
         camera=camera, camera_sha256=calibration_digest(camera), capture_id=observation.view_id,
         source=observation.source, camera_to_plane=camera_to_plane.tolist(),
