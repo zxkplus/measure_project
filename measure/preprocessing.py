@@ -127,6 +127,22 @@ def _gray(image: Array) -> Array:
     return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
 
+def to_display_uint8(pixels: Array) -> Array:
+    """Scale arbitrary numeric pixels into an 8-bit display array.
+
+    Args:
+        pixels: Numeric pixels of any finite dtype; a ``uint8`` input is
+            returned unchanged.
+
+    Returns:
+        The pixels as ``uint8``, min-max normalised when needed.
+    """
+    array = np.ascontiguousarray(pixels)
+    if array.dtype == np.uint8:
+        return array
+    return cv2.normalize(array, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+
 def preprocess_pixels(image: Array, spec: PreprocessingSpec) -> Array:
     """Apply one preprocessing spec and return owned pixels.
 

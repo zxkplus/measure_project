@@ -38,6 +38,7 @@ import cv2
 import numpy as np
 
 from measure.computation_types import invert_matrix
+from measure.preprocessing import to_display_uint8
 from measure_api.v2.families.images import RotatedROI
 from measure_api.v2.families.templates import (
     TemplateBuildRequest,
@@ -138,9 +139,7 @@ def _hash(data: bytes) -> str:
 
 def _encode_png(pixels: np.ndarray) -> bytes:
     """Encode one numeric reference array as lossless PNG bytes."""
-    array = np.ascontiguousarray(pixels)
-    if array.dtype != np.uint8:
-        array = cv2.normalize(array, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    array = to_display_uint8(np.asarray(pixels))
     if array.ndim == 2:
         ok, buffer = cv2.imencode(".png", array)
     else:
