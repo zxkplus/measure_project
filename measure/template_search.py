@@ -148,6 +148,8 @@ class PreparedSupport:
     reference_space: Space
     support_space: Space
     mask: Optional[Array] = None
+    #: Pixel convention of ``pixels``; see :func:`_variant`.
+    origin: str = "continuous"
 
 
 @dataclass(frozen=True)
@@ -172,19 +174,60 @@ class MatchSet:
 
 
 def _variant(pixels: Array, angle_rad: float, scale: float,
-             mask: Optional[Array] = None,
-             inplace: bool = False) -> Tuple[Array, np.ndarray, Optional[Array]]:
-    """Build one rotated/scaled variant and its support-to-variant matrix."""
+             mask: Optional[Array] = None, inplace: bool = False, *,
+             origin: str = "continuous") -> Tuple[Array, np.ndarray,
+                                                  Optional[Array], np.ndarray]:
+    """Build one rotated/scaled variant, its matrix and its support centre.
+
+    The variant is placed on the same pixel grid as the search image: the
+    rotated footprint is snapped to an integer origin (``floor`` of the rotated
+    minimum), so the correlation compares like-sampled pixels. Leaving the
+    origin on the fractional rotated minimum instead misaligns the variant by
+    up to half a pixel, which blurs the score peak and biases the recovered
+    pose.
+
+    Args:
+        pixels: Support pixels.
+        angle_rad: Clockwise pose angle in radians.
+        scale: Dimensionless pose scale.
+        mask: Optional support footprint mask.
+        inplace: Render inside the original canvas instead of a tight box. The
+            historical template search needs the template size preserved.
+        origin: ``continuous`` treats pixel ``i`` as covering ``[i, i + 1)`` and
+            centres the support on ``size / 2``; ``pixel_center`` treats pixel
+            ``i`` as being point ``i`` and centres on ``(size - 1) / 2``.
+
+    Returns:
+        The variant, the support-to-variant matrix, the variant mask (``None``
+        when empty) and the support centre expressed in variant coordinates.
+
+    Raises:
+        ComputationContractError: On an unknown origin policy.
+    """
     height, width = pixels.shape[:2]
-    center_x, center_y = width / 2.0, height / 2.0
     alpha = scale * math.cos(angle_rad)
     beta = scale * math.sin(angle_rad)
     linear = np.array([[alpha, -beta], [beta, alpha]], dtype=np.float64)
-    corners = np.array([[-center_x, -center_y], [center_x, -center_y],
-                        [center_x, center_y], [-center_x, center_y]])
+    if origin == "pixel_center":
+        # Pixel-index geometry: corner 0 is the centre of pixel 0 and the far
+        # corner is the centre of pixel size - 1, an inclusive box.
+        center_x, center_y = (width - 1) / 2.0, (height - 1) / 2.0
+        corners = np.array([[0.0, 0.0], [width - 1.0, 0.0],
+                            [0.0, height - 1.0], [width - 1.0, height - 1.0]])
+        inclusive = 1
+    elif origin == "continuous":
+        # Sampling geometry: pixel i covers [i, i + 1), so the support spans
+        # [0, size] and its centre sits on size / 2.
+        center_x, center_y = width / 2.0, height / 2.0
+        corners = np.array([[0.0, 0.0], [width, 0.0],
+                            [0.0, height], [width, height]])
+        inclusive = 0
+    else:
+        raise contract_error("contract.invalid_parameter",
+                             f"unknown variant origin {origin!r}", "origin")
     rotated = corners @ linear.T
-    min_xy = rotated.min(axis=0)
-    max_xy = rotated.max(axis=0)
+    low = np.floor(rotated.min(axis=0))
+    high = np.ceil(rotated.max(axis=0))
     if inplace:
         # Rotate inside the original canvas, matching the historical template
         # search: the output keeps the template size and centre.
@@ -192,15 +235,17 @@ def _variant(pixels: Array, angle_rad: float, scale: float,
         translation = np.array([center_x, center_y]) - linear @ np.array(
             [center_x, center_y])
     else:
-        out_width = max(1, int(round(max_xy[0] - min_xy[0])))
-        out_height = max(1, int(round(max_xy[1] - min_xy[1])))
-        # v = R (s - center) - min_xy  =>  translation = -R @ center - min_xy
-        translation = -(linear @ np.array([center_x, center_y])) - min_xy
+        out_width = max(1, int(round(high[0] - low[0])) + inclusive)
+        out_height = max(1, int(round(high[1] - low[1])) + inclusive)
+        # The fractional rotated minimum is snapped to a whole pixel so the
+        # variant samples the same grid as the search image.
+        translation = -low
     matrix = np.array([
         [alpha, -beta, translation[0]],
         [beta, alpha, translation[1]],
         [0.0, 0.0, 1.0],
     ], dtype=np.float64)
+    center = matrix @ np.array([center_x, center_y, 1.0], dtype=np.float64)
     variant = cv2.warpAffine(pixels, matrix[:2, :], (out_width, out_height),
                              flags=cv2.INTER_LINEAR,
                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
@@ -212,7 +257,7 @@ def _variant(pixels: Array, angle_rad: float, scale: float,
     variant_mask = (warped_mask > 0.5).astype(np.float32)
     if variant_mask.sum() <= 0:
         variant_mask = None
-    return variant, matrix, variant_mask
+    return variant, matrix, variant_mask, np.asarray(center[:2], dtype=np.float64)
 
 
 def _has_texture(pixels: Array) -> bool:
@@ -272,6 +317,7 @@ def prepare_support(
         reference_space=reference_space,
         support_space=support_space,
         mask=None if spec.mask is None else np.array(spec.mask, dtype=bool, copy=True),
+        origin=spec.origin,
     )
     return observed(support_space, prepared, {"support_shape": support_pixels.shape})
 
@@ -493,6 +539,7 @@ def _search_pyramid(gray: Array, prepared: PreparedSupport, options: SearchOptio
         reference_space=prepared.reference_space,
         support_space=prepared.support_space,
         mask=None,
+        origin=prepared.origin,
     )
     coarse_options = SearchOptions(
         score_threshold=min(options.score_threshold, options.coarse_score_threshold),
@@ -585,7 +632,6 @@ def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
                image_space: Space) -> Observation[MatchSet]:
     """Single-resolution search over the requested pose grid."""
     template = prepared.pixels
-    template = prepared.pixels
     support_height, support_width = template.shape[:2]
     angles = options.angles()
     scales = options.scales()
@@ -605,10 +651,10 @@ def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
 
     for angle in angles:
         for scale in scales:
-            variant, matrix, variant_mask = _variant(
+            variant, matrix, variant_mask, center_offset = _variant(
                 np.asarray(template, dtype=np.float32), angle, scale,
                 None if prepared.mask is None else prepared.mask,
-                inplace=options.inplace_variants)
+                inplace=options.inplace_variants, origin=prepared.origin)
             variant_height, variant_width = variant.shape[:2]
             if variant_height > padded.shape[0] or variant_width > padded.shape[1]:
                 unavailable += 1
@@ -630,31 +676,25 @@ def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
             for x, y, score in peaks:
                 peak_x, peak_y = (_refine_peak(scores, x, y) if options.subpixel
                                   else (float(x), float(y)))
-                center_x = peak_x + variant_width / 2.0 - pad
-                center_y = peak_y + variant_height / 2.0 - pad
+                center_x = peak_x + center_offset[0] - pad
+                center_y = peak_y + center_offset[1] - pad
                 if not (0.0 <= center_x <= gray.shape[1] - 1
                         and 0.0 <= center_y <= gray.shape[0] - 1):
                     continue
-                alpha = scale * math.cos(angle)
-                beta = scale * math.sin(angle)
-                linear = np.array([[alpha, -beta], [beta, alpha]], dtype=np.float64)
-                support_center = np.array([support_width / 2.0, support_height / 2.0])
-                offset = linear @ (np.asarray(prepared.anchor_support) - support_center)
-                anchor_x = center_x + offset[0]
-                anchor_y = center_y + offset[1]
-                support_to_image_matrix = np.array([
-                    [alpha, -beta, center_x - (alpha * support_center[0]
-                                               - beta * support_center[1])],
-                    [beta, alpha, center_y - (beta * support_center[0]
-                                              + alpha * support_center[1])],
-                    [0.0, 0.0, 1.0],
-                ], dtype=np.float64)
-                mapping = make_mapping(support_to_image_matrix,
+                # Reuse the render matrix, shifted to this peak: the reported
+                # pose is then exact by construction instead of re-derived.
+                pose = matrix.copy()
+                pose[0, 2] += peak_x - pad
+                pose[1, 2] += peak_y - pad
+                anchor = pose @ np.array([prepared.anchor_support[0],
+                                          prepared.anchor_support[1], 1.0],
+                                         dtype=np.float64)
+                mapping = make_mapping(pose,
                                        source=prepared.support_space,
                                        destination=image_space, kind="similarity")
                 candidates.append(TemplateMatch(
                     center=(float(center_x), float(center_y)),
-                    anchor=(float(anchor_x), float(anchor_y)),
+                    anchor=(float(anchor[0]), float(anchor[1])),
                     angle_rad=float(angle), scale=float(scale), score=float(score),
                     support_to_image=mapping, peak_xy=(int(x), int(y)),
                     size_wh=(float(variant_width), float(variant_height)),
