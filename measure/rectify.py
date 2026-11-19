@@ -374,7 +374,7 @@ def rotated_patch_matrix(center: Tuple[float, float], size_wh: Tuple[float, floa
 
 def crop_region(
     image: np.ndarray, box: RotatedBox, *, source: Space, destination: Space,
-    options: Optional[ResampleOptions] = None,
+    options: Optional[ResampleOptions] = None, origin: str = "continuous",
 ) -> ResampleResult:
     """Straighten one rotated box with the continuous ``size/2`` local origin.
 
@@ -390,7 +390,7 @@ def crop_region(
     """
     options = options or ResampleOptions()
     width, height = box.size_wh
-    matrix = rotated_patch_matrix(box.center, box.size_wh, box.angle_rad)
+    matrix = rotated_patch_matrix(box.center, box.size_wh, box.angle_rad, origin=origin)
     return _resample(image, matrix, (width, height), options,
                      source=source, destination=destination)
 

@@ -46,6 +46,7 @@ class SupportSpec:
     box: RotatedBox
     anchor_reference: XY
     mask: Optional[Array] = None
+    origin: str = "continuous"
 
     def __post_init__(self) -> None:
         if not isinstance(self.box, RotatedBox):
@@ -53,6 +54,9 @@ class SupportSpec:
                                  "box must be a RotatedBox", "support.box")
         object.__setattr__(self, "anchor_reference",
                            require_finite_xy(self.anchor_reference, "support.anchor_reference"))
+        if self.origin not in ("continuous", "pixel_center"):
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown origin {self.origin!r}", "support.origin")
         if self.mask is not None:
             mask = np.asarray(self.mask)
             height, width = int(self.box.size_wh[1]), int(self.box.size_wh[0])
@@ -246,7 +250,8 @@ def prepare_support(
     pixels = processed
     if pixels.dtype != np.uint8:
         pixels = np.clip(pixels, 0, 255).astype(np.uint8)
-    crop = crop_region(pixels, spec.box, source=reference_space, destination=support_space)
+    crop = crop_region(pixels, spec.box, source=reference_space,
+                       destination=support_space, origin=spec.origin)
     support_pixels = np.array(crop.pixels, dtype=np.float32, copy=True)
     if spec.mask is not None:
         valid_mask = np.array(spec.mask, dtype=bool, copy=True)
