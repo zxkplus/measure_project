@@ -237,6 +237,36 @@ def _angle_range(matching: Dict[str, Any], found: List[CompatibilityDiagnostic])
     return half
 
 
+def _pyramid_enabled(matching: Dict[str, Any]) -> bool:
+    """Whether the GUI model had the pyramid coarse search switched on.
+
+    ``pyramid_decimate`` is only an on/off switch in v1 (the level number is
+    ignored) and the size cap must also be positive for decimation to happen.
+    """
+    try:
+        decimate = int(matching.get("pyramid_decimate", 0) or 0)
+        cap = int(matching.get("pyramid_max_template_size", 400) or 0)
+    except (TypeError, ValueError):
+        return False
+    return decimate > 0 and cap > 0
+
+
+def _pyramid_cap(matching: Dict[str, Any], width: int, height: int) -> int:
+    """Size cap that reproduces the GUI model's decimation in v2.
+
+    v2 always applies ``min(1, cap / longest_side)``; when the GUI had the
+    switch off, lifting the cap above the support keeps the factor at 1.0
+    instead of silently introducing a downsampling step the operator disabled.
+    """
+    cap = int(matching.get("pyramid_max_template_size", 400))
+    enabled = matching.get("pyramid_enabled")
+    if enabled is None:
+        enabled = _pyramid_enabled(matching)
+    if enabled:
+        return cap
+    return max(cap, int(width), int(height))
+
+
 def normalize_manifest(
     manifest: Dict[str, Any], found: Optional[List[CompatibilityDiagnostic]] = None
 ) -> Dict[str, Any]:
@@ -334,12 +364,21 @@ def normalize_manifest(
         "angle_step_deg": float(matching.get("angle_step", 1.0)),
         "max_matches": int(matching.get("max_matches", 1)),
         "overlap": float(matching.get("overlap", 0.3)),
-        "coarse_fine": bool(matching.get("coarse_fine", False)),
+        "coarse_fine": bool(matching.get("coarse_fine", True)),
         "coarse_angle_step_deg": float(matching.get("coarse_angle_step", 5.0)),
         "pyramid_max_template_size": int(matching.get("pyramid_max_template_size", 400)),
+        # v1 disables decimation entirely when the switch is off, while v2's
+        # size cap is always active. Keep the flag so the search builder can
+        # lift the cap above the support and keep factor == 1.0.
+        "pyramid_enabled": _pyramid_enabled(matching),
     }
-    if matching.get("pyramid_decimate"):
-        normalized_matching["pyramid_decimate"] = int(matching["pyramid_decimate"])
+    found.append(diagnostic(
+        "matching.match_score_threshold",
+        "score_estimator_changed",
+        "GUI scores fill rotated corners with the template mean while v2 masks "
+        "them, so the taught match threshold must be re-validated after conversion",
+        "warning",
+    ))
     for name in ("scale_min", "scale_max", "scale_step"):
         if name in matching:
             normalized_matching[name] = float(matching[name])
@@ -665,7 +704,9 @@ class _Builder:
                     angle_step=float(matching["angle_step_deg"]),
                     coarse_fine=bool(matching["coarse_fine"]),
                     coarse_angle_step=float(matching["coarse_angle_step_deg"]),
-                    pyramid_max_template_size=int(matching["pyramid_max_template_size"]),
+                    pyramid_levels=0,
+                    pyramid_max_template_size=_pyramid_cap(
+                        matching, int(roi["width"]), int(roi["height"])),
                     **{
                         name: float(matching[name])
                         for name in ("scale_min", "scale_max", "scale_step")
@@ -713,9 +754,8 @@ class _Builder:
                     angle_max=half,
                     angle_step=float(parameters.get("angle_step", 1.0)),
                     subpixel=bool(parameters.get("use_subpixel", True)),
-                    pyramid_max_template_size=int(
-                        parameters.get("pyramid_max_template_size", 400)
-                    ),
+                    pyramid_levels=0,
+                    pyramid_max_template_size=_pyramid_cap(parameters, size, size),
                 ).model_dump(mode="json"),
             }
         calibration = self.model.config.get("calibration")

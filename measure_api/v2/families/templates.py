@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import io
 import os
+import threading
 import zipfile
-from typing import List, Literal, Optional, Tuple
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, List, Literal, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -21,8 +24,22 @@ from measure_api.v2.preprocessing import (
     Preprocessing, RawPreprocessing, apply_preprocessing, display_preview,
 )
 from measure_api.v2.registry import CalculationContext, Operation
-from measure_api.v2.timing import span, timed
+from measure_api.v2.timing import counter, current, measure, span, timed
 from measure_api.v2.families.images import RotatedROI, encode_png, roi_to_patch_matrix
+
+
+#: Bounded process-local cache of already validated template pixels.
+#:
+#: Worker processes are reused for many operations and every localization call
+#: reloads the identical portable asset: unzip, ``np.load``, ``np.isfinite`` over
+#: up to 6 Mpx and a rigid-mapping check.  Entry identity is
+#: ``(path, modification time, size)``; a rewritten asset changes both, and
+#: ``MEASURE_V2_TEMPLATE_CACHE=0`` disables the cache entirely.
+_TEMPLATE_CACHE: "OrderedDict[Tuple[str, int, int], Tuple[np.ndarray, Any, Any]]" = (
+    OrderedDict())
+_TEMPLATE_CACHE_BYTES = 128 * 1024 * 1024
+_TEMPLATE_CACHE_LOCK = threading.Lock()
+_TEMPLATE_CACHE_STATE = {"bytes": 0}
 
 
 class TemplateMetadata(StrictModel):
@@ -147,11 +164,71 @@ class TemplateInspectionResult(StrictModel):
     template: FileReference
 
 
+def _template_cache_enabled() -> bool:
+    """Report whether validated template pixels may be reused in this process.
+
+    Returns:
+        ``False`` when ``MEASURE_V2_TEMPLATE_CACHE`` names a disabled value.
+    """
+    value = os.getenv("MEASURE_V2_TEMPLATE_CACHE", "1").strip().lower()
+    return value not in {"0", "false", "off", "no"}
+
+
+def _template_cache_key(reference: FileReference, context: CalculationContext):
+    """Return the cache identity of one template file, or ``None`` when unreadable."""
+    try:
+        path = context.files.resolve(reference)
+        status = path.stat()
+    except (OSError, ServiceError):
+        return None
+    return (str(path), int(status.st_mtime_ns), int(status.st_size))
+
+
+def _template_cache_get(key):
+    """Return cached ``(pixels, metadata, verified)`` for ``key``, refreshing its age."""
+    with _TEMPLATE_CACHE_LOCK:
+        entry = _TEMPLATE_CACHE.get(key)
+        if entry is not None:
+            _TEMPLATE_CACHE.move_to_end(key)
+        return entry
+
+
+def _template_cache_drop(key) -> None:
+    """Forget one entry, keeping the byte budget accurate."""
+    with _TEMPLATE_CACHE_LOCK:
+        entry = _TEMPLATE_CACHE.pop(key, None)
+        if entry is not None:
+            _TEMPLATE_CACHE_STATE["bytes"] -= int(entry[0].nbytes)
+
+
+def _template_cache_put(key, pixels: np.ndarray, metadata: TemplateMetadata,
+                        verified: FileReference) -> None:
+    """Publish one validated template while staying inside the byte budget."""
+    size = int(pixels.nbytes)
+    if size > _TEMPLATE_CACHE_BYTES:
+        return
+    with _TEMPLATE_CACHE_LOCK:
+        previous = _TEMPLATE_CACHE.pop(key, None)
+        if previous is not None:
+            _TEMPLATE_CACHE_STATE["bytes"] -= int(previous[0].nbytes)
+        while _TEMPLATE_CACHE and (
+            _TEMPLATE_CACHE_STATE["bytes"] + size > _TEMPLATE_CACHE_BYTES
+        ):
+            _, evicted = _TEMPLATE_CACHE.popitem(last=False)
+            _TEMPLATE_CACHE_STATE["bytes"] -= int(evicted[0].nbytes)
+        _TEMPLATE_CACHE[key] = (pixels, metadata, verified)
+        _TEMPLATE_CACHE_STATE["bytes"] += size
+
+
 @timed("template_load")
 def load_template(
     reference: FileReference, context: CalculationContext,
 ) -> Tuple[np.ndarray, TemplateMetadata, FileReference]:
     """Validate safe non-pickle payloads and actual bounded pixels.
+
+    A template already validated in this worker process for the same file
+    identity is returned without re-reading, re-hashing, decompressing or
+    re-scanning several million pixels.
 
     Args:
         reference: Upstream-owned portable asset file reference.
@@ -160,6 +237,18 @@ def load_template(
     Returns:
         Processed pixels, validated metadata and verified content identity.
     """
+    key = _template_cache_key(reference, context) if _template_cache_enabled() else None
+    if key is not None:
+        cached = _template_cache_get(key)
+        if cached is not None:
+            pixels, metadata, verified = cached
+            expected = reference.sha256
+            if expected is None or expected.lower() == str(verified.sha256).lower():
+                counter("template_cache_hit")
+                return pixels, metadata, verified
+            _template_cache_drop(key)
+    if key is not None:
+        counter("template_cache_miss")
     data, verified = context.files.read_bytes(reference)
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -190,6 +279,10 @@ def load_template(
             raise ValueError("Template support mapping must be a rigid rectification")
     except (ValueError, TypeError, KeyError, IndexError, OSError, zipfile.BadZipFile) as error:
         raise ServiceError("template.invalid", "Invalid or incompatible template asset") from error
+    # Cached pixels are shared by reference: never allow a downstream stage to mutate them.
+    pixels.setflags(write=False)
+    if key is not None:
+        _template_cache_put(key, pixels, metadata, verified)
     return pixels, metadata, verified
 
 
@@ -220,6 +313,43 @@ def default_fine_policy() -> str:
     """
     value = os.getenv("MEASURE_V2_TEMPLATE_FINE_POLICY", "").strip().lower()
     return value if value in {"neighborhood", "whole"} else "neighborhood"
+
+
+def default_fine_candidates() -> Optional[int]:
+    """Return the deployment default for how many neighborhoods a fine search refines.
+
+    The coarse stage keeps every peak (``max_matches=0``) so a true target is
+    never dropped by a global top-five cut, and the fine stage then rescans all
+    of them at full resolution.  Bounding that set is a substantial saving on a
+    symmetric part searched over 360 degrees, but it is a cost/accuracy
+    trade-off that must be validated per model: equal-looking coarse peaks can
+    rank within a hundredth of each other, and a cut can then report a
+    different valid rotation than the full rescan (observed on the imported
+    GUI-template acceptance case, where a 180 degree pose flipped -145 to
+    -140).
+
+    Returns:
+        ``MEASURE_V2_TEMPLATE_FINE_CANDIDATES`` when it names a positive bound,
+        otherwise ``None`` (refine every neighborhood, the historical behaviour).
+    """
+    value = os.getenv("MEASURE_V2_TEMPLATE_FINE_CANDIDATES", "").strip().lower()
+    if value.isdigit() and int(value) > 0:
+        return int(value)
+    return None
+
+
+def search_threads() -> int:
+    """Return how many pose variants one operation may evaluate concurrently.
+
+    Returns:
+        ``MEASURE_V2_SEARCH_THREADS`` bounded to ``1..16``; ``1`` keeps the
+        previous single-threaded behaviour.
+    """
+    try:
+        value = int(os.getenv("MEASURE_V2_SEARCH_THREADS", "1"))
+    except ValueError:
+        return 1
+    return max(1, min(value, 16))
 
 
 class SearchRegion(StrictModel):
@@ -254,6 +384,12 @@ class TemplateSearch(StrictModel):
     # None resolves to MEASURE_V2_TEMPLATE_FINE_POLICY (default "neighborhood").
     fine_search_policy: Optional[Literal["neighborhood", "whole"]] = None
     fine_search_expand_px: int = Field(default=24, ge=0, le=4096)
+    # None refines every coarse neighborhood (the pre-change cost); a positive
+    # bound is a cost/accuracy trade-off validated per model.
+    fine_candidates: Optional[int] = Field(default=None, ge=1, le=1000)
+    # "dense" keeps the request's angle grid; "hierarchical" samples the same
+    # window coarsely and refines only around its best pose.
+    fine_angle_policy: Literal["dense", "hierarchical"] = "dense"
 
     def resolved_fine_policy(self) -> str:
         """Return the effective fine-search policy for this request.
@@ -263,6 +399,23 @@ class TemplateSearch(StrictModel):
             full-search-area rescans).
         """
         return self.fine_search_policy or default_fine_policy()
+
+    def resolved_fine_candidates(self) -> Optional[int]:
+        """Return how many coarse neighborhoods the fine stage may refine.
+
+        Every coarse neighborhood was previously rescanned at full resolution
+        even when ``max_matches`` asked for one target: a symmetric part under a
+        360 degree search produced six windows and 126 full-resolution
+        correlations for a single result.
+
+        Returns:
+            An upper bound on refined neighborhoods, or ``None`` to refine all.
+        """
+        if self.max_matches == 0:
+            return None
+        if self.fine_candidates is not None:
+            return self.fine_candidates
+        return default_fine_candidates()
 
     @model_validator(mode="after")
     def validate_search(self) -> TemplateSearch:
@@ -392,9 +545,10 @@ def _variant(pixels: np.ndarray, angle: float, scale: float,
         return None, None, None, size
     matrix = np.eye(3)
     matrix[:2, :2], matrix[:2, 2] = linear, -low
-    variant = cv2.warpAffine(pixels.astype(np.float32), matrix[:2], (width, height))
-    mask = cv2.warpAffine(np.ones((h, w), np.uint8), matrix[:2], (width, height),
-                          flags=cv2.INTER_NEAREST)
+    with measure("variant_render"):
+        variant = cv2.warpAffine(pixels.astype(np.float32), matrix[:2], (width, height))
+        mask = cv2.warpAffine(np.ones((h, w), np.uint8), matrix[:2], (width, height),
+                              flags=cv2.INTER_NEAREST)
     return variant, mask, matrix, size
 
 
@@ -432,8 +586,16 @@ def _scan(search: np.ndarray, pixels: np.ndarray, options: TemplateSearch,
     # A full support mask is ordinary NCC; OpenCV's masked path is much slower.
     if np.all(mask):
         mask = None
-    scores = cv2.matchTemplate(search.astype(np.float32), variant,
-                               cv2.TM_CCOEFF_NORMED, mask=mask)
+    # One contiguous float32 window is reused for every pose: converting it per
+    # evaluation copied the whole window (tens of megabytes on full-resolution
+    # rescans) once for each angle in the grid.
+    area = np.ascontiguousarray(search, dtype=np.float32)
+    with measure("ncc"):
+        scores = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED, mask=mask)
+    counter("ncc_evaluations")
+    counter("ncc_positions", float(scores.size))
+    counter("ncc_template_pixels", float(w * h))
+    counter("ncc_masked" if mask is not None else "ncc_unmasked")
     # Masked NCC can divide by zero on constant backgrounds. They are invalid candidates.
     scores[~np.isfinite(scores)] = -1
     settings = options.model_copy(update={"score_threshold": (
@@ -445,6 +607,66 @@ def _scan(search: np.ndarray, pixels: np.ndarray, options: TemplateSearch,
         pose[:2, 2] += [x + origin[0], y + origin[1]]
         result.append((score, angle, scale, pose))
     return result
+
+
+#: Upper bound on the working set a threaded pose grid may hold at once.
+_POSE_GRID_MEMORY_BYTES = 768 * 1024 * 1024
+
+
+def _scan_grid(search: np.ndarray, pixels: np.ndarray, options: TemplateSearch,
+               poses: List[Tuple[float, float]], origin: Tuple[int, int] = (0, 0),
+               threshold: Optional[float] = None) -> Tuple[list, list]:
+    """Correlate independent pose variants over one search area.
+
+    Pose variants share the search window and differ only by support rotation,
+    so they can be evaluated concurrently without changing the result: blocks
+    are merged in pose order and the final selection sorts by score.
+
+    Args:
+        search: Search-area pixels.
+        pixels: Rectified support pixels.
+        options: Search controls.
+        poses: ``(angle, scale)`` variants in output priority order.
+        origin: Search-area origin in the parent frame.
+        threshold: Optional score threshold override for every variant.
+
+    Returns:
+        ``(candidates, skipped)`` merged in pose order.
+    """
+    recorder = current()
+
+    def evaluate(target: list, misses: list, angle: float, scale: float) -> None:
+        if recorder is None:
+            target.extend(_scan(search, pixels, options, angle, scale, origin,
+                                threshold=threshold, skipped=misses))
+            return
+        # A worker thread starts with an empty context: re-install the operation
+        # recorder so pose spans and NCC counters survive the fan-out.
+        with recorder.activate():
+            target.extend(_scan(search, pixels, options, angle, scale, origin,
+                                threshold=threshold, skipped=misses))
+
+    if len(poses) > 1:
+        threads = search_threads()
+        working_set = int(search.nbytes) + int(pixels.nbytes)
+        if threads > 1 and working_set > 0:
+            threads = max(1, min(threads, _POSE_GRID_MEMORY_BYTES // working_set))
+        if threads > 1:
+            counter("pose_batches_parallel")
+            blocks: List[List] = [[] for _ in poses]
+            misses: List[List] = [[] for _ in poses]
+            with ThreadPoolExecutor(max_workers=threads, thread_name_prefix="pose-grid") as pool:
+                futures = [pool.submit(evaluate, blocks[index], misses[index], angle, scale)
+                           for index, (angle, scale) in enumerate(poses)]
+                for future in futures:
+                    future.result()
+            return ([candidate for block in blocks for candidate in block],
+                    [entry for group in misses for entry in group])
+    found: List = []
+    skipped: List = []
+    for angle, scale in poses:
+        evaluate(found, skipped, angle, scale)
+    return found, skipped
 
 
 @timed("match_suppression")
@@ -551,12 +773,24 @@ def _fine_window(search: np.ndarray, pixels: np.ndarray, center: tuple,
     window = _local_window(search, center, _fine_radius(pixels, options))
     x0, y0, x1, y1 = (int(value) for value in window)
     area = search[y0:y1, x0:x1]
-    skipped = []
-    refined = []
-    for fine_angle in angles:
-        for fine_scale in scales:
-            refined.extend(_scan(area, pixels, options, fine_angle, fine_scale, (x0, y0),
-                                 skipped=skipped))
+    poses = [(angle, scale) for angle in angles for scale in scales]
+    refined, skipped = [], []
+    if options.fine_angle_policy == "hierarchical" and len(poses) > 4:
+        stride = max(2, int(round(len(poses) ** 0.5)))
+        refined, skipped = _scan_grid(area, pixels, options, poses[::stride], (x0, y0))
+        if refined:
+            best = max(refined, key=lambda item: item[0])[1]
+            step = options.angle_step * stride
+            low = max(min(angles), best - step)
+            high = min(max(angles), best + step)
+            window_poses = [(angle, scale) for angle in _grid(low, high, options.angle_step)
+                            for scale in scales]
+            counter("fine_poses_refined", float(len(window_poses)))
+            dense, dense_skipped = _scan_grid(area, pixels, options, window_poses, (x0, y0))
+            refined = refined + dense
+            skipped = skipped + dense_skipped
+    else:
+        refined, skipped = _scan_grid(area, pixels, options, poses, (x0, y0))
     if skipped:
         if not refined:
             # Nothing fits this neighborhood; surface it rather than a silent no_match.
@@ -568,6 +802,79 @@ def _fine_window(search: np.ndarray, pixels: np.ndarray, center: tuple,
             skipped_poses.extend(skipped)
     touches_border = x0 == 0 or y0 == 0 or x1 == search.shape[1] or y1 == search.shape[0]
     return refined, (x0, y0, x1, y1), touches_border
+
+
+#: Decimated supports are pure functions of (template pixels, factor); a worker
+#: process reuses them across operations without changing a single sample.
+_COARSE_TEMPLATE_CACHE: "OrderedDict[Tuple[Any, float], np.ndarray]" = OrderedDict()
+_COARSE_TEMPLATE_LIMIT = 8
+
+
+def _coarse_template_cached(key, factor: float) -> Optional[np.ndarray]:
+    """Return a previously decimated support for ``(template key, factor)``."""
+    if key is None:
+        return None
+    entry = _COARSE_TEMPLATE_CACHE.get((key, factor))
+    if entry is not None:
+        _COARSE_TEMPLATE_CACHE.move_to_end((key, factor))
+    return entry
+
+
+def _coarse_template_store(key, factor: float, pixels: np.ndarray) -> None:
+    """Remember one decimated support inside the bounded process cache."""
+    if key is None:
+        return
+    _COARSE_TEMPLATE_CACHE[(key, factor)] = pixels
+    while len(_COARSE_TEMPLATE_CACHE) > _COARSE_TEMPLATE_LIMIT:
+        _COARSE_TEMPLATE_CACHE.popitem(last=False)
+
+
+def _decimate(pixels: np.ndarray, search: np.ndarray, factor: float,
+              template_key: Any = None) -> tuple:
+    """Downscale the support and the search area for the coarse pose scan.
+
+    Both images are low-passed with ``sigma = 0.5 / factor`` before decimation,
+    which is what keeps odd-pixel translations correlate-able.  ``INTER_AREA``
+    averaging removes this pass at a third of the cost but aliases the phase of
+    high-frequency supports: on the acceptance corpus the correlation peak fell
+    from 0.65 to 0.27 and coarse detection failed, so the anti-aliased path
+    stays.  The *support* half of the work is a pure function of the template
+    and the factor, so it is cached across calls.
+
+    Args:
+        pixels: Rectified support pixels.
+        search: Search-area pixels.
+        factor: Decimation factor in ``(0, 1)``.
+        template_key: Process-local template identity for the decimated-support
+            cache, or ``None`` to always recompute.
+
+    Returns:
+        ``(coarse_pixels, coarse_search, support_map, search_map, scheme)``
+        where each 3x3 map takes full-resolution coordinates to that coarse
+        frame.
+    """
+    height, width = pixels.shape[:2]
+    affine = np.array([[factor, 0, (factor - 1) / 2],
+                       [0, factor, (factor - 1) / 2]])
+    mapping = np.array([[factor, 0, (factor - 1) / 2],
+                        [0, factor, (factor - 1) / 2], [0, 0, 1]])
+    coarse_pixels = _coarse_template_cached(template_key, factor)
+    if coarse_pixels is None:
+        with measure("pyramid_blur"):
+            smooth_pixels = cv2.GaussianBlur(pixels, (0, 0), 0.5 / factor)
+        with measure("pyramid_warp"):
+            coarse_pixels = cv2.warpAffine(
+                smooth_pixels, affine, (round(width * factor), round(height * factor)))
+        _coarse_template_store(template_key, factor, coarse_pixels)
+    else:
+        counter("pyramid_template_cache_hit")
+    with measure("pyramid_blur"):
+        smooth_search = cv2.GaussianBlur(search, (0, 0), 0.5 / factor)
+    with measure("pyramid_warp"):
+        coarse_search = cv2.warpAffine(
+            smooth_search, affine,
+            (round(search.shape[1] * factor), round(search.shape[0] * factor)))
+    return coarse_pixels, coarse_search, mapping, mapping, "blur"
 
 
 @timed("template_match")
@@ -601,45 +908,54 @@ def match_template(
     factor = min(1.0, max(factor, min(1.0, 6.0 / min(h, w))))
     coarse_pixels = pixels
     coarse_search = search
+    support_map = np.eye(3)
+    search_map = np.eye(3)
+    resample = "none"
     if factor < 1:
-        # Keep exact isotropic center mapping through warpAffine instead of rounded resize axes.
-        matrix = np.array([[factor, 0, (factor - 1) / 2], [0, factor, (factor - 1) / 2]])
-        # Anti-alias both images before decimation so odd-pixel translations retain correlation.
-        sigma = 0.5 / factor
-        smooth_pixels = cv2.GaussianBlur(pixels, (0, 0), sigma)
-        smooth_search = cv2.GaussianBlur(search, (0, 0), sigma)
-        coarse_pixels = cv2.warpAffine(
-            smooth_pixels, matrix, (round(w*factor), round(h*factor)),
-        )
-        coarse_search = cv2.warpAffine(
-            smooth_search, matrix,
-            (round(search.shape[1]*factor), round(search.shape[0]*factor)),
-        )
+        with span("pyramid_prepare"):
+            (coarse_pixels, coarse_search,
+             support_map, search_map, resample) = _decimate(
+                pixels, search, factor,
+                _template_cache_key(request.template, context)
+                if _template_cache_enabled() else None)
     astep = options.coarse_angle_step if options.coarse_fine else options.angle_step
     sstep = options.coarse_scale_step if options.coarse_fine else options.scale_step
-    candidates = []
+    coarse_poses = [(angle, scale)
+                    for angle in _grid(options.angle_min, options.angle_max, astep)
+                    for scale in _grid(options.scale_min, options.scale_max, sstep)]
+    counter("coarse_poses", float(len(coarse_poses)))
     coarse_threshold = min(options.score_threshold, options.coarse_score_threshold) if (
         factor < 1 or options.coarse_fine
     ) else options.score_threshold
     with span("coarse_search"):
-        for angle in _grid(options.angle_min, options.angle_max, astep):
-            for scale in _grid(options.scale_min, options.scale_max, sstep):
-                candidates.extend(_scan(coarse_search, coarse_pixels, options, angle, scale,
-                                        threshold=coarse_threshold))
+        candidates, _ = _scan_grid(coarse_search, coarse_pixels, options, coarse_poses,
+                                   threshold=coarse_threshold)
     if factor < 1:
-        resize = np.array([[factor, 0, (factor - 1)/2],
-                           [0, factor, (factor - 1)/2], [0, 0, 1]])
-        candidates = [(score, angle, scale, np.linalg.inv(resize) @ matrix @ resize)
+        candidates = [(score, angle, scale,
+                       np.linalg.inv(search_map) @ matrix @ support_map)
                       for score, angle, scale, matrix in candidates]
     fine_windows = []
     skipped_poses = []
     bounded_outside = False
+    refined_neighborhoods = 0
+    available_neighborhoods = 0
+    fine_poses_per_neighborhood = 0
+    fine_candidates: Optional[int] = None
     if options.coarse_fine or factor < 1:
-        # Coarse candidates locate target neighborhoods; none is lost by a global top-five limit.
+        # Coarse candidates locate target neighborhoods; the requested match count
+        # bounds how many of them deserve a full-resolution rescan.
         coarse_options = options.model_copy(update={"max_matches": 0})
         neighborhoods = _suppress(candidates, pixels, coarse_options)
+        available_neighborhoods = len(neighborhoods)
+        fine_candidates = options.resolved_fine_candidates()
+        if fine_candidates is not None and available_neighborhoods > fine_candidates:
+            neighborhoods = neighborhoods[:fine_candidates]
+        refined_neighborhoods = len(neighborhoods)
+        counter("fine_neighborhoods", float(available_neighborhoods))
+        counter("fine_neighborhoods_refined", float(refined_neighborhoods))
         policy = options.resolved_fine_policy()
         refined = []
+        whole_area = np.ascontiguousarray(search) if policy == "whole" else None
         with span("fine_search"):
             for _, angle, scale, matrix in neighborhoods:
                 center = matrix @ [(w-1)/2, (h-1)/2, 1]
@@ -649,6 +965,10 @@ def match_template(
                 scales = (_grid(max(options.scale_min, scale-sstep),
                                 min(options.scale_max, scale+sstep), options.scale_step)
                           if options.coarse_fine else [scale])
+                poses = [(fine_angle, fine_scale)
+                         for fine_angle in angles for fine_scale in scales]
+                fine_poses_per_neighborhood = len(poses)
+                counter("fine_poses", float(len(poses)))
                 if policy == "whole":
                     # Legacy: rescan the whole search area; the pose center only labels it.
                     if not fine_windows:
@@ -656,12 +976,11 @@ def match_template(
                             "angle": angle, "x": 0, "y": 0,
                             "width": int(search.shape[1]), "height": int(search.shape[0]),
                         })
-                    for fine_angle in angles:
-                        for fine_scale in scales:
-                            refined.extend(_scan(search, pixels, options, fine_angle, fine_scale,
-                                                 (0, 0), skipped=skipped_poses))
+                    found, missed = _scan_grid(whole_area, pixels, options, poses, (0, 0))
+                    refined.extend(found)
+                    skipped_poses.extend(missed)
                     # Variants larger than the search area are clipped here (legacy behaviour).
-                    bounded_outside = bounded_outside or bool(skipped_poses)
+                    bounded_outside = bounded_outside or bool(missed)
                     continue
                 local, window, touches_border = _fine_window(
                     search, pixels, center, angles, scales, options, skipped_poses)
@@ -694,6 +1013,16 @@ def match_template(
         template=template, matches=matches,
         diagnostics={"pyramid_scale": factor, "preprocessing": metadata.preprocessing.type,
                      "metric_frame": "inspection", "normalization_recovers_size": True,
+                     "search_plan": {
+                         "resample": resample,
+                         "coarse_poses": len(coarse_poses),
+                         "fine_poses_per_neighborhood": fine_poses_per_neighborhood,
+                         "neighborhoods_available": available_neighborhoods,
+                         "neighborhoods_refined": refined_neighborhoods,
+                         "fine_candidates": fine_candidates,
+                         "fine_angle_policy": options.fine_angle_policy,
+                         "threads": search_threads(),
+                     },
                      "fine_search": {"policy": fine_policy, "neighborhood_radius": radius,
                                      "expand_px": options.fine_search_expand_px,
                                      "windows": fine_windows,

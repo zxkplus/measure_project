@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from measure_api.v2.timing import timed, span
+from measure_api.v2.timing import counter, measure, timed
 
 import hashlib
-import io
 import struct
 import uuid
 import fcntl
 import json
 import os
 import shutil
+import zlib
 from collections import OrderedDict
 from pathlib import Path
 from contextlib import contextmanager
-from typing import Iterator, Any, List, Tuple
+from typing import Dict, Iterator, Any, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -27,6 +27,39 @@ from measure_api.v2.models import (
     FileDescriptor, FileReference, ImageMetadata, OutputSpec, ServiceSettings,
 )
 from measure_api.v2.versions import decoder_identity
+
+
+#: Size of the CRC32 + payload-length trailer appended to each cache file.
+_CACHE_TRAILER = 8
+
+
+class _ChecksumWriter:
+    """File-like wrapper that computes a CRC32 while ``np.save`` writes."""
+
+    def __init__(self, handle: Any) -> None:
+        self.handle = handle
+        self.checksum = 0
+
+    def write(self, data: Any) -> int:
+        """Write bytes and fold them into the running checksum."""
+        self.checksum = zlib.crc32(data, self.checksum)
+        return self.handle.write(data)
+
+    def flush(self) -> None:
+        """Flush the wrapped handle."""
+        self.handle.flush()
+
+
+def _cache_writes_enabled() -> bool:
+    """Report whether decoded pixels may be published to the disk cache.
+
+    Returns:
+        ``False`` when ``MEASURE_V2_CACHE_WRITE`` names a disabled value; writes
+        stay optional because a one-shot image pays the publish cost once and
+        never reads it back.
+    """
+    value = os.getenv("MEASURE_V2_CACHE_WRITE", "1").strip().lower()
+    return value not in {"0", "false", "off", "no"}
 
 
 class OperationImages:
@@ -68,10 +101,12 @@ class SharedFiles:
                             "gray_conversions": 0, "input_read_ms": 0.0,
                             "file_read_ms": 0.0, "verified_bytes": 0,
                             "decode_ms": 0.0, "cache_read_ms": 0.0,
-                            "cache_lock_wait_ms": 0.0}
+                            "cache_writes": 0, "cache_lock_wait_ms": 0.0}
         self.image_cache = image_cache if image_cache is not None else OperationImages(
             min(settings.cache_max_bytes, settings.max_worker_memory_bytes // 4))
         self._decoder = None
+        # Digest memo for repeated reads of one unchanged file inside one operation.
+        self._digests: Dict[Tuple[str, int, int], str] = {}
 
     def resolve(self, reference: FileReference, write: bool = False) -> Path:
         """Resolve symlinks before permitting any access to a shared pathname.
@@ -130,14 +165,42 @@ class SharedFiles:
             raise ServiceError("file.too_large", "Input exceeds configured file size limit")
         if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
             raise ServiceError("file.changed", "Input changed while being read", 409)
-        digest = hashlib.sha256(data).hexdigest()
+        digest = self._content_digest(path, before, data)
         if reference.sha256 is not None and reference.sha256.lower() != digest:
             raise ServiceError(
                 "file.digest_mismatch", "Input does not match its expected SHA-256", 409,
             )
         self.cache_stats["file_read_ms"] += (monotonic_now() - started) * 1000
         self.cache_stats["verified_bytes"] += len(data)
+        counter("verify_bytes", len(data))
         return data, reference.model_copy(update={"sha256": digest})
+
+    def _content_digest(self, path: Path, status: os.stat_result, data: bytes) -> str:
+        """Return the SHA-256 of one stable read, reusing an unchanged file's digest.
+
+        An operation is its own trust boundary: a file already hashed at the same
+        resolved path, modification time and size cannot have changed without the
+        ``fstat`` comparison above noticing, so the second hash of a 20 MPx input
+        is pure cost.
+
+        Args:
+            path: Resolved source path.
+            status: ``fstat`` taken immediately before the read completed.
+            data: Bytes read from that descriptor.
+
+        Returns:
+            Hex SHA-256 of ``data``.
+        """
+        key = (str(path), int(status.st_mtime_ns), int(status.st_size))
+        cached = self._digests.get(key)
+        if cached is not None:
+            counter("digest_reuse")
+            return cached
+        with measure("verify_hash"):
+            digest = hashlib.sha256(data).hexdigest()
+        if len(self._digests) < 256:
+            self._digests[key] = digest
+        return digest
 
     @timed("image_decode_cache")
     def read_image(self, reference: FileReference) -> Tuple[np.ndarray, FileReference]:
@@ -169,6 +232,7 @@ class SharedFiles:
         if image is not None:
             self.cache_stats["hits"] += 1
             self.cache_stats["memory_hits"] += 1
+            counter("memory_hit")
         else:
             image = self._cached_image(key, data)
         if image is None:
@@ -177,6 +241,8 @@ class SharedFiles:
             raise ServiceError("image.unsupported_pixels", "Expected GRAY8 or three-channel BGR8")
         if image.shape[0] * image.shape[1] > self.settings.max_image_pixels:
             raise ServiceError("image.too_large", "Image exceeds configured pixel limit")
+        counter("image_read")
+        counter("image_bytes", int(image.nbytes))
         return self.image_cache.put(key, image), verified
 
     @timed("grayscale")
@@ -199,62 +265,135 @@ class SharedFiles:
                    and self.settings.state_directory is not None)
         if not enabled:
             self.cache_stats["misses"] += 1
-            started = monotonic_now()
-            image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED)
-            self.cache_stats["decode_ms"] += (monotonic_now() - started) * 1000
-            return image
+            counter("cache_miss")
+            return self._decode(data)
         directory = self.settings.state_directory / "decoded-cache"
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / (key + ".cache")
         # Immutable atomic cache files remain readable through an open descriptor on eviction.
-        started = monotonic_now()
-        try:
-            blob = path.read_bytes()
-            if hashlib.sha256(blob[32:]).digest() == blob[:32]:
-                image = np.load(io.BytesIO(blob[32:]), allow_pickle=False)
-                self.cache_stats["hits"] += 1
-                self.cache_stats["cache_read_ms"] += (monotonic_now() - started) * 1000
-                try:
-                    os.utime(path, None)
-                except FileNotFoundError:
-                    pass
-                return image
-        except (ValueError, OSError):
-            pass
-        # Decode outside the quota/publication lock so unrelated images can proceed.
-        started = monotonic_now()
-        image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED)
-        self.cache_stats["decode_ms"] += (monotonic_now() - started) * 1000
-        self.cache_stats["misses"] += 1
+        with measure("cache_read"):
+            image = self._read_cached(path)
+        if image is not None:
+            self.cache_stats["hits"] += 1
+            counter("cache_hit")
+            return image
+        image = self._decode(data)
         if image is None:
             return image
-        buffer = io.BytesIO()
-        np.save(buffer, image, allow_pickle=False)
-        encoded = buffer.getvalue()
-        blob = hashlib.sha256(encoded).digest() + encoded
-        waiting = monotonic_now()
-        with (directory / ".lock").open("a+b") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            self.cache_stats["cache_lock_wait_ms"] += (monotonic_now() - waiting) * 1000
-            if len(blob) <= self.settings.cache_max_bytes:
-                entries = sorted(directory.glob("*.cache"),
-                                 key=lambda item: item.stat().st_mtime_ns)
-                # Replace the same key without counting its existing bytes twice.
-                entries = [item for item in entries if item != path]
-                total = sum(item.stat().st_size for item in entries)
-                while entries and (len(entries) >= self.settings.cache_max_entries
-                                   or total + len(blob) > self.settings.cache_max_bytes):
-                    oldest = entries.pop(0)
-                    total -= oldest.stat().st_size
-                    oldest.unlink()
-                    self.cache_stats["evictions"] += 1
-                stage = directory / (uuid.uuid4().hex + ".partial")
-                try:
-                    stage.write_bytes(blob)
-                    os.replace(stage, path)
-                finally:
-                    stage.unlink(missing_ok=True)
+        if _cache_writes_enabled():
+            with measure("cache_write"):
+                self._write_cached(directory, path, image)
+        return image
+
+    def _decode(self, data: bytes) -> np.ndarray:
+        """Decode one verified payload, counting the decoder's share of the call."""
+        started = monotonic_now()
+        with measure("decode"):
+            image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED)
+        self.cache_stats["decode_ms"] += (monotonic_now() - started) * 1000
+        counter("decode_count")
+        self.cache_stats["misses"] += 1
+        counter("cache_miss")
+        return image
+
+    @staticmethod
+    def _read_cached(path: Path) -> Optional[np.ndarray]:
+        """Load a decoded array, validating a CRC32 trailer instead of a full SHA-256.
+
+        The cache file name is the content key (decoder identity plus source
+        digest) and publication is atomic, so the payload is validated for
+        integrity rather than identified: a checksum over 20 MB costs a few
+        milliseconds where the previous full SHA-256 cost tens.
+
+        Args:
+            path: Cache file holding ``npy payload`` followed by ``crc32`` and
+                ``len`` as two little-endian uint32 values.
+
+        Returns:
+            Decoded pixels, or ``None`` when the entry is absent or unusable.
+        """
+        try:
+            size = path.stat().st_size
+            if size <= _CACHE_TRAILER:
+                return None
+            with path.open("rb") as source:
+                source.seek(size - _CACHE_TRAILER)
+                trailer = source.read(_CACHE_TRAILER)
+                if len(trailer) != _CACHE_TRAILER:
+                    return None
+                checksum, payload = struct.unpack("<II", trailer)
+                if payload != size - _CACHE_TRAILER:
+                    counter("cache_corrupt")
+                    return None
+                source.seek(0)
+                running = 0
+                remaining = payload
+                while remaining > 0:
+                    chunk = source.read(min(1 << 20, remaining))
+                    if not chunk:
+                        counter("cache_corrupt")
+                        return None
+                    running = zlib.crc32(chunk, running)
+                    remaining -= len(chunk)
+            if running & 0xFFFFFFFF != checksum:
+                counter("cache_corrupt")
+                return None
+            image = np.load(path, allow_pickle=False)
+            if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
+                return None
+            if image.ndim not in (2, 3):
+                return None
+            try:
+                os.utime(path, None)
+            except FileNotFoundError:
+                pass
             return image
+        except (OSError, ValueError, EOFError):
+            counter("cache_corrupt")
+            return None
+
+    def _write_cached(self, directory: Path, path: Path, image: np.ndarray) -> None:
+        """Publish a decoded array atomically with a CRC32 trailer, evicting by LRU.
+
+        Args:
+            directory: Shared decoded-cache directory.
+            path: Final cache path for this content key.
+            image: Decoded pixels to publish.
+        """
+        stage = directory / (uuid.uuid4().hex + ".partial")
+        try:
+            checksum = 0
+            with stage.open("wb") as handle:
+                writer = _ChecksumWriter(handle)
+                np.save(writer, image, allow_pickle=False)
+                checksum = writer.checksum
+            size = stage.stat().st_size
+            waiting = monotonic_now()
+            with (directory / ".lock").open("a+b") as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                self.cache_stats["cache_lock_wait_ms"] += (monotonic_now() - waiting) * 1000
+                if size + _CACHE_TRAILER <= self.settings.cache_max_bytes:
+                    entries = sorted(directory.glob("*.cache"),
+                                     key=lambda item: item.stat().st_mtime_ns)
+                    # Replace the same key without counting its existing bytes twice.
+                    entries = [item for item in entries if item != path]
+                    total = sum(item.stat().st_size for item in entries)
+                    while entries and (
+                        len(entries) >= self.settings.cache_max_entries
+                        or total + size + _CACHE_TRAILER > self.settings.cache_max_bytes
+                    ):
+                        oldest = entries.pop(0)
+                        total -= oldest.stat().st_size
+                        oldest.unlink()
+                        self.cache_stats["evictions"] += 1
+                    with stage.open("ab") as handle:
+                        handle.write(struct.pack("<II", checksum & 0xFFFFFFFF, size))
+                        handle.flush()
+                    os.replace(stage, path)
+                    self.cache_stats["cache_writes"] += 1
+                    counter("cache_write")
+        finally:
+            stage.unlink(missing_ok=True)
 
     def finalize(self, outcome: dict) -> None:
         """Persist the validated result before atomically exposing its completion marker.
