@@ -1,0 +1,14 @@
+{
+  "method": "POST",
+  "path": "/evaluations/ranges",
+  "body": {
+    "value": {
+      "valid": true,
+      "value": 15,
+      "unit": "px"
+    },
+    "minimum": 10,
+    "maximum": 20,
+    "unit": "px"
+  }
+}

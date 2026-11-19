@@ -1,0 +1,22 @@
+{
+  "method": "POST",
+  "path": "/geometry/line-angles",
+  "body": {
+    "line_a": {
+      "valid": true,
+      "a": 0.0,
+      "b": 1.0,
+      "c": -10.0,
+      "frame": "source",
+      "unit": "px"
+    },
+    "line_b": {
+      "valid": true,
+      "a": 1.0,
+      "b": 0.0,
+      "c": -3.0,
+      "frame": "source",
+      "unit": "px"
+    }
+  }
+}

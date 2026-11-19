@@ -1,0 +1,37 @@
+{
+  "method": "POST",
+  "path": "/evaluations/centerline-deviation",
+  "body": {
+    "points": [
+      {
+        "valid": true,
+        "point": {
+          "x": 50,
+          "y": 10
+        },
+        "frame": "source",
+        "unit": "px"
+      },
+      {
+        "valid": true,
+        "point": {
+          "x": 48,
+          "y": 20
+        },
+        "frame": "source",
+        "unit": "px"
+      },
+      {
+        "valid": true,
+        "point": {
+          "x": 52,
+          "y": 30
+        },
+        "frame": "source",
+        "unit": "px"
+      }
+    ],
+    "maximum": 3,
+    "unit": "px"
+  }
+}

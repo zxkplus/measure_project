@@ -1,0 +1,21 @@
+{
+  "method": "POST",
+  "path": "/measurements/edge-points",
+  "body": {
+    "image": {
+      "root": "exchange",
+      "path": "stripes.png"
+    },
+    "probe": {
+      "center": {
+        "x": 110,
+        "y": 60
+      },
+      "search_half_length": 110,
+      "average_half_width": 5
+    },
+    "options": {
+      "threshold": 30.0
+    }
+  }
+}

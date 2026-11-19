@@ -1,0 +1,24 @@
+{
+  "method": "POST",
+  "path": "/geometry/point-distances",
+  "body": {
+    "point_a": {
+      "valid": true,
+      "point": {
+        "x": 0,
+        "y": 0
+      },
+      "frame": "source",
+      "unit": "px"
+    },
+    "point_b": {
+      "valid": true,
+      "point": {
+        "x": 3,
+        "y": 4
+      },
+      "frame": "source",
+      "unit": "px"
+    }
+  }
+}

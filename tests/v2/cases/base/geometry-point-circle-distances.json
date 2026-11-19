@@ -1,0 +1,23 @@
+{
+  "method": "POST",
+  "path": "/geometry/point-circle-distances",
+  "body": {
+    "point": {
+      "valid": true,
+      "point": {
+        "x": 40,
+        "y": 40
+      },
+      "frame": "source",
+      "unit": "px"
+    },
+    "circle": {
+      "valid": true,
+      "center": {
+        "x": 40,
+        "y": 40
+      },
+      "radius": 10
+    }
+  }
+}

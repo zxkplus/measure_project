@@ -1,0 +1,21 @@
+{
+  "method": "POST",
+  "path": "/measurements/circles",
+  "body": {
+    "image": {
+      "root": "exchange",
+      "path": "rings.png"
+    },
+    "center": {
+      "x": 110,
+      "y": 110
+    },
+    "radius": 60,
+    "radius_min": 55,
+    "radius_max": 65,
+    "search_half_length": 30,
+    "average_half_width": 2,
+    "selection": "first",
+    "probe_count": 20
+  }
+}

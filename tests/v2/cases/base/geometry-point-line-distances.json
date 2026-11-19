@@ -1,0 +1,23 @@
+{
+  "method": "POST",
+  "path": "/geometry/point-line-distances",
+  "body": {
+    "point": {
+      "valid": true,
+      "point": {
+        "x": 0,
+        "y": 0
+      },
+      "frame": "source",
+      "unit": "px"
+    },
+    "line": {
+      "valid": true,
+      "a": 0.0,
+      "b": 1.0,
+      "c": -10.0,
+      "frame": "source",
+      "unit": "px"
+    }
+  }
+}

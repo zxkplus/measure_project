@@ -1,0 +1,22 @@
+{
+  "method": "POST",
+  "path": "/measurements/lines",
+  "body": {
+    "image": {
+      "root": "exchange",
+      "path": "line.png"
+    },
+    "start": {
+      "x": 40,
+      "y": 100
+    },
+    "end": {
+      "x": 360,
+      "y": 100
+    },
+    "search_half_length": 15,
+    "average_half_width": 5,
+    "probe_count": 10,
+    "polarity": "positive"
+  }
+}

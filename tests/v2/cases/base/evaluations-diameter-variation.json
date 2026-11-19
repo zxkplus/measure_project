@@ -1,0 +1,25 @@
+{
+  "method": "POST",
+  "path": "/evaluations/diameter-variation",
+  "body": {
+    "values": [
+      {
+        "valid": true,
+        "value": 10,
+        "unit": "px"
+      },
+      {
+        "valid": true,
+        "value": 14,
+        "unit": "px"
+      },
+      {
+        "valid": true,
+        "value": 12,
+        "unit": "px"
+      }
+    ],
+    "maximum": 4,
+    "unit": "px"
+  }
+}
