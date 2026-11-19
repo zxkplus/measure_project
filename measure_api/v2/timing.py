@@ -4,7 +4,7 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Dict, Iterator, Optional
 
 
 _active = ContextVar("operation_timing", default=None)
@@ -23,6 +23,41 @@ class Timing:
         self.truncated = False
         self.progress = progress
         self.aggregates = {}
+        self.counters: Dict[str, float] = {}
+        self.counter_limit = 64
+
+    def counter(self, name: str, amount: float = 1.0) -> None:
+        """Accumulate one numeric observation without allocating a span.
+
+        Counters answer questions spans cannot afford to: how many NCC
+        evaluations ran, how many megapixels were decoded, how many cache
+        writes happened.  Names are bounded like aggregate names.
+
+        Args:
+            name: Stable counter identifier shared by every producer.
+            amount: Increment added to the current value.
+        """
+        if name in self.counters:
+            self.counters[name] += amount
+            return
+        if len(self.counters) >= self.counter_limit:
+            self.truncated = True
+            return
+        self.counters[name] = amount
+
+    @contextmanager
+    def measure(self, name: str) -> Iterator[None]:
+        """Accumulate elapsed milliseconds and one call into ``name``.
+
+        Args:
+            name: Counter prefix; ``<name>_ms`` and ``<name>_count`` are updated.
+        """
+        started = monotonic_now()
+        self.counter(name + "_count")
+        try:
+            yield
+        finally:
+            self.counter(name + "_ms", (monotonic_now() - started) * 1000.0)
 
     @contextmanager
     def activate(self) -> Iterator["Timing"]:
@@ -91,7 +126,9 @@ class Timing:
                 "status": "complete" if complete and not self.truncated else "partial",
                 "total_ms": max(0.0, (monotonic_now() - self.origin) * 1000),
                 "spans": [dict(value) for value in self.spans],
-                "aggregates": list(self.aggregates.values()), "truncated": self.truncated}
+                "aggregates": list(self.aggregates.values()),
+                "counters": {name: round(value, 3) for name, value in self.counters.items()},
+                "truncated": self.truncated}
 
 
 @contextmanager
@@ -103,6 +140,34 @@ def span(name: str, kind: str = "step", **attributes: Any) -> Iterator[dict]:
     else:
         with recorder.span(name, kind, **attributes) as value:
             yield value
+
+
+def current() -> Optional["Timing"]:
+    """Return the recorder installed in this context, or ``None`` outside an operation.
+
+    Work moved onto a thread starts with an empty context, so a producer that
+    fans out must re-activate the recorder inside the worker to keep its spans
+    and counters.
+    """
+    return _active.get()
+
+
+def counter(name: str, amount: float = 1.0) -> None:
+    """Record a numeric observation only inside an active operation."""
+    recorder = _active.get()
+    if recorder is not None:
+        recorder.counter(name, amount)
+
+
+@contextmanager
+def measure(name: str) -> Iterator[None]:
+    """Accumulate ``<name>_ms``/``<name>_count`` only inside an active operation."""
+    recorder = _active.get()
+    if recorder is None:
+        yield
+    else:
+        with recorder.measure(name):
+            yield
 
 
 def timed(name: str) -> Callable:

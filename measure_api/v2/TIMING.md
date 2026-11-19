@@ -19,6 +19,34 @@ observations. File verification, image decoding, preprocessing, template coarse/
 search, edge sampling, geometry fitting, result validation/encoding and artifact
 commit appear when those paths execute.
 
+## Counters
+
+`counters` accumulates numeric observations that would be too numerous to keep as
+spans (126 pose correlations in one operation, five re-reads of the same 20 MPx
+image). Every counter is operation-local, rounded to three decimals, and bounded to
+64 names; the same `truncated` flag discloses loss.
+
+| counter | meaning |
+|---|---|
+| `ncc_evaluations`, `ncc_positions`, `ncc_template_pixels` | normalised cross-correlation work: evaluations, correlation positions, support pixels per evaluation |
+| `ncc_masked`, `ncc_unmasked` | evaluations on the masked path (about twice the cost of the plain path) |
+| `coarse_poses`, `fine_poses`, `fine_neighborhoods`, `fine_neighborhoods_refined` | pose-grid size and how many coarse neighbourhoods were rescanned |
+| `pyramid_blur_ms`, `pyramid_warp_ms`, `pyramid_template_cache_hit` | decimation cost and reuse of an identical decimated support |
+| `variant_render_ms`, `variant_render_count` | support rotation/scaling per pose |
+| `verify_bytes`, `verify_hash_ms`, `digest_reuse` | input verification and how often an unchanged file skipped re-hashing |
+| `decode_count`, `decode_ms`, `cache_hit`, `cache_miss`, `cache_write`, `cache_read_ms`, `cache_write_ms`, `cache_corrupt` | decoded-image cache behaviour |
+| `memory_hit`, `image_read`, `image_bytes` | operation-local decoded-array reuse |
+| `template_cache_hit`, `template_cache_miss` | validated-template reuse across operations in one worker process |
+| `pose_batches_parallel` | pose-grid batches evaluated on a thread pool (`search_plan.threads` reports the configured width) |
+
+`pyramid_prepare` is now a retained span, so the previously unaccounted
+blur-and-decimate step between `preprocessing` and `coarse_search` is attributed.
+
+Counters measure **work, not wall time**: with `MEASURE_V2_SEARCH_THREADS > 1` the
+pose grid runs on a thread pool and `ncc_ms` sums the per-evaluation time of every
+thread, so it can exceed the enclosing span. Compare it with
+`spans.fine_search.duration_ms` to read the achieved parallelism.
+
 A running span has no final `duration_ms`. Cancellation, timeout or worker death
 retain the last known running phase without inventing its end. The complete terminal
 persistence duration is available only after that write returns. Durable recovery
