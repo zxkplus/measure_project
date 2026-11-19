@@ -20,7 +20,9 @@ from measure.computation_types import (
 from measure.measure_calibration import (
     BoardObservation, CameraModel, Pose3D, point_set_rank,
 )
-from measure.plane_geometry import build_plane_view, solve_plane_pose
+from measure.plane_geometry import (
+    build_plane_view, project_camera_points, solve_plane_pose,
+)
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.families.calibrations import (
     BlobOptions, BoardGrid, CalibrationResult, CameraObservation, DotGridRequest, ObjectPoint,
@@ -660,11 +662,13 @@ def project_camera(points: np.ndarray, camera: CameraCalibration) -> np.ndarray:
     """
     if len(points) == 0:
         return np.empty((0, 2))
-    if np.any(points[:, 2] <= 0):
+    projected = project_camera_points(
+        np.asarray(points, dtype=np.float64), camera_model(camera),
+        source_frame=camera.applicability.frame, unit="mm",
+    )
+    if not projected.valid:
         raise ServiceError("geometry.behind_camera", "Projection requires positive camera depth")
-    return cv2.projectPoints(points.astype(np.float64), np.zeros(3), np.zeros(3),
-                             np.array(camera.parameters.camera_matrix),
-                             np.array(camera.parameters.distortion))[0].reshape(-1, 2)
+    return np.asarray(projected.value.points_xy, dtype=np.float64)
 
 
 def validate_pair(
