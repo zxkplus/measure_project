@@ -550,6 +550,32 @@ def _normalised_singular_range(matrix: Array) -> Tuple[float, float]:
     return float(singular.min()), float(singular.max())
 
 
+def invert_matrix(matrix: Array) -> np.ndarray:
+    """Return the inverse of a finite, non-singular 3x3 homogeneous transform.
+
+    This is the one place the engine inverts a mapping matrix: callers that need
+    the reverse direction must not reimplement ``numpy.linalg.inv`` beside a
+    validated forward matrix.
+
+    Args:
+        matrix: 3x3 homogeneous transform.
+
+    Returns:
+        A new 3x3 inverse matrix.
+
+    Raises:
+        ComputationContractError: On a wrong shape, non-finite values, a
+            singular matrix or a non-finite inverse.
+    """
+    validate_mapping_matrix(matrix, "projective")
+    values = np.asarray(matrix, dtype=np.float64)
+    inverse = np.linalg.inv(values)
+    if not bool(np.isfinite(inverse).all()):
+        raise contract_error("contract.degenerate_mapping",
+                             "mapping inverse is not finite", "mapping.inverse_matrix")
+    return inverse
+
+
 def validate_mapping_matrix(matrix: Array, kind: str) -> None:
     """Validate a 3x3 matrix against the claimed mapping kind.
 

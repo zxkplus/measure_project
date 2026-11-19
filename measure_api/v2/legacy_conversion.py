@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Literal, Optional
 import numpy as np
 from pydantic import Field
 
+from measure.computation_types import invert_matrix
 from measure_api.v2.calibration_assets import CalibrationApplicability
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.files import ArtifactWriter, SharedFiles
@@ -860,7 +861,7 @@ def convert_normalized(
             if tool["object_type"] != "TemplateMatchPoint":
                 continue
             p = tool["params"]
-            source_point = np.linalg.inv(old_to_patch) @ [p["col"], p["row"], 1]
+            source_point = invert_matrix(old_to_patch) @ [p["col"], p["row"], 1]
             size = int(p.get("template_size", 40))
             template = teach(
                 node["id"],

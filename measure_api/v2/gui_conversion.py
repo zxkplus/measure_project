@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
+from measure.computation_types import invert_matrix
 from measure_api.v2.families.images import RotatedROI
 from measure_api.v2.families.templates import (
     TemplateBuildRequest,
@@ -727,7 +728,7 @@ class _Builder:
             if tool["object_type"] != "TemplateMatchPoint":
                 continue
             parameters = tool["params"]
-            point = np.linalg.inv(old_to_patch) @ [
+            point = invert_matrix(old_to_patch) @ [
                 float(parameters["col"]),
                 float(parameters["row"]),
                 1.0,

@@ -171,6 +171,64 @@ class _HorizonError(ValueError):
     """Internal signal that a projective mapping cannot represent the input."""
 
 
+def undistort_points(points: Array, camera_matrix: Array, distortion: Array) -> Array:
+    """Map distorted pixels onto the ideal pixel grid of the same camera.
+
+    Args:
+        points: ``(N, 2)`` distorted pixel coordinates.
+        camera_matrix: 3x3 pinhole intrinsics.
+        distortion: Distortion coefficients in OpenCV order.
+
+    Returns:
+        ``(N, 2)`` undistorted pixels in the same camera matrix.
+    """
+    values = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+    if len(values) == 0:
+        return np.empty((0, 2), dtype=np.float64)
+    matrix = np.asarray(camera_matrix, dtype=np.float64)
+    result = cv2.undistortPoints(values.reshape(-1, 1, 2), matrix,
+                                 np.asarray(distortion, dtype=np.float64).reshape(-1),
+                                 None, matrix)
+    return result.reshape(-1, 2).astype(np.float64)
+
+
+def pixel_to_ray(points: Array, camera_matrix: Array) -> Array:
+    """Back-project pixels to normalized camera rays.
+
+    Args:
+        points: ``(N, 2)`` pixel coordinates.
+        camera_matrix: 3x3 pinhole intrinsics.
+
+    Returns:
+        ``(N, 2)`` normalized image coordinates.
+    """
+    values = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+    inverse = np.linalg.inv(np.asarray(camera_matrix, dtype=np.float64))
+    homogeneous = np.column_stack([values, np.ones(len(values))]) @ inverse.T
+    return homogeneous[:, :2] / homogeneous[:, 2:3]
+
+
+def ray_to_pixel(points: Array, camera_matrix: Array, distortion: Array) -> Array:
+    """Project normalized camera rays to distorted pixels.
+
+    Args:
+        points: ``(N, 2)`` normalized image coordinates.
+        camera_matrix: 3x3 pinhole intrinsics.
+        distortion: Distortion coefficients in OpenCV order.
+
+    Returns:
+        ``(N, 2)`` distorted pixel coordinates.
+    """
+    values = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+    if len(values) == 0:
+        return np.empty((0, 2), dtype=np.float64)
+    rays = np.column_stack([values, np.ones(len(values))])
+    projected, _ = cv2.projectPoints(rays, np.zeros(3), np.zeros(3),
+                                     np.asarray(camera_matrix, dtype=np.float64),
+                                     np.asarray(distortion, dtype=np.float64).reshape(-1))
+    return projected.reshape(-1, 2).astype(np.float64)
+
+
 def _apply_lens(points: Array, step: LensStep) -> Array:
     """Apply one pinhole lens step in pixel coordinates.
 
@@ -185,18 +243,8 @@ def _apply_lens(points: Array, step: LensStep) -> Array:
     if len(points) == 0:
         return np.empty((0, 2), dtype=np.float64)
     if step.direction == "undistort":
-        result = cv2.undistortPoints(
-            points.reshape(-1, 1, 2).astype(np.float64), matrix, distortion,
-            None, matrix,
-        )
-        return result.reshape(-1, 2).astype(np.float64)
-    fx, fy = float(matrix[0, 0]), float(matrix[1, 1])
-    cx, cy = float(matrix[0, 2]), float(matrix[1, 2])
-    normalized = np.column_stack([(points[:, 0] - cx) / fx,
-                                  (points[:, 1] - cy) / fy])
-    rays = np.column_stack([normalized, np.ones(len(normalized))]).astype(np.float64)
-    projected, _ = cv2.projectPoints(rays, np.zeros(3), np.zeros(3), matrix, distortion)
-    return projected.reshape(-1, 2).astype(np.float64)
+        return undistort_points(points, matrix, distortion)
+    return ray_to_pixel(pixel_to_ray(points, matrix), matrix, distortion)
 
 
 def _map_points(points: Array, chain: MappingChain) -> Array:

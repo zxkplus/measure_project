@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 from typing import Any, Callable, Dict, List, Optional
 
-import cv2
 import numpy as np
 
 from measure_api.v2.calibration_assets import (
@@ -15,6 +14,8 @@ from measure_api.v2.calibration_assets import (
     check_applicability,
     load_calibration,
 )
+from measure.computation_types import invert_matrix
+from measure.geometry_mapping import undistort_points
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.families.geometry import PointFitRequest, fit_circle, fit_line
 from measure_api.v2.families.plane_stereo import PlaneCalibration, perspective
@@ -102,7 +103,7 @@ class SampleMapper:
             destination_frame=destination,
             type=kind,
             matrix=matrix.tolist(),
-            inverse_matrix=np.linalg.inv(matrix).tolist(),
+            inverse_matrix=invert_matrix(matrix).tolist(),
             unit=unit,
             details=details,
         )
@@ -140,12 +141,10 @@ class SampleMapper:
                             "recipe.metric_camera", "Metric plane lacks the source camera"
                         )
                     camera = view.camera.parameters
-                    points = cv2.undistortPoints(
-                        points.reshape(-1, 1, 2),
-                        np.array(camera.camera_matrix),
+                    points = undistort_points(
+                        points, np.array(camera.camera_matrix),
                         np.array(camera.distortion),
-                        P=np.array(camera.camera_matrix),
-                    ).reshape(-1, 2)
+                    )
                     points = perspective(points, np.array(view.camera_to_plane))
             else:
                 raise ServiceError(

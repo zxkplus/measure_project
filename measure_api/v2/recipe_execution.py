@@ -6,11 +6,12 @@ import hashlib
 import time
 from typing import Any, Dict, List, Optional
 
-import cv2
 import numpy as np
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from measure.computation_types import invert_matrix
+from measure.geometry_mapping import pixel_to_ray, ray_to_pixel
 from measure_api.v2.atomic_types import Scalar
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.files import SharedFiles
@@ -455,17 +456,11 @@ def execute_stages(
 
     def inverse(points: np.ndarray) -> np.ndarray:
         for detail in reversed(inverse_chain):
-            new_k = np.array(detail["corrected_camera_matrix"])
-            homogeneous = np.column_stack([points, np.ones(len(points))]) @ np.linalg.inv(new_k).T
-            normalized = homogeneous[:, :2] / homogeneous[:, 2, None]
-            object_points = np.column_stack([normalized, np.ones(len(points))])
-            points = cv2.projectPoints(
-                object_points,
-                np.zeros(3),
-                np.zeros(3),
+            points = ray_to_pixel(
+                pixel_to_ray(points, np.array(detail["corrected_camera_matrix"])),
                 np.array(detail["camera_matrix"]),
                 np.array(detail["distortion"]),
-            )[0].reshape(-1, 2)
+            )
         return points
 
     return current, active, inverse, canvas, inverse_chain, provenance, sources, payloads
@@ -545,12 +540,12 @@ def align_target(
                 "recipe.reference_required", "Template targets require a reference image"
             )
         reference, _ = context.files.read_image(recipe.reference)
-        matrix = np.linalg.inv(mapping)
+        matrix = invert_matrix(mapping)
         height, width = reference.shape[:2]
     elif alignment is None:
         return image, context, np.eye(3), None
     else:
-        matrix = np.array(alignment.reference_to_patch.matrix) @ np.linalg.inv(mapping)
+        matrix = np.array(alignment.reference_to_patch.matrix) @ invert_matrix(mapping)
         width, height = alignment.width, alignment.height
     child, output = context.stage(prefix + "-align")
     values = dict(
