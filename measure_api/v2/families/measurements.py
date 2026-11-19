@@ -11,7 +11,23 @@ import numpy as np
 from pydantic import Field, model_validator
 from scipy.ndimage import gaussian_filter1d
 
-from measure.measure1D import Halcon1DMeasure
+from measure.computation_types import Space
+from measure.measure1D import (
+    EdgeOptions,
+    Halcon1DMeasure,
+    PairOptions,
+    ProbeSpec,
+    detect_edge_pairs,
+    detect_edges,
+    sample_profile,
+)
+from measure.measure2D import (
+    CircleSpec,
+    LineSpec,
+    ProbeFitOptions,
+    probe_and_fit_circle,
+    probe_and_fit_line,
+)
 from measure_api.v2.atomic_types import FitDiagnostics, Line, Observation, PositionedPoint, Scalar
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.families.geometry import (
@@ -138,6 +154,78 @@ def make_probe(probe: Probe, image: np.ndarray, context: CalculationContext) -> 
     return instrument
 
 
+def _probe_spec(request: ProbeRequest) -> ProbeSpec:
+    """Translate the HTTP probe model into the shared probe spec.
+
+    Args:
+        request: Probe-bearing request with xy centre and clockwise angle in degrees.
+
+    Returns:
+        The equivalent shared probe specification.
+    """
+    probe = request.probe
+    return ProbeSpec(
+        center=(probe.center.x, probe.center.y),
+        angle_rad=float(np.deg2rad(probe.angle_degrees)),
+        search_half_length=probe.search_half_length,
+        average_half_width=probe.average_half_width,
+        interpolation=probe.interpolation,
+        border_policy=probe.border_policy,
+    )
+
+
+def _assert_probes_inside(image: np.ndarray, probes, request: 'ImageFitRequest') -> None:
+    """Reject probes leaving the source image, preserving the HTTP contract.
+
+    Args:
+        image: Source pixels whose bounds are enforced.
+        probes: ``(center_xy, angle_rad)`` pairs for every probe.
+        request: Fitting request carrying the probe dimensions.
+
+    Raises:
+        ServiceError: When any probe corner leaves the image and the policy is
+            ``reject``.
+    """
+    if request.border_policy != 'reject':
+        return
+    height, width = image.shape[:2]
+    for center, angle_rad in probes:
+        spec = ProbeSpec(
+            center=(float(center[0]), float(center[1])),
+            angle_rad=float(angle_rad),
+            search_half_length=request.search_half_length,
+            average_half_width=request.average_half_width,
+            interpolation=request.interpolation,
+            border_policy='reject',
+        )
+        for x, y in spec.support_corners():
+            if (x < -1e-7 or y < -1e-7
+                    or x > width - 1 + 1e-7 or y > height - 1 + 1e-7):
+                raise ServiceError('image.roi_outside',
+                                   'Probe includes pixels outside source image')
+
+
+def _fit_options(request: 'ImageFitRequest') -> ProbeFitOptions:
+    """Translate the HTTP fitting request into the shared probe options."""
+    threshold = request.threshold
+    if request.threshold_unit == 'fraction':
+        if threshold > 1:
+            raise ServiceError('measurement.threshold_invalid',
+                               'Fraction threshold exceeds one')
+        threshold *= 255
+    return ProbeFitOptions(
+        search_half_length=request.search_half_length,
+        average_half_width=request.average_half_width,
+        sigma=request.sigma,
+        threshold=threshold,
+        threshold_unit='gray',
+        polarity=request.polarity,
+        selection=request.selection,
+        interpolation=request.interpolation,
+        border_policy=request.border_policy,
+    )
+
+
 def read_gray(request: ProbeRequest, context: CalculationContext) -> np.ndarray:
     """Read verified source pixels without changing their measurement frame.
 
@@ -166,13 +254,18 @@ def extract_profile(request: ProfileRequest, context: CalculationContext) -> Pro
     """
     threshold = request.gray_threshold()
     image = read_gray(request, context)
-    probe = make_probe(request.probe, image, context)
-    gray = probe.get_profile(image).astype(float)
-    smoothed = gaussian_filter1d(gray, request.sigma) if request.sigma > 0 else gray
-    points = np.column_stack([np.arange(len(gray)),
-                              np.full(len(gray), request.probe.average_half_width),
-                              np.ones(len(gray))]) @ probe.inverse_matrix.T
-    gradient = np.gradient(smoothed)
+    # Keep the pixel-limit and ROI-authorisation checks in the numeric core's terms.
+    make_probe(request.probe, image, context)
+    sampled = sample_profile(image, _probe_spec(request),
+                             space=Space(request.frame, 'px'),
+                             sigma=request.sigma)
+    if not sampled.valid:
+        raise ServiceError('image.roi_outside', 'Probe includes pixels outside source image')
+    value = sampled.value
+    gray = value.gray.astype(float)
+    smoothed = value.smoothed.astype(float)
+    gradient = value.gradient.astype(float)
+    points = value.sample_points_xy
     artifacts, manifest = [], None
     if request.output is not None:
         payload = io.BytesIO()
@@ -205,14 +298,23 @@ def measure_edges(request: ProbeRequest, context: CalculationContext) -> EdgeRes
         Selected subpixel edge observations and consecutive edge distances.
     """
     image = read_gray(request, context)
-    probe = make_probe(request.probe, image, context)
-    rows, cols, amplitudes, distances = probe.measure_pos(
-        image, request.sigma, request.gray_threshold(), request.polarity, request.selection,
-    )
-    edges = [Edge(point=Point(x=x, y=y), amplitude=a, frame=request.frame)
-             for y, x, a in zip(rows, cols, amplitudes)]
-    return EdgeResult(valid=bool(edges), reason=None if edges else 'no_edges',
-                      frame=request.frame, edges=edges, distances=list(distances),
+    make_probe(request.probe, image, context)
+    detected = detect_edges(image, _probe_spec(request),
+                            EdgeOptions(sigma=request.sigma,
+                                        threshold=request.gray_threshold(),
+                                        threshold_unit='gray',
+                                        polarity=request.polarity,
+                                        selection=request.selection),
+                            space=Space(request.frame, 'px'))
+    if not detected.valid:
+        return EdgeResult(valid=False, reason=detected.reason or 'no_edges',
+                          frame=request.frame, edges=[], distances=[])
+    found = detected.value
+    edges = [Edge(point=Point(x=edge.point[0], y=edge.point[1]),
+                  amplitude=edge.amplitude, frame=request.frame)
+             for edge in found.edges]
+    return EdgeResult(valid=True, reason=None, frame=request.frame, edges=edges,
+                      distances=list(found.distances),
                       point=PositionedPoint(valid=True, point=edges[0].point, frame=request.frame)
                       if len(edges) == 1 else None)
 
@@ -263,16 +365,28 @@ def measure_pairs(request: PairRequest, context: CalculationContext) -> PairResu
         Complete subpixel edge pairs, centers, widths and named single-pair output ports.
     """
     image = read_gray(request, context)
-    probe = make_probe(request.probe, image, context)
-    data = probe.measure_pairs(image, request.sigma, request.gray_threshold(),
-                               request.polarity, request.selection)
+    make_probe(request.probe, image, context)
+    detected = detect_edge_pairs(
+        image, _probe_spec(request),
+        PairOptions(sigma=request.sigma, threshold=request.gray_threshold(),
+                    threshold_unit='gray', polarity=request.polarity,
+                    selection=request.selection),
+        space=Space(request.frame, 'px'))
+    if not detected.valid:
+        return PairResult(valid=False, reason=detected.reason or 'no_pairs',
+                          frame=request.frame, pairs=[], center_distances=[])
+    found = detected.value
     pairs = []
-    for ya, xa, aa, yb, xb, ab, yc, xc, width in zip(*data[:9]):
+    for pair in found.pairs:
         pairs.append(EdgePair(
-            edge_a=Edge(point=Point(x=xa, y=ya), amplitude=aa, frame=request.frame),
-            edge_b=Edge(point=Point(x=xb, y=yb), amplitude=ab, frame=request.frame),
-            center=PositionedPoint(valid=True, point=Point(x=xc, y=yc), frame=request.frame),
-            width=Scalar(valid=True, value=width, frame=request.frame),
+            edge_a=Edge(point=Point(x=pair.edge_a.point[0], y=pair.edge_a.point[1]),
+                        amplitude=pair.edge_a.amplitude, frame=request.frame),
+            edge_b=Edge(point=Point(x=pair.edge_b.point[0], y=pair.edge_b.point[1]),
+                        amplitude=pair.edge_b.amplitude, frame=request.frame),
+            center=PositionedPoint(valid=True,
+                                   point=Point(x=pair.center[0], y=pair.center[1]),
+                                   frame=request.frame),
+            width=Scalar(valid=True, value=pair.width, frame=request.frame),
         ))
     single = pairs[0] if len(pairs) == 1 else None
     return PairResult(
@@ -282,7 +396,7 @@ def measure_pairs(request: PairRequest, context: CalculationContext) -> PairResu
         edge_b=PositionedPoint(valid=True, point=single.edge_b.point, frame=request.frame)
         if single else None, center=single.center if single else None,
         width=single.width if single else None,
-        center_distances=list(data[9]) if len(pairs) > 1 else [],
+        center_distances=list(found.center_distances) if len(pairs) > 1 else [],
     )
 
 
@@ -376,31 +490,25 @@ def measure_line(request: ImageLineRequest, context: CalculationContext) -> Imag
             line=Line(valid=False, reason='coincident_expected_points', frame=request.frame),
             diagnostics=FitDiagnostics(sample_count=0, requested_probe_count=request.probe_count),
         )
-    angle = np.rad2deg(np.arctan2(vector[1], vector[0])) + 90
+    angle_rad = float(np.arctan2(vector[1], vector[0])) + np.pi / 2
     image = read_gray(request, context)
-    edges = []
-    successful = 0
-    with timing_span("sampling_edges"):
-        for fraction in np.linspace(0, 1, request.probe_count):
-            center = Point(x=start.x + fraction * vector[0], y=start.y + fraction * vector[1])
-            candidates = _probe_edges(request, center, angle, image, context)
-            if candidates:
-                successful += 1
-                if request.selection == 'nearest':
-                    candidates = [min(candidates, key=lambda e: (
-                        (e.point.x - center.x) ** 2 + (e.point.y - center.y) ** 2))]
-                elif request.selection == 'first':
-                    candidates = candidates[:1]
-                elif request.selection == 'last':
-                    candidates = candidates[-1:]
-                edges.extend(candidates)
+    probes = [((start.x + fraction * vector[0], start.y + fraction * vector[1]), angle_rad)
+              for fraction in np.linspace(0, 1, request.probe_count)]
+    _assert_probes_inside(image, probes, request)
+    sampled = probe_and_fit_line(
+        image, LineSpec((start.x, start.y), (end.x, end.y), request.probe_count),
+        _fit_options(request), space=Space(request.frame, 'px'))
+    records = sampled.diagnostics.get('probes', ()) if sampled.diagnostics else ()
+    edges = [Edge(point=Point(x=edge.point[0], y=edge.point[1]), amplitude=edge.amplitude,
+                  frame=request.frame)
+             for record in records for edge in record.selected]
     fitted = fit_line(
-        PointFitRequest(points=[e.point for e in edges], frame=request.frame), context,
+        PointFitRequest(points=[edge.point for edge in edges], frame=request.frame), context,
     )
     fitted.diagnostics.requested_probe_count = request.probe_count
-    fitted.diagnostics.successful_probe_count = successful
+    fitted.diagnostics.successful_probe_count = sum(
+        1 for record in records if record.selected)
     return ImageLineResult(**fitted.model_dump(), edges=edges)
-
 
 def measure_circle(request: ImageCircleRequest, context: CalculationContext) -> ImageCircleResult:
     """Probe inward around a circle or clockwise arc and filter actual observed radii.
@@ -420,40 +528,37 @@ def measure_circle(request: ImageCircleRequest, context: CalculationContext) -> 
     if span == 0:
         span = 360
     image = read_gray(request, context)
-    edges = []
-    successful = 0
-    angles = request.start_angle_degrees + np.linspace(0, span, request.probe_count, endpoint=False)
-    with timing_span("sampling_edges"):
-        for angle in angles:
-            phi = np.deg2rad(angle)
-            center = Point(x=request.center.x + request.radius * np.cos(phi),
-                           y=request.center.y + request.radius * np.sin(phi))
-            candidates = _probe_edges(request, center, angle + 180, image, context)
-            candidates = [e for e in candidates if (
-                (request.radius_min is None or np.hypot(e.point.x - request.center.x,
-                                                        e.point.y - request.center.y)
-                 >= request.radius_min)
-                and (request.radius_max is None or np.hypot(e.point.x - request.center.x,
-                                                            e.point.y - request.center.y)
-                     <= request.radius_max))]
-            if candidates:
-                successful += 1
-                if request.selection == 'nearest':
-                    candidates = [min(candidates, key=lambda e: abs(np.hypot(
-                        e.point.x - request.center.x, e.point.y - request.center.y) - request.radius))]
-                elif request.selection == 'first':
-                    candidates = candidates[:1]
-                elif request.selection == 'last':
-                    candidates = candidates[-1:]
-                edges.extend(candidates)
+    start_angle = float(np.deg2rad(request.start_angle_degrees))
+    end_angle = start_angle + float(np.deg2rad(span))
+    angles = np.linspace(start_angle, end_angle, request.probe_count, endpoint=False)
+    probes = [((request.center.x + request.radius * np.cos(angle),
+                request.center.y + request.radius * np.sin(angle)),
+               float(angle) + np.pi) for angle in angles]
+    _assert_probes_inside(image, probes, request)
+    limits = None
+    if request.radius_min is not None and request.radius_max is not None:
+        limits = (request.radius_min, request.radius_max)
+    sampled = probe_and_fit_circle(
+        image,
+        CircleSpec(center=(request.center.x, request.center.y), radius=request.radius,
+                   probe_count=request.probe_count, radius_limits=limits,
+                   start_angle_rad=start_angle, end_angle_rad=end_angle,
+                   include_end=False, radial_offset_rad=float(np.pi)),
+        _fit_options(request), space=Space(request.frame, 'px'))
+    records = sampled.diagnostics.get('probes', ()) if sampled.diagnostics else ()
+    edges = [Edge(point=Point(x=edge.point[0], y=edge.point[1]), amplitude=edge.amplitude,
+                  frame=request.frame)
+             for record in records for edge in record.selected]
     fitted = fit_circle(
-        PointFitRequest(points=[e.point for e in edges], frame=request.frame), context,
+        PointFitRequest(points=[edge.point for edge in edges], frame=request.frame), context,
     )
     fitted.diagnostics.requested_probe_count = request.probe_count
-    fitted.diagnostics.successful_probe_count = successful
+    fitted.diagnostics.successful_probe_count = sum(
+        1 for record in records if record.selected)
     return ImageCircleResult(**fitted.model_dump(), edges=edges,
                              start_angle_degrees=request.start_angle_degrees,
                              end_angle_degrees=request.start_angle_degrees + span)
+
 
 
 OPERATIONS.extend([

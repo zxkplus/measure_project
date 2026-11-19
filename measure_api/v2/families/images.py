@@ -8,6 +8,7 @@ import numpy as np
 from pydantic import Field
 
 from measure_api.v2.errors import ServiceError
+from measure.rectify import rotated_patch_matrix
 from measure_api.v2.files import ArtifactWriter, image_metadata
 from measure_api.v2.models import (
     CalculationRequest, CoordinateMapping, FileDescriptor, FileReference, ImageMetadata,
@@ -221,14 +222,9 @@ def roi_to_patch_matrix(roi: RotatedROI) -> np.ndarray:
     Returns:
         Invertible 3-by-3 source-to-patch transform centered at (size - 1) / 2.
     """
-    angle = np.deg2rad(roi.angle_degrees)
-    cos, sin = np.cos(angle), np.sin(angle)
-    cx, cy = (roi.width - 1) / 2, (roi.height - 1) / 2
-    return np.array([
-        [cos, sin, cx - cos * roi.center.x - sin * roi.center.y],
-        [-sin, cos, cy + sin * roi.center.x - cos * roi.center.y],
-        [0, 0, 1],
-    ])
+    return rotated_patch_matrix(
+        (roi.center.x, roi.center.y), (roi.width, roi.height),
+        float(np.deg2rad(roi.angle_degrees)), origin="pixel_center")
 
 
 def crop_image(

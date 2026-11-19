@@ -7,7 +7,15 @@ from typing import List, Optional
 import numpy as np
 from pydantic import Field
 
+from measure.computation_types import CircleValue, LineValue, Space, observed
 from measure.geometric_fits import fit_circle_points, fit_line_points
+from measure.geometry_ops import (
+    line_angle as shared_line_angle,
+    point_circle_distance as shared_point_circle_distance,
+    point_distance as shared_point_distance,
+    point_line_distance as shared_point_line_distance,
+    sampled_diameter_spread as shared_sampled_diameter_spread,
+)
 from measure_api.v2.atomic_types import (
     Circle, FitDiagnostics, Line, Observation, PositionedPoint, Scalar,
 )
@@ -148,9 +156,16 @@ def point_line_distance(request: PointLineRequest, context: CalculationContext) 
     """
     valid = compatible(request.point, request.line) and request.point.point is not None
     point, line = request.point.point, request.line
+    value = None
+    if valid:
+        space = Space(line.frame, line.unit)
+        measured = shared_point_line_distance(
+            observed(space, (point.x, point.y)),
+            observed(space, LineValue((line.a, line.b, line.c))))
+        value = float(measured.value) if measured.valid else None
+        valid = measured.valid
     return Scalar(valid=valid, reason=None if valid else 'invalid_input',
-                  frame=line.frame, unit=line.unit,
-                  value=abs(line.a * point.x + line.b * point.y + line.c) if valid else None)
+                  frame=line.frame, unit=line.unit, value=value)
 
 
 OPERATIONS = [
@@ -204,10 +219,16 @@ def point_distance(request: TwoPointRequest, context: CalculationContext) -> Sca
     """
     first, second = request.point_a, request.point_b
     valid = compatible(first, second) and first.point is not None and second.point is not None
+    value = None
+    if valid:
+        space = Space(first.frame, first.unit)
+        measured = shared_point_distance(
+            observed(space, (first.point.x, first.point.y)),
+            observed(space, (second.point.x, second.point.y)))
+        value = float(measured.value) if measured.valid else None
+        valid = measured.valid
     return Scalar(valid=valid, reason=None if valid else 'invalid_input',
-                  frame=first.frame, unit=first.unit, value=float(np.hypot(
-                      second.point.x - first.point.x, second.point.y - first.point.y))
-                  if valid else None)
+                  frame=first.frame, unit=first.unit, value=value)
 
 
 class LineAngleRequest(CalculationRequest):
@@ -231,8 +252,12 @@ def line_angle(request: LineAngleRequest, context: CalculationContext) -> Scalar
     valid = compatible(first, second)
     value = None
     if valid:
-        cosine = np.clip(abs(first.a * second.a + first.b * second.b), 0, 1)
-        value = float(np.rad2deg(np.arccos(cosine)))
+        space = Space(first.frame, first.unit)
+        measured = shared_line_angle(
+            observed(space, LineValue((first.a, first.b, first.c))),
+            observed(space, LineValue((second.a, second.b, second.c))))
+        value = float(np.rad2deg(measured.value)) if measured.valid else None
+        valid = measured.valid
     return Scalar(valid=valid, reason=None if valid else 'invalid_input',
                   frame=first.frame, unit='deg', value=value)
 
@@ -258,8 +283,12 @@ def point_circle_distance(request: PointCircleRequest, context: CalculationConte
     valid = compatible(point, circle) and point.point is not None
     value = None
     if valid:
-        value = abs(float(np.hypot(point.point.x - circle.center.x,
-                                   point.point.y - circle.center.y)) - circle.radius)
+        space = Space(circle.frame, circle.unit)
+        measured = shared_point_circle_distance(
+            observed(space, (point.point.x, point.point.y)),
+            observed(space, CircleValue((circle.center.x, circle.center.y), circle.radius)))
+        value = float(measured.value) if measured.valid else None
+        valid = measured.valid
     return Scalar(valid=valid, reason=None if valid else 'invalid_input',
                   frame=circle.frame, unit=circle.unit, value=value)
 
@@ -291,15 +320,21 @@ def circle_dimensions(
     circle = request.circle
     valid = compatible(circle, *request.samples)
     common = {'frame': circle.frame, 'unit': circle.unit}
-    radii = []
+    spread_value = None
+    enough = False
     if valid:
-        radii = [float(np.hypot(p.point.x - circle.center.x, p.point.y - circle.center.y))
-                 for p in request.samples if p.point is not None]
+        samples = np.asarray([[p.point.x, p.point.y] for p in request.samples
+                              if p.point is not None], dtype=np.float64).reshape(-1, 2)
+        space = Space(circle.frame, circle.unit)
+        measured = shared_sampled_diameter_spread(
+            observed(space, CircleValue((circle.center.x, circle.center.y), circle.radius)),
+            observed(space, samples))
+        enough = measured.valid
+        spread_value = float(measured.value) if measured.valid else None
     radius = Scalar(valid=circle.valid, value=circle.radius, **common)
     diameter = Scalar(valid=circle.valid, value=2 * circle.radius if circle.valid else None,
                       **common)
-    enough = valid and len(radii) >= 2
-    spread = Scalar(valid=enough, value=2 * (max(radii) - min(radii)) if enough else None,
+    spread = Scalar(valid=enough, value=spread_value,
                     reason=None if enough else 'insufficient_valid_samples', **common)
     return CircleDimensionsResult(valid=circle.valid, radius=radius, diameter=diameter,
                                   sampled_diameter_spread=spread, **common)

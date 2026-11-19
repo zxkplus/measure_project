@@ -4,6 +4,19 @@ from typing import List, Literal, Optional
 
 from pydantic import Field, model_validator
 
+from measure.computation_types import (
+    ComputationContractError,
+    Observation,
+    Space,
+    invalid,
+    observed,
+)
+from measure.evaluation import (
+    LimitsSpec,
+    centerline_deviation as shared_centerline_deviation,
+    diameter_variation as shared_diameter_variation,
+    evaluate_range as shared_evaluate_range,
+)
 from measure_api.v2.atomic_types import PositionedPoint, Scalar
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.families.geometry import compatible
@@ -55,6 +68,47 @@ class EvaluationResult(Scalar):
     invalid_policy: str
 
 
+def _limits(request: LimitsRequest) -> LimitsSpec:
+    """Translate the HTTP limit model into the shared evaluation spec."""
+    return LimitsSpec(minimum=request.minimum, maximum=request.maximum,
+                      unit=request.unit, invalid_policy=request.invalid_policy)
+
+
+def _observation(scalar) -> Observation:
+    """Wrap one HTTP scalar as a shared observation."""
+    space = Space(scalar.frame, scalar.unit)
+    if scalar.valid and scalar.value is not None:
+        return observed(space, float(scalar.value))
+    return invalid(space, 'invalid_input')
+
+
+def _from_shared(result, calculation: Optional[str] = None) -> EvaluationResult:
+    """Translate a shared evaluation result into the HTTP response model."""
+    measurement = result.measurement
+    return EvaluationResult(
+        valid=measurement.valid,
+        reason=measurement.reason,
+        value=measurement.value,
+        frame=measurement.space.frame,
+        unit=measurement.space.unit,
+        evaluation_status=result.evaluation_status,
+        calculation=calculation or result.calculation,
+        input_count=result.input_count,
+        valid_count=result.valid_count,
+        minimum=result.minimum,
+        maximum=result.maximum,
+        invalid_policy=result.invalid_policy,
+    )
+
+
+def _translate(call):
+    """Run a shared evaluation, mapping contract errors onto service errors."""
+    try:
+        return call()
+    except ComputationContractError as error:
+        raise ServiceError(error.code, error.message) from error
+
+
 def _evaluate(
     request: LimitsRequest, value: Optional[float], frame: str,
     input_count: int, valid_count: int, calculation: str, reason: Optional[str] = None,
@@ -91,9 +145,8 @@ def evaluate_range(request: RangeRequest, context: CalculationContext) -> Evalua
     """
     if request.value.unit != request.unit:
         raise ServiceError('evaluation.unit_mismatch', 'Limit and observation units must match')
-    valid = request.value.valid and request.value.value is not None
-    return _evaluate(request, request.value.value if valid else None, request.value.frame,
-                     1, int(valid), 'inclusive_range')
+    return _from_shared(_translate(
+        lambda: shared_evaluate_range(_observation(request.value), _limits(request))))
 
 
 def evaluate_variation(
@@ -111,14 +164,8 @@ def evaluate_variation(
     """
     if any(v.unit != request.unit for v in request.values):
         raise ServiceError('evaluation.unit_mismatch', 'Diameter and limit units must match')
-    observed = [v.value for v in request.values if v.valid and v.value is not None]
-    enough = len(observed) >= 2 and (
-        request.invalid_policy == 'ignore' or len(observed) == len(request.values))
-    value = max(observed) - min(observed) if enough else None
-    frames = {value.frame for value in request.values}
-    frame = next(iter(frames)) if len(frames) == 1 else 'aggregate'
-    return _evaluate(request, value, frame, len(request.values), len(observed),
-                     'max_diameter_minus_min_diameter', 'insufficient_valid_samples')
+    return _from_shared(_translate(lambda: shared_diameter_variation(
+        [_observation(value) for value in request.values], _limits(request))))
 
 
 def evaluate_deviation(
@@ -137,13 +184,21 @@ def evaluate_deviation(
     if any(p.unit != request.unit for p in request.points):
         raise ServiceError('evaluation.unit_mismatch', 'Center and limit units must match')
     compatible(*request.points)
-    observed = [p.point.x for p in request.points if p.valid and p.point is not None]
-    enough = len(observed) >= 2 and (
-        request.invalid_policy == 'ignore' or len(observed) == len(request.points))
-    value = max(observed) - min(observed) if enough else None
-    frame = request.points[0].frame if request.points else 'source'
-    return _evaluate(request, value, frame, len(request.points), len(observed),
-                     'max_center_x_minus_min_center_x', 'insufficient_valid_samples')
+    usable = [p for p in request.points if p.valid and p.point is not None]
+    frames = {p.frame for p in request.points}
+    frame = next(iter(frames)) if len(frames) == 1 else (
+        request.points[0].frame if request.points else 'source')
+    # Two centres are required for a meaningful horizontal range; the shared
+    # aggregate deliberately accepts one under the ignore policy, so the
+    # stricter supplier contract is enforced here.
+    if len(usable) < 2:
+        return _evaluate(request, None, frame, len(request.points), len(usable),
+                         'max_center_x_minus_min_center_x', 'insufficient_valid_samples')
+    space = Space(frame, request.unit)
+    observations = [observed(space, (p.point.x, p.point.y)) if p.point is not None
+                    else invalid(space, 'invalid_input') for p in request.points]
+    return _from_shared(_translate(lambda: shared_centerline_deviation(
+        observations, _limits(request), space=space)))
 
 
 OPERATIONS = [

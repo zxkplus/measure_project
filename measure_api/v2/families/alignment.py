@@ -8,6 +8,8 @@ import cv2
 import numpy as np
 from pydantic import Field, model_validator
 
+from measure.alignment import SimilarityOptions, estimate_similarity as shared_estimate_similarity
+from measure.computation_types import Space
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.models import (
     CalculationRequest, CoordinateMapping, FileDescriptor, FileReference, OutputSpec,
@@ -58,21 +60,28 @@ class SimilarityEstimateResult(StrictModel):
 
 
 def _fit_similarity(source: np.ndarray, destination: np.ndarray, scale: bool) -> np.ndarray:
-    xmean, ymean = source.mean(axis=0), destination.mean(axis=0)
-    x, y = source - xmean, destination - ymean
-    variance = np.sum(x*x)
-    if variance < 1e-10 or np.sum(y*y) < 1e-10:
-        raise ValueError("Degenerate correspondences")
-    u, singular, vt = np.linalg.svd(x.T @ y)
-    correction = np.diag([1, np.linalg.det(vt.T @ u.T)])
-    rotation = vt.T @ correction @ u.T
-    factor = np.sum(singular * np.diag(correction)) / variance if scale else 1.0
-    if factor <= 1e-10:
-        raise ValueError("Degenerate scale")
-    matrix = np.eye(3)
-    matrix[:2, :2] = factor * rotation
-    matrix[:2, 2] = ymean - matrix[:2, :2] @ xmean
-    return matrix
+    """Fit a 2-D similarity through the shared estimator.
+
+    Args:
+        source: Source xy correspondences.
+        destination: Destination xy correspondences.
+        scale: Whether the similarity may scale.
+
+    Returns:
+        The 3x3 source-to-destination matrix.
+
+    Raises:
+        ValueError: When the correspondences are degenerate.
+    """
+    space = Space('source', 'px')
+    fitted = shared_estimate_similarity(
+        np.asarray(source, dtype=np.float64), np.asarray(destination, dtype=np.float64),
+        source=space, destination=Space('destination', 'px'),
+        options=SimilarityOptions(estimate_scale=bool(scale)),
+    )
+    if not fitted.valid:
+        raise ValueError(fitted.reason or "Degenerate correspondences")
+    return np.asarray(fitted.value.mapping.matrix, dtype=np.float64)
 
 
 def estimate_similarity(

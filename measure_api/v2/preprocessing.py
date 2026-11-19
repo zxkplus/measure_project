@@ -10,6 +10,14 @@ import cv2
 import numpy as np
 from pydantic import Field, model_validator
 
+from measure.preprocessing import (
+    CannySpec,
+    ClaheSpec,
+    RawSpec,
+    SobelSpec,
+    ThresholdSpec,
+    preprocess_pixels,
+)
 from measure_api.v2.models import StrictModel
 
 
@@ -91,25 +99,23 @@ def apply_preprocessing(image: np.ndarray, options: Preprocessing) -> np.ndarray
         Numeric processed pixels, preserving the preset-specific sample dtype.
     """
     if options.type == "raw":
-        return image.astype(np.float32)
-    gray = to_gray(image)
+        return preprocess_pixels(image, RawSpec(channel_mode="preserve"))
     if options.type == "canny":
-        return cv2.Canny(gray, options.low_threshold, options.high_threshold)
+        return preprocess_pixels(
+            image,
+            CannySpec(threshold1=options.low_threshold,
+                      threshold2=options.high_threshold))
     if options.type == "sobel":
-        dx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=options.kernel_size)
-        dy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=options.kernel_size)
-        return cv2.magnitude(dx, dy)
+        return preprocess_pixels(
+            image,
+            SobelSpec(kernel_size=options.kernel_size, magnitude=True))
     if options.type == "clahe":
-        clahe = cv2.createCLAHE(
-            options.clip_limit, (options.tile_grid_size, options.tile_grid_size),
-        )
-        return clahe.apply(gray).astype(np.float32)
-    modes = {
-        "binary": cv2.THRESH_BINARY, "binary_inv": cv2.THRESH_BINARY_INV,
-        "truncate": cv2.THRESH_TRUNC, "tozero": cv2.THRESH_TOZERO,
-        "tozero_inv": cv2.THRESH_TOZERO_INV,
-    }
-    return cv2.threshold(gray, options.threshold, 255, modes[options.mode])[1]
+        return preprocess_pixels(
+            image,
+            ClaheSpec(clip_limit=options.clip_limit,
+                      tile_grid_size=options.tile_grid_size))
+    return preprocess_pixels(
+        image, ThresholdSpec(threshold=options.threshold, mode=options.mode))
 
 
 def display_preview(image: np.ndarray) -> np.ndarray:

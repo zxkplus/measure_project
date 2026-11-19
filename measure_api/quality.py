@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
+from measure.evaluation import summarize_quality
 from measure.measure_workflow import (
     CircleResult,
     EdgePairObject,
@@ -37,45 +38,29 @@ def compute_quality(object_type: str, result: Any) -> Dict[str, Any]:
         ``coverage_ratio``, ``rms``, ``edge_amplitude_mean``, etc.
         Empty dict if not applicable.
     """
+    if result is None or not getattr(result, "valid", False):
+        return {}
+
+    summary = summarize_quality(meta=getattr(result, "meta", {}) or {})
     q: Dict[str, Any] = {}
 
-    if result is None or not getattr(result, "valid", False):
-        return q
-
-    meta = getattr(result, "meta", {}) or {}
-
     if object_type in ("FitCircle", "FitLine", "EdgePoint", "EdgePair"):
-        num_edges = meta.get("num_points", meta.get("num_edges", 0))
-        if isinstance(num_edges, (list, tuple, np.ndarray)):
-            num_edges = int(np.sum(num_edges))
-        else:
-            num_edges = int(num_edges)
-        q["num_edges"] = num_edges
-
-        expected = meta.get("num_measures", 0)
-        if isinstance(expected, (list, tuple, np.ndarray)):
-            expected = int(np.sum(expected))
-        else:
-            expected = int(expected)
+        samples = summary.sample_count or 0
+        expected = summary.requested_probe_count or 0
+        q["num_edges"] = samples
         q["expected_edges"] = expected
-
-        if expected > 0:
-            q["coverage_ratio"] = round(min(num_edges / expected, 1.0), 4)
-        else:
-            q["coverage_ratio"] = 0.0
+        coverage = summary.coverage_ratio or 0.0
+        q["coverage_ratio"] = round(min(coverage, 1.0), 4)
 
     if object_type in ("FitCircle", "FitLine"):
-        rms_val = meta.get("rms", meta.get("fit_rms", None))
-        if rms_val is not None:
-            q["rms"] = round(float(rms_val), 4)
+        if summary.rms_error is not None:
+            q["rms"] = round(float(summary.rms_error), 4)
 
     if object_type in ("EdgePoint", "EdgePair", "FitCircle", "FitLine"):
-        amp = meta.get("amplitude_mean", meta.get("edge_amplitude", None))
-        if amp is not None:
-            q["edge_amplitude_mean"] = round(float(amp), 2)
-        amp_min = meta.get("amplitude_min", None)
-        if amp_min is not None:
-            q["edge_amplitude_min"] = round(float(amp_min), 2)
+        if summary.amplitude_mean is not None:
+            q["edge_amplitude_mean"] = round(float(summary.amplitude_mean), 2)
+        if getattr(result, "meta", None) and "amplitude_min" in (result.meta or {}):
+            q["edge_amplitude_min"] = round(float(result.meta["amplitude_min"]), 2)
 
     return q
 
