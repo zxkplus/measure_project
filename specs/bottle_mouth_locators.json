@@ -1,0 +1,14 @@
+{
+  "image": "/home/industai/下载/瓶口定位.jpg",
+  "note": "Bottle-mouth concentric rings. Each locator is a CircleLocator window; raw luminance loses the faint ring edges (contrast ~1-2 sigma), so each window is mean-filtered (box blur) before matching. highlight_reject_mask kills glaring highlights so the sparse mirrored-streak arcs cannot outvote the continuous ring.",
+  "locators": [
+    {"name": "rim",         "roi": [1500, 2000, 3100, 3300], "radius_range": [680, 820], "polarity": "light",
+     "preprocess": {"box_blur": 12, "highlight_reject": 90}},
+    {"name": "inner_bezel", "roi": [1500, 2000, 3100, 3000], "radius_range": [560, 660], "polarity": "light",
+     "preprocess": {"box_blur": 9,  "highlight_reject": 90}},
+    {"name": "inner_hole",  "roi": [1700, 2100, 2900, 2900], "radius_range": [250, 420], "polarity": "light",
+     "preprocess": {"box_blur": 12, "highlight_reject": 90}},
+    {"name": "hub_badge",   "roi": [1900, 2100, 2900, 3000], "radius_range": [400, 560], "polarity": "dark",
+     "preprocess": {"box_blur": 12, "highlight_reject": 90}}
+  ]
+}
