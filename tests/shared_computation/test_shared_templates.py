@@ -168,3 +168,62 @@ def test_search_diagnostics_account_for_every_requested_variant(api, space, text
     assert diagnostics["searched_variant_count"] == 3
     assert diagnostics["unavailable_variant_count"] == diagnostics["pruned_variant_count"] == 0
     assert diagnostics["search_complete"] is True
+
+
+def test_clockwise_rotation_search_recovers_the_stamped_pose(api, space, textured_image):
+    prepared = prepare(api, space, textured_image).value
+    image = stamp(textured_image, center=(120.0, 90.0), angle_deg=12.0)
+    result = api("template_search", "search_support")(
+        image, prepared, api("template_search", "SearchOptions")(
+            score_threshold=0.6, coarse_fine=False, subpixel=True,
+            angle_min_rad=np.deg2rad(8.0), angle_max_rad=np.deg2rad(16.0),
+            angle_step_rad=np.deg2rad(1.0),
+        ), image_space=space("inspection"),
+    )
+    assert result.valid
+    match = result.value.matches[0]
+    # One grid step of slack: the shared variant uses the continuous size/2
+    # origin, while v2 rotates the pixel-corner box (a half-pixel difference
+    # that can shift the best grid cell by one step).
+    assert np.rad2deg(match.angle_rad) == pytest.approx(12.0, abs=1.5)
+    assert match.scale == pytest.approx(1.0, abs=1e-9)
+    assert match.center == pytest.approx((120.0, 90.0), abs=1.0)
+
+
+def test_scale_search_recovers_the_stamped_scale(api, space, textured_image):
+    prepared = prepare(api, space, textured_image).value
+    image = stamp(textured_image, center=(120.0, 90.0), scale=1.08)
+    result = api("template_search", "search_support")(
+        image, prepared, api("template_search", "SearchOptions")(
+            score_threshold=0.6, coarse_fine=False, subpixel=True,
+            scale_min=1.02, scale_max=1.14, scale_step=0.02,
+        ), image_space=space("inspection"),
+    )
+    assert result.valid
+    match = result.value.matches[0]
+    assert match.scale == pytest.approx(1.08, abs=0.021)
+    assert match.center == pytest.approx((120.0, 90.0), abs=1.0)
+
+
+def test_coarse_fine_search_matches_the_single_pass_result(api, space, textured_image):
+    prepared = prepare(api, space, textured_image).value
+    image = stamp(textured_image, center=(120.0, 90.0), angle_deg=12.0)
+    options = dict(score_threshold=0.6, subpixel=True,
+                   angle_min_rad=np.deg2rad(8.0), angle_max_rad=np.deg2rad(16.0),
+                   angle_step_rad=np.deg2rad(1.0),
+                   coarse_angle_step_rad=np.deg2rad(4.0))
+    fine = api("template_search", "search_support")(
+        image, prepared,
+        api("template_search", "SearchOptions")(coarse_fine=False, **options),
+        image_space=space("inspection"),
+    )
+    coarse = api("template_search", "search_support")(
+        image, prepared,
+        api("template_search", "SearchOptions")(coarse_fine=True, **options),
+        image_space=space("inspection"),
+    )
+    assert coarse.valid and fine.valid
+    for left, right in zip(coarse.value.matches, fine.value.matches):
+        assert left.center == pytest.approx(right.center, abs=1.0)
+        assert left.angle_rad == pytest.approx(right.angle_rad, abs=np.deg2rad(1.0))
+        assert left.score == pytest.approx(right.score, abs=0.05)

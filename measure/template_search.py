@@ -197,13 +197,14 @@ def _variant(pixels: Array, angle_rad: float, scale: float,
     variant = cv2.warpAffine(pixels, matrix[:2, :], (out_width, out_height),
                              flags=cv2.INTER_LINEAR,
                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-    variant_mask = None
-    if mask is not None:
-        warped_mask = cv2.warpAffine(np.asarray(mask, dtype=np.float32),
-                                     matrix[:2, :], (out_width, out_height),
-                                     flags=cv2.INTER_NEAREST,
-                                     borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-        variant_mask = (warped_mask > 0.5).astype(np.float32)
+    footprint = mask if mask is not None else np.ones((height, width), dtype=bool)
+    warped_mask = cv2.warpAffine(np.asarray(footprint, dtype=np.float32),
+                                 matrix[:2, :], (out_width, out_height),
+                                 flags=cv2.INTER_NEAREST,
+                                 borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    variant_mask = (warped_mask > 0.5).astype(np.float32)
+    if variant_mask.sum() <= 0:
+        variant_mask = None
     return variant, matrix, variant_mask
 
 
@@ -357,6 +358,89 @@ def _suppress(candidates: List[TemplateMatch], max_overlap: float) -> List[Templ
     return kept
 
 
+
+def _search_coarse_fine(gray: Array, prepared: PreparedSupport, options: SearchOptions,
+                        image_space: Space, angles: List[float], scales: List[float],
+                        requested: int, pad: int) -> Observation[MatchSet]:
+    """Two-stage search: a coarse pose grid locates neighbourhoods, then a fine grid.
+
+    Args:
+        gray: ``float32`` inspection image.
+        prepared: Immutable prepared support.
+        options: Search policy carrying both grid resolutions.
+        image_space: Space of the inspection image.
+        angles: Requested fine clockwise angles in radians.
+        scales: Requested fine scales.
+        requested: Total fine pose count.
+        pad: Border padding already applied for large variants.
+
+    Returns:
+        Selected matches, or ``no_matches``.
+    """
+    coarse_angles = _coarse_grid(angles, options.coarse_angle_step_rad)
+    coarse_scales = _coarse_grid(scales, options.coarse_scale_step)
+    coarse_options = SearchOptions(
+        score_threshold=min(options.score_threshold, options.coarse_score_threshold),
+        max_matches=0, max_overlap=options.max_overlap, subpixel=False,
+        coarse_fine=False, angle_list=tuple(coarse_angles),
+        scale_list=tuple(coarse_scales),
+    )
+    coarse = search_support(gray, prepared, coarse_options, image_space=image_space)
+    if not coarse.valid or coarse.value is None:
+        return invalid(image_space, "no_matches",
+                       {"requested_variant_count": requested,
+                        "searched_variant_count": 0,
+                        "unavailable_variant_count": 0,
+                        "pruned_variant_count": len(coarse_angles) * len(coarse_scales),
+                        "search_complete": True})
+    neighbourhoods = coarse.value.matches
+    limit = options.max_matches if options.max_matches > 0 else len(neighbourhoods)
+    refined: List[TemplateMatch] = []
+    searched = 0
+    for anchor_match in neighbourhoods[:limit]:
+        local_angles = [angle for angle in angles
+                        if abs(angle - anchor_match.angle_rad)
+                        <= options.coarse_angle_step_rad + 1e-12]
+        local_scales = [scale for scale in scales
+                        if abs(scale - anchor_match.scale)
+                        <= options.coarse_scale_step + 1e-12]
+        if not local_angles or not local_scales:
+            continue
+        fine_options = SearchOptions(
+            score_threshold=options.score_threshold, max_matches=0,
+            max_overlap=options.max_overlap, subpixel=options.subpixel,
+            coarse_fine=False, angle_list=tuple(local_angles),
+            scale_list=tuple(local_scales),
+        )
+        found = search_support(gray, prepared, fine_options, image_space=image_space)
+        if found.valid and found.value is not None:
+            refined.extend(found.value.matches)
+            searched += len(local_angles) * len(local_scales)
+    selected = _suppress(refined, options.max_overlap)
+    if options.max_matches:
+        selected = selected[: options.max_matches]
+    diagnostics = {"requested_variant_count": requested,
+                   "searched_variant_count": searched,
+                   "unavailable_variant_count": 0,
+                   "pruned_variant_count": len(coarse_angles) * len(coarse_scales),
+                   "search_complete": True}
+    if not selected:
+        return invalid(image_space, "no_matches", diagnostics)
+    return observed(image_space, MatchSet(matches=tuple(selected)), diagnostics)
+
+
+def _coarse_grid(values: List[float], step: float) -> List[float]:
+    """Reduce a fine grid to the coarse values spaced at least ``step`` apart."""
+    if not values:
+        return []
+    coarse = [values[0]]
+    for value in values[1:]:
+        if abs(value - coarse[-1]) >= step - 1e-12:
+            coarse.append(value)
+    if coarse[-1] != values[-1]:
+        coarse.append(values[-1])
+    return coarse
+
 def search_support(
     image: Array, prepared: PreparedSupport, options: SearchOptions, *,
     image_space: Space,
@@ -393,6 +477,9 @@ def search_support(
     largest = int(math.ceil(max(support_width, support_height)
                             * max(scales) * math.sqrt(2.0))) + 2
     pad = max(0, largest - min(gray.shape[:2]))
+    if options.coarse_fine and (len(angles) > 1 or len(scales) > 1):
+        return _search_coarse_fine(gray, prepared, options, image_space,
+                                   angles, scales, requested, pad)
     padded = cv2.copyMakeBorder(gray, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0.0)
 
     for angle in angles:
@@ -405,7 +492,9 @@ def search_support(
             if variant_height > padded.shape[0] or variant_width > padded.shape[1]:
                 unavailable += 1
                 continue
-            if variant_mask is not None:
+            if variant_mask is not None and float(variant_mask.sum()) > len(variant_mask.flat) * 0.999:
+                scores = cv2.matchTemplate(padded, variant, cv2.TM_CCOEFF_NORMED)
+            elif variant_mask is not None:
                 scores = cv2.matchTemplate(padded, variant, cv2.TM_CCORR_NORMED,
                                            mask=variant_mask)
             else:
