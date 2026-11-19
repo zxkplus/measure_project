@@ -29,3 +29,7 @@ docs/*
 
 # replay / debug-analysis artifacts (scripts, rendered images, JSON evidence)
 replay-output/
+
+# Local scratch and temporary working directories
+.scratch/
+.tmp/
