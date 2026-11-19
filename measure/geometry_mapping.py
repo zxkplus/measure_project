@@ -172,30 +172,31 @@ class _HorizonError(ValueError):
 
 
 def _apply_lens(points: Array, step: LensStep) -> Array:
-    """Apply one pinhole lens step in pixel coordinates."""
+    """Apply one pinhole lens step in pixel coordinates.
+
+    Both directions defer to OpenCV so every distortion model the project
+    accepts (4, 5, 8, 12 and 14 coefficients, including rational and tilted
+    sensor) is honoured. The undistort direction keeps OpenCV's default
+    iteration criteria deliberately: that solver slack is what the historical
+    display and measurement paths were pinned against.
+    """
     matrix = np.asarray(step.camera_matrix, dtype=np.float64)
     distortion = np.asarray(step.distortion, dtype=np.float64).reshape(-1)
+    if len(points) == 0:
+        return np.empty((0, 2), dtype=np.float64)
     if step.direction == "undistort":
-        if len(points) == 0:
-            return np.empty((0, 2), dtype=np.float64)
-        result = cv2.undistortPointsIter(
+        result = cv2.undistortPoints(
             points.reshape(-1, 1, 2).astype(np.float64), matrix, distortion,
             None, matrix,
-            (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 50, 1e-12),
         )
-        return result.reshape(-1, 2)
+        return result.reshape(-1, 2).astype(np.float64)
     fx, fy = float(matrix[0, 0]), float(matrix[1, 1])
     cx, cy = float(matrix[0, 2]), float(matrix[1, 2])
-    x = (points[:, 0] - cx) / fx
-    y = (points[:, 1] - cy) / fy
-    coefficients = np.zeros(5, dtype=np.float64)
-    coefficients[: min(5, len(distortion))] = distortion[:5]
-    k1, k2, p1, p2, k3 = (float(value) for value in coefficients)
-    radius2 = x * x + y * y
-    radial = 1.0 + k1 * radius2 + k2 * radius2 ** 2 + k3 * radius2 ** 3
-    xd = x * radial + 2.0 * p1 * x * y + p2 * (radius2 + 2.0 * x * x)
-    yd = y * radial + p1 * (radius2 + 2.0 * y * y) + 2.0 * p2 * x * y
-    return np.column_stack([fx * xd + cx, fy * yd + cy])
+    normalized = np.column_stack([(points[:, 0] - cx) / fx,
+                                  (points[:, 1] - cy) / fy])
+    rays = np.column_stack([normalized, np.ones(len(normalized))]).astype(np.float64)
+    projected, _ = cv2.projectPoints(rays, np.zeros(3), np.zeros(3), matrix, distortion)
+    return projected.reshape(-1, 2).astype(np.float64)
 
 
 def _map_points(points: Array, chain: MappingChain) -> Array:

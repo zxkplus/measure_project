@@ -213,3 +213,23 @@ def test_metric_points_mode_does_not_invent_a_fitted_model(api, space, observed)
     )
     assert result.valid and result.value.model == "points" and result.value.geometry is None
     np.testing.assert_allclose(result.value.samples_xy, [[2.0, 3.0]])
+
+
+def test_rational_distortion_uses_every_coefficient(api, space, camera_model):
+    module = api("geometry_mapping")
+    camera = camera_model()
+    # k4/k5 only exist in the rational model; a 5-coefficient expansion would
+    # drop them and misfit the picture by a third of a pixel.
+    distortion = np.array([-0.21, 0.04, 0.0, 0.0, 0.0, 0.011, -0.004, 0.0])
+    chain = module.MappingChain((
+        module.LensStep(source=space("a"), destination=space("b"),
+                        camera_matrix=camera.matrix, distortion=distortion,
+                        direction="distort"),
+        module.LensStep(source=space("b"), destination=space("c"),
+                        camera_matrix=camera.matrix, distortion=distortion,
+                        direction="undistort"),
+    ))
+    points = np.array([[40.0, 30.0], [120.0, 90.0], [250.0, 200.0]])
+    result = module.map_sample_points(points, chain)
+    assert result.valid
+    np.testing.assert_allclose(result.value, points, atol=0.01)
