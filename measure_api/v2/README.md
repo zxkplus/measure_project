@@ -36,6 +36,14 @@ Template localization rescans each coarse target only inside
 rescans (requests may also choose per call with `search.fine_search_policy`). See the
 [template/alignment contract](../../docs/v2-template-alignment-contract.md).
 
+Pose variants in one search are evaluated on a thread pool: `MEASURE_V2_SEARCH_THREADS`
+defaults to **16**, lowered to the machine's CPU count when smaller, and bounded to `1..16`
+when set explicitly. Splitting the pose grid is a pure speed-up - recorded values are identical
+at any width (pinned by `test_threaded_pose_grid_reproduces_single_thread_result`). On the
+exported production tasks the 37-pose rotation search measured 3.98 s at one thread against
+0.77 s at the default; single-pose tasks do not change. Each compute worker gets this many pose
+threads, so keep `max_workers * MEASURE_V2_SEARCH_THREADS` inside the physical core count.
+
 ## Caller contract
 
 - A file reference is either `{root: "exchange", path: "images/input.png"}` or

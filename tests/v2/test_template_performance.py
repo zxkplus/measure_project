@@ -1,5 +1,7 @@
 """Search-cost controls, process caches and counters stay numerically neutral."""
 
+import os
+
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -71,9 +73,17 @@ def test_fine_candidates_default_is_unbounded_and_opt_in(monkeypatch):
 
 
 def test_search_threads_is_bounded(monkeypatch):
-    for value, expected in (("1", 1), ("4", 4), ("99", 16), ("0", 1), ("x", 1)):
+    # An explicit value is honoured exactly, bounded to 1..16, whatever machine runs this.
+    for value, expected in (("1", 1), ("4", 4), ("99", 16), ("0", 1)):
         monkeypatch.setenv("MEASURE_V2_SEARCH_THREADS", value)
         assert search_threads() == expected
+    monkeypatch.delenv("MEASURE_V2_SEARCH_THREADS", raising=False)
+    default = search_threads()
+    assert 1 <= default <= 16
+    assert default == min(16, os.cpu_count())
+    # An unusable value is treated as unconfigured, not as "single thread".
+    monkeypatch.setenv("MEASURE_V2_SEARCH_THREADS", "all")
+    assert search_threads() == default
 
 
 def test_repeated_targets_bounded_refinement_matches_full_refinement(client, tmp_path):
@@ -116,8 +126,11 @@ def test_threaded_pose_grid_reproduces_single_thread_result(tmp_path, monkeypatc
     rng = np.random.default_rng(23)
     patch = rng.integers(20, 230, (18, 26), np.uint8)
     results = []
-    for threads in ("1", "4"):
-        monkeypatch.setenv("MEASURE_V2_SEARCH_THREADS", threads)
+    for threads in ("1", "4", None):
+        if threads is None:
+            monkeypatch.delenv("MEASURE_V2_SEARCH_THREADS", raising=False)
+        else:
+            monkeypatch.setenv("MEASURE_V2_SEARCH_THREADS", threads)
         settings = ServiceSettings(shared_roots={"exchange": tmp_path}, max_workers=1)
         with TestClient(create_app(settings)) as client:
             template = teach(client, tmp_path, patch, reference=140)
