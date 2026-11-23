@@ -19,9 +19,8 @@ from measure.computation_types import (
 from measure.geometry_mapping import similarity_scale
 from measure.rectify import ResampleOptions, patch_source_corners, warp_mapped
 from measure.template_search import (
-    correlate, decimate_matrix, decimate_pixels, has_texture, peak_argmax,
-    render_variant,
-    rotated_box_overlap, variant_size,
+    correlate, decimate_matrix, decimate_pixels, has_texture, keep_disjoint,
+    peaks, refine_peak_xy, render_variant, rotated_box_overlap, variant_size,
 )
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.files import ArtifactWriter
@@ -407,7 +406,7 @@ class TemplateSearch(StrictModel):
     coarse_angle_step: float = Field(default=5, gt=0, le=360)
     coarse_scale_step: float = Field(default=0.1, gt=0, le=10)
     pyramid_levels: int = Field(default=0, ge=0, le=8)
-    pyramid_max_template_size: int = Field(default=400, ge=8, le=32768)
+    pyramid_max_template_size: int = Field(default=128, ge=8, le=32768)
     # None resolves to MEASURE_V2_TEMPLATE_FINE_POLICY (default "neighborhood").
     fine_search_policy: Optional[Literal["neighborhood", "whole"]] = None
     fine_search_expand_px: int = Field(default=24, ge=0, le=4096)
@@ -493,45 +492,6 @@ class TemplateMatchResult(StrictModel):
     template: FileReference
     matches: List[TemplateMatch]
     diagnostics: dict = Field(default_factory=dict)
-
-
-def _peaks(scores: np.ndarray, options: TemplateSearch, width: int, height: int) -> list:
-    work = np.nan_to_num(scores, nan=-1.0, posinf=-1.0, neginf=-1.0).copy()
-    result = []
-    limit = options.max_matches or 1000
-    while len(result) < limit:
-        x, y, score = peak_argmax(work)
-        if score < options.score_threshold:
-            break
-        dx = dy = 0.0
-        if options.subpixel:
-            for axis in (0, 1):
-                p = y if axis == 0 else x
-                if 0 < p < work.shape[axis] - 1:
-                    before = scores[y - 1, x] if axis == 0 else scores[y, x - 1]
-                    after = scores[y + 1, x] if axis == 0 else scores[y, x + 1]
-                    offset = _subpixel_offset(before, score, after)
-                    if axis == 0:
-                        dy = offset
-                    else:
-                        dx = offset
-        result.append((x + dx, y + dy, float(np.clip(score, -1, 1))))
-        half_w = max(1, int(width * (1 - options.overlap)))
-        half_h = max(1, int(height * (1 - options.overlap)))
-        work[max(0, y - half_h):y + half_h + 1, max(0, x - half_w):x + half_w + 1] = -1
-    return result
-
-
-def _subpixel_offset(before: float, centre: float, after: float) -> float:
-    """Refine one correlation peak with a local quadratic.
-
-    The vertex sits at ``(before - after) / (2 * (before - 2c + after))``; the
-    code has always used ``(before - after)`` over the inverted denominator,
-    which is a sign convention carried by every recorded observation.
-    """
-    denom = float(before - 2 * centre + after)
-    offset = float((before - after) / (2 * denom)) if abs(denom) > 1e-8 else 0.0
-    return offset if np.isfinite(offset) and abs(offset) <= 0.5 else 0.0
 
 
 def _grid(low: float, high: float, step: float) -> list:
@@ -622,7 +582,14 @@ def _scan(search: np.ndarray, pixels: np.ndarray, options: TemplateSearch,
         options.score_threshold if threshold is None else threshold
     ), "max_matches": 1000})
     result = []
-    for x, y, score in _peaks(scores, settings, w, h):
+    # The shared primitive owns peak selection and the greedy suppression box;
+    # subpixel refinement and pose re-attachment stay here.
+    for x, y, score in peaks(scores, settings.score_threshold,
+                             limit=settings.max_matches,
+                             suppression_box=(float(w), float(h)),
+                             overlap=settings.overlap):
+        if settings.subpixel:
+            x, y = refine_peak_xy(scores, int(x), int(y), centre=score)
         pose = matrix.copy()
         pose[:2, 2] += [x + origin[0], y + origin[1]]
         result.append((score, angle, scale, pose))
@@ -691,26 +658,30 @@ def _scan_grid(search: np.ndarray, pixels: np.ndarray, options: TemplateSearch,
 
 @timed("match_suppression")
 def _suppress(candidates: list, pixels: np.ndarray, options: TemplateSearch) -> list:
+    """Select disjoint instances from pose candidates with the shared policy.
+
+    The overlap geometry is the same rotated-rectangle measure the engine uses;
+    only the record layout differs here (``(score, angle, scale, matrix)``).
+    """
     h, w = pixels.shape[:2]
-    kept = []
-    for candidate in sorted(candidates, key=lambda item: item[0], reverse=True):
-        score, angle, scale, matrix = candidate
-        center = matrix @ [(w - 1) / 2, (h - 1) / 2, 1]
-        overlapping = False
-        for previous in kept:
-            _, pa, ps, pm = previous
-            pc = pm @ [(w - 1) / 2, (h - 1) / 2, 1]
-            if rotated_box_overlap(
-                (float(center[0]), float(center[1])), (w * scale, h * scale), angle,
-                (float(pc[0]), float(pc[1])), (w * ps, h * ps), pa,
-            ) > options.overlap:
-                overlapping = True
-                break
-        if not overlapping:
-            kept.append(candidate)
-            if len(kept) >= (options.max_matches or 1000):
-                break
-    return kept
+
+    def center_of(candidate) -> list:
+        matrix = candidate[3]
+        return list(matrix @ [(w - 1) / 2, (h - 1) / 2, 1])
+
+    def overlap_of(candidate, previous) -> float:
+        _, angle, scale, _ = candidate
+        _, previous_angle, previous_scale, _ = previous
+        center = center_of(candidate)
+        previous_center = center_of(previous)
+        return rotated_box_overlap(
+            (float(center[0]), float(center[1])), (w * scale, h * scale), angle,
+            (float(previous_center[0]), float(previous_center[1])),
+            (w * previous_scale, h * previous_scale), previous_angle,
+        )
+
+    return keep_disjoint(overlap_of, candidates, options.overlap,
+                         options.max_matches or 1000)
 
 
 def _fine_radius(pixels: np.ndarray, options: TemplateSearch) -> int:

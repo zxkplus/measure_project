@@ -885,7 +885,7 @@ def convert_normalized(
                     "angle_step": p.get("angle_step", 1),
                     "subpixel": p.get("use_subpixel", True),
                     "pyramid_max_template_size": int(
-                        p.get("pyramid_max_template_size", 400)
+                        p.get("pyramid_max_template_size", 128)
                     ),
                 },
             }

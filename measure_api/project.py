@@ -337,6 +337,40 @@ class MeasureProject:
         logger.info("Reference loaded: %s", info)
         return info
 
+    def _apply_matching_config(self) -> None:
+        """Reapply ``config.yaml`` matching values to the loaded workflow.
+
+        A saved asset carries the coarse-search settings it was taught with. The
+        deployment config is the operator's lever: retuning
+        ``pyramid_max_template_size`` here must take effect on the next run
+        without re-teaching every model, so the config value wins over the
+        stored one and the pyramid factor is recomputed through the single
+        ``TemplatePoint`` implementation.
+
+        Only settings present in the config are applied; anything absent keeps
+        the asset's value rather than being reset to a default.
+        """
+        workflow = self._workflow
+        if workflow is None:
+            return
+        template_point = getattr(getattr(workflow, "_alignment", None),
+                                 "_template_point", None)
+        if template_point is None:
+            return
+        matching = Config.load().get("matching", {}) or {}
+        if not any(key in matching for key in
+                   ("pyramid_decimate", "pyramid_max_template_size")):
+            return
+        decimate = int(matching.get("pyramid_decimate", template_point.pyramid_decimate))
+        max_side = int(matching.get("pyramid_max_template_size",
+                                    template_point.pyramid_max_template_size))
+        template_point.set_pyramid(decimate, max_side)
+        for attribute in ("_pyramid_decimate", "_pyramid_max_template_size"):
+            if hasattr(workflow, attribute):
+                setattr(workflow, attribute, decimate if "decimate" in attribute else max_side)
+        logger.info("Matching config applied: pyramid_decimate=%s max_template_size=%s",
+                    decimate, max_side)
+
     def set_template(
         self,
         center: Tuple[float, float],
@@ -403,7 +437,7 @@ class MeasureProject:
             overlap = float(_cfg_match["overlap"])
         # Read pyramid config from matching config
         pyramid_decimate = int(_cfg_match.get("pyramid_decimate", 0))
-        pyramid_max_template_size = int(_cfg_match.get("pyramid_max_template_size", 400))
+        pyramid_max_template_size = int(_cfg_match.get("pyramid_max_template_size", 128))
         self._workflow.teach_template(
             self._reference_image,
             center=tuple(center),
@@ -1251,6 +1285,12 @@ class MeasureProject:
                 config = json.load(f)
             self._measurement_defs = config.get("measurement_defs", [])
             self._composed_defs = config.get("composed_defs", [])
+
+        # Global matching config wins over the values stored in the asset, so an
+        # operator can retune the coarse search on site without re-teaching every
+        # model.  Applied after the workflow is loaded, because the asset carries
+        # whatever was saved at teach time.
+        self._apply_matching_config()
 
         # Load reference image
         if os.path.isfile(ref_path):

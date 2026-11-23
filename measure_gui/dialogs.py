@@ -256,7 +256,7 @@ class TemplateMatchPointDialog(BaseParamDialog):
             "angle_step": 1.0,
             "use_subpixel": True,
             "pyramid_decimate": 0,
-            "pyramid_max_template_size": 400,
+            "pyramid_max_template_size": 128,
         }
         if params:
             defaults.update(params)
@@ -315,7 +315,7 @@ class TemplateMatchPointDialog(BaseParamDialog):
             return
         self.result["pyramid_decimate"] = 1 if self.result.get("pyramid_decimate") else 0
         try:
-            size = int(self.result.get("pyramid_max_template_size", 400))
+            size = int(self.result.get("pyramid_max_template_size", 128))
         except (TypeError, ValueError):
             size = 400
         self.result["pyramid_max_template_size"] = max(16, size)

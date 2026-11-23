@@ -740,7 +740,7 @@ class TemplatePointObject(MeasureObject):
         tp.max_matches = data.get("max_matches", 0)
         # 初始化 pyramid 相关属性
         tp.pyramid_decimate = data.get("pyramid_decimate", 0)
-        tp.pyramid_max_template_size = data.get("pyramid_max_template_size", 400)
+        tp.pyramid_max_template_size = data.get("pyramid_max_template_size", 128)
         tp._pyramid_scale = data.get("pyramid_scale", 1.0)
 
         obj._template_point = tp

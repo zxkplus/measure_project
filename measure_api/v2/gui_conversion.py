@@ -245,7 +245,7 @@ def _pyramid_enabled(matching: Dict[str, Any]) -> bool:
     """
     try:
         decimate = int(matching.get("pyramid_decimate", 0) or 0)
-        cap = int(matching.get("pyramid_max_template_size", 400) or 0)
+        cap = int(matching.get("pyramid_max_template_size", 128) or 0)
     except (TypeError, ValueError):
         return False
     return decimate > 0 and cap > 0
@@ -258,7 +258,7 @@ def _pyramid_cap(matching: Dict[str, Any], width: int, height: int) -> int:
     switch off, lifting the cap above the support keeps the factor at 1.0
     instead of silently introducing a downsampling step the operator disabled.
     """
-    cap = int(matching.get("pyramid_max_template_size", 400))
+    cap = int(matching.get("pyramid_max_template_size", 128))
     enabled = matching.get("pyramid_enabled")
     if enabled is None:
         enabled = _pyramid_enabled(matching)
@@ -366,7 +366,7 @@ def normalize_manifest(
         "overlap": float(matching.get("overlap", 0.3)),
         "coarse_fine": bool(matching.get("coarse_fine", True)),
         "coarse_angle_step_deg": float(matching.get("coarse_angle_step", 5.0)),
-        "pyramid_max_template_size": int(matching.get("pyramid_max_template_size", 400)),
+        "pyramid_max_template_size": int(matching.get("pyramid_max_template_size", 128)),
         # v1 disables decimation entirely when the switch is off, while v2's
         # size cap is always active. Keep the flag so the search builder can
         # lift the cap above the support and keep factor == 1.0.

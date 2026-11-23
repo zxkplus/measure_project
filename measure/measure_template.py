@@ -41,9 +41,39 @@ import cv2
 import numpy as np
 from typing import Tuple, Optional, Dict, Any, List, Protocol
 from measure.constants import EPS
+from measure.template_search import keep_disjoint, peaks, refine_peak_xy
 from measure.viz import to_bgr, to_gray, draw_text_shadow
 
 logger = logging.getLogger(__name__)
+
+
+def _build_grid(invariant: bool, range_tuple: Tuple[float, float],
+                step: float) -> List[float]:
+    """Return the pose values to enumerate for one invariant axis.
+
+    A non-invariant axis has nothing to sweep: a zero/one range means "no pose
+    search" (the single identity value), any other range collapses to its
+    midpoint, because the axis is not actually swept.
+
+    Args:
+        invariant: Whether this axis (angle or scale) is being searched.
+        range_tuple: ``(low, high)`` search bounds for the axis.
+        step: Grid step for the axis.
+
+    Returns:
+        The ascending grid values, inclusive of ``high`` within ``step * 0.01``.
+    """
+    if not invariant:
+        if range_tuple[0] == 0.0 and abs(range_tuple[1] - 1.0) < 1e-6:
+            return [0.0]
+        return [(range_tuple[0] + range_tuple[1]) / 2.0]
+    values = []
+    value = range_tuple[0]
+    tolerance = step * 0.01
+    while value <= range_tuple[1] + tolerance:
+        values.append(value)
+        value += step
+    return values
 
 
 # =========================================================================
@@ -372,7 +402,7 @@ class TemplatePoint:
                  max_matches: int = 0,
                  overlap: float = 0.3,
                  pyramid_decimate: int = 0,
-                 pyramid_max_template_size: int = 400):
+                 pyramid_max_template_size: int = 128):
         """
         Initialize a template point from a reference image.
 
@@ -498,16 +528,30 @@ class TemplatePoint:
         """
         Compute the scale factor for the pyramid coarse search.
 
-        Ensures the larger dimension of the template (after preprocessor)
-        fits within pyramid_max_template_size. The result is clamped to [0, 1).
+        Mirrors ``measure.template_search`` so both paths agree: the factor is
+        the more aggressive of the decimation level (``2**-pyramid_decimate``)
+        and the template side cap (``pyramid_max_template_size / longest``),
+        clamped so the shortest side keeps at least 6 px.
+
+        Both terms matter for models with no fixed template size: the level
+        bounds the ratio from above, while the cap scales it with the support,
+        so a 2000 px support and a 200 px support end up with a comparable
+        coarse-level cost.
 
         Returns:
             Scale factor in (0.0, 1.0]. 1.0 means no downsampling.
         """
-        max_dim = max(self._crop_h, self._crop_w)
-        if max_dim <= 0:
+        height = int(self._crop_h)
+        width = int(self._crop_w)
+        if height <= 0 or width <= 0:
             return 1.0
-        return min(1.0, self.pyramid_max_template_size / float(max_dim))
+        level = int(self.pyramid_decimate)
+        if level <= 0:
+            return 1.0
+        factor = min(2.0 ** -level,
+                     self.pyramid_max_template_size / float(max(height, width)))
+        shortest = max(1, min(height, width))
+        return min(1.0, max(factor, min(1.0, 6.0 / shortest)))
 
     def _pyramid_downsample(self, image: np.ndarray) -> np.ndarray:
         """
@@ -1152,21 +1196,6 @@ class TemplatePoint:
         H, W = search_img.shape
         tmpl_h, tmpl_w = self.edge_template.shape
 
-        # ---- 1. Build search grids (reuse _build_grid helper) ----
-        def _build_grid(invariant, range_tuple, step):
-            if not invariant:
-                if range_tuple[0] == 0.0 and abs(range_tuple[1] - 1.0) < 1e-6:
-                    return [0.0]
-                avg = (range_tuple[0] + range_tuple[1]) / 2.0
-                return [avg]
-            vals = []
-            v = range_tuple[0]
-            eps = step * 0.01
-            while v <= range_tuple[1] + eps:
-                vals.append(v)
-                v += step
-            return vals
-
         if self.coarse_fine:
             # Coarse grid
             coarse_angles = _build_grid(self.rotation_invariant, self.angle_range,
@@ -1322,21 +1351,6 @@ class TemplatePoint:
         H, W = search_img.shape
         tmpl_h, tmpl_w = self.edge_template.shape
 
-        # ---- 1. Build search grids ----
-        def _build_grid(invariant, range_tuple, step):
-            if not invariant:
-                if range_tuple[0] == 0.0 and abs(range_tuple[1] - 1.0) < 1e-6:
-                    return [0.0] if range_tuple[0] == 0.0 else [1.0]
-                avg = (range_tuple[0] + range_tuple[1]) / 2.0
-                return [avg]
-            vals = []
-            v = range_tuple[0]
-            eps = step * 0.01
-            while v <= range_tuple[1] + eps:
-                vals.append(v)
-                v += step
-            return vals
-
         if self.coarse_fine:
             # Coarse grid
             coarse_angles = _build_grid(self.rotation_invariant, self.angle_range, self.coarse_angle_step)
@@ -1455,21 +1469,6 @@ class TemplatePoint:
         """
         H, W = search_img.shape
         tmpl_h, tmpl_w = self.edge_template.shape
-
-        # ---- 1. Build search grids (reuse _build_grid helper) ----
-        def _build_grid(invariant, range_tuple, step):
-            if not invariant:
-                if range_tuple[0] == 0.0 and abs(range_tuple[1] - 1.0) < 1e-6:
-                    return [0.0]
-                avg = (range_tuple[0] + range_tuple[1]) / 2.0
-                return [avg]
-            vals = []
-            v = range_tuple[0]
-            eps = step * 0.01
-            while v <= range_tuple[1] + eps:
-                vals.append(v)
-                v += step
-            return vals
 
         if self.coarse_fine:
             # Coarse grid
@@ -1704,9 +1703,8 @@ class TemplatePoint:
         """
         Find all local maxima in a correlation heatmap above a threshold.
 
-        Uses 3×3 dilation to detect pixel-level local maxima: a pixel is a
-        peak if it equals the dilated value (no larger neighbour) AND its
-        score >= threshold.
+        Delegates to the shared peak primitive in ``measure.template_search``,
+        which owns the 3x3-dilation local-maximum rule for every caller.
 
         Args:
             heatmap: 2D correlation heatmap (e.g. from cv2.matchTemplate).
@@ -1715,30 +1713,24 @@ class TemplatePoint:
         Returns:
             List of (score, row, col) tuples, sorted by score descending.
         """
-        kernel = np.ones((3, 3), dtype=heatmap.dtype)
-        dilated = cv2.dilate(heatmap, kernel)
-        mask = (heatmap == dilated) & (heatmap >= threshold)
-        peak_ys, peak_xs = np.where(mask)
-        peaks = [(float(heatmap[py, px]), int(py), int(px))
-                 for py, px in zip(peak_ys, peak_xs)]
-        peaks.sort(key=lambda x: x[0], reverse=True)
-        return peaks
+        return [(score, int(y), int(x))
+                for x, y, score in peaks(heatmap, threshold)]
 
     @staticmethod
     def _spatial_nms(candidates: List[tuple],
                      overlap: float,
                      max_matches: int = 0) -> List[tuple]:
         """
-        IoU-based non-maximum suppression for template match candidates.
+        Non-maximum suppression for template match candidates.
 
-        Sorts candidates by score descending and greedily selects those
-        whose axis-aligned bounding box IoU (Intersection over Union) with
-        every already selected candidate is <= overlap.
-
-        overlap=0.0 means no overlap allowed between targets (most aggressive).
-        overlap=1.0 means any overlap is allowed (no NMS suppression).
+        The greedy selection policy lives in ``measure.template_search``
+        (``keep_disjoint``); this method only supplies the geometry. It is
+        axis-aligned on each candidate's rendered variant size, because these
+        records carry no pose matrix - the API layer's ``_suppress`` uses the
+        rotated-geometry form where a pose is available.
 
         Candidates must be tuples where:
+          index 0 = score
           index 1 = row (center y)
           index 2 = col (center x)
           index -2 = width (c[-2])
@@ -1752,57 +1744,29 @@ class TemplatePoint:
         Returns:
             Filtered list of candidates, sorted by score descending.
         """
-        if overlap >= 1.0:
-            # No NMS needed — just take top max_matches by score
-            selected = sorted(candidates, key=lambda x: x[0], reverse=True)
-            if max_matches > 0:
-                selected = selected[:max_matches]
-            return selected
+        boxes = {}
 
-        sorted_candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
-        selected: List[tuple] = []
+        def bounds_of(candidate) -> tuple:
+            key = (candidate[1], candidate[2], candidate[-2], candidate[-1])
+            box = boxes.get(key)
+            if box is None:
+                row, col, w, h = key
+                box = (col - w / 2.0, row - h / 2.0,
+                       col + w / 2.0, row + h / 2.0, w * h)
+                boxes[key] = box
+            return box
 
-        for c in sorted_candidates:
-            row, col = c[1], c[2]
-            w, h = c[-2], c[-1]  # width and height are always last two elements
+        def overlap_of(candidate, previous) -> float:
+            ax1, ay1, ax2, ay2, area = bounds_of(candidate)
+            bx1, by1, bx2, by2, barea = bounds_of(previous)
+            iw = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+            ih = max(0.0, min(ay2, by2) - max(ay1, by1))
+            intersection = iw * ih
+            if intersection <= 0.0:
+                return 0.0
+            return intersection / (area + barea - intersection)
 
-            # Axis-aligned bounding box for candidate c
-            x1 = col - w / 2.0
-            y1 = row - h / 2.0
-            x2 = col + w / 2.0
-            y2 = row + h / 2.0
-            area = w * h
-
-            keep = True
-            for s in selected:
-                # Axis-aligned bounding box for selected s
-                sx1 = s[2] - s[-2] / 2.0
-                sy1 = s[1] - s[-1] / 2.0
-                sx2 = s[2] + s[-2] / 2.0
-                sy2 = s[1] + s[-1] / 2.0
-                sarea = s[-2] * s[-1]
-
-                # Intersection area
-                ix1 = max(x1, sx1)
-                iy1 = max(y1, sy1)
-                ix2 = min(x2, sx2)
-                iy2 = min(y2, sy2)
-                iw = max(0.0, ix2 - ix1)
-                ih = max(0.0, iy2 - iy1)
-                inter_area = iw * ih
-
-                if inter_area > 0:
-                    iou = inter_area / (area + sarea - inter_area)
-                    if iou > overlap:
-                        keep = False
-                        break
-
-            if keep:
-                selected.append(c)
-                if max_matches > 0 and len(selected) >= max_matches:
-                    break
-
-        return selected
+        return keep_disjoint(overlap_of, candidates, overlap, max_matches)
 
     @staticmethod
     def _refine_1d_subpixel(results, best_val, rotation_invariant, scale_invariant,
@@ -2190,7 +2154,7 @@ class TemplatePoint:
         obj.max_matches = int(data.get('max_matches', 0))
         obj.overlap = float(data.get('overlap', 0.3))
         obj.pyramid_decimate = int(data.get('pyramid_decimate', 0))
-        obj.pyramid_max_template_size = int(data.get('pyramid_max_template_size', 400))
+        obj.pyramid_max_template_size = int(data.get('pyramid_max_template_size', 128))
         obj.set_pyramid(obj.pyramid_decimate, obj.pyramid_max_template_size)
 
         return obj
@@ -2309,7 +2273,7 @@ class TemplatePoint:
         obj.max_matches = int(data.get("max_matches", 0))
         obj.overlap = float(data.get("overlap", 0.3))
         obj.pyramid_decimate = int(data.get("pyramid_decimate", 0))
-        obj.pyramid_max_template_size = int(data.get("pyramid_max_template_size", 400))
+        obj.pyramid_max_template_size = int(data.get("pyramid_max_template_size", 128))
         obj.set_pyramid(obj.pyramid_decimate, obj.pyramid_max_template_size)
 
         return obj
@@ -2346,12 +2310,10 @@ class TemplatePoint:
     def _refine_subpixel_2d(self, heatmap: np.ndarray,
                              peak_y: int, peak_x: int) -> Tuple[float, float]:
         """
-        Refine the correlation peak to subpixel accuracy using two independent
-        1D quadratic fits along x and y through the peak.
+        Refine the correlation peak to subpixel accuracy.
 
-        This mirrors the _refine_subpixel pattern from measure1D.py, extended
-        to the correlation surface: one quadratic fit along the row direction
-        through the peak, and one along the column direction.
+        Delegates to the single subpixel primitive in ``measure.template_search``
+        so this adapter cannot drift from the API layer's refinement.
 
         Args:
             heatmap: 2D correlation map from cv2.matchTemplate
@@ -2361,43 +2323,7 @@ class TemplatePoint:
         Returns:
             (subpixel_x, subpixel_y): Refined peak position in the heatmap
         """
-        h, w = heatmap.shape
-
-        # Refine along x (columns) — fit to heatmap[peak_y, peak_x-1 : peak_x+2]
-        if 0 < peak_x < w - 1:
-            x_vals = np.array([peak_x - 1, peak_x, peak_x + 1], dtype=np.float64)
-            y_vals = heatmap[peak_y, peak_x - 1 : peak_x + 2].astype(np.float64)
-            try:
-                coeffs = np.polyfit(x_vals, y_vals, 2)
-                a, b, c = coeffs
-                if abs(a) > EPS:
-                    subpixel_x = -b / (2.0 * a)
-                else:
-                    subpixel_x = float(peak_x)
-                subpixel_x = max(x_vals[0], min(x_vals[-1], subpixel_x))
-            except Exception:
-                subpixel_x = float(peak_x)
-        else:
-            subpixel_x = float(peak_x)
-
-        # Refine along y (rows) — fit to heatmap[peak_y-1 : peak_y+2, peak_x]
-        if 0 < peak_y < h - 1:
-            x_vals = np.array([peak_y - 1, peak_y, peak_y + 1], dtype=np.float64)
-            y_vals = heatmap[peak_y - 1 : peak_y + 2, peak_x].astype(np.float64)
-            try:
-                coeffs = np.polyfit(x_vals, y_vals, 2)
-                a, b, c = coeffs
-                if abs(a) > EPS:
-                    subpixel_y = -b / (2.0 * a)
-                else:
-                    subpixel_y = float(peak_y)
-                subpixel_y = max(x_vals[0], min(x_vals[-1], subpixel_y))
-            except Exception:
-                subpixel_y = float(peak_y)
-        else:
-            subpixel_y = float(peak_y)
-
-        return subpixel_x, subpixel_y
+        return refine_peak_xy(heatmap, peak_x, peak_y)
 
 
 # =========================================================================

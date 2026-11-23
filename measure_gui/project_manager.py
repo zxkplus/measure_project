@@ -587,7 +587,7 @@ class ProjectManager:
             # to its default and the next teach changed the search behaviour.
             "pyramid_decimate": int(matching.get("pyramid_decimate", 0)),
             "pyramid_max_template_size": int(
-                matching.get("pyramid_max_template_size", 400)),
+                matching.get("pyramid_max_template_size", 128)),
         }
 
     @staticmethod

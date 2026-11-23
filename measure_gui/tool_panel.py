@@ -302,11 +302,12 @@ class ToolPanel(ttk.Frame):
             self._overlap_label.config(text=f"{pct}%")
         self._overlap_var.trace_add("write", _update_overlap_label)
 
-        # Pyramid coarse search.  The engine ignores the decimation *level*: any
-        # non-zero value only switches the pyramid on, and the real ratio comes
-        # from pyramid_max_template_size.  The old "2x/4x/8x" list therefore
-        # offered three labels for one behaviour, so it is an on/off switch plus
-        # the size cap that actually decides the ratio.
+        # Pyramid coarse search.  The ratio is the more aggressive of two terms:
+        # ``2**-pyramid_decimate`` and ``pyramid_max_template_size / longest``.
+        # Models have no fixed template size, so the cap is what keeps the
+        # coarse level's cost comparable across a 200 px and a 2000 px support;
+        # the level alone would let the coarse template grow with the support.
+        # Both paths (this panel and the shared engine) compute it identically.
         ttk.Label(self._template_form, text="金字塔粗筛").pack(anchor=tk.W, **pad)
         self._pyramid_enabled_var = tk.BooleanVar(value=True)
         pyramid_check = ttk.Checkbutton(
@@ -802,7 +803,7 @@ class ToolPanel(ttk.Frame):
         self._angle_step_var.set(angle_step_deg)
         if pyramid_decimate is not None:
             self.set_pyramid_config(pyramid_decimate,
-                                    pyramid_max_template_size if pyramid_max_template_size is not None else 400,
+                                    pyramid_max_template_size if pyramid_max_template_size is not None else 128,
                                     template_longest_side)
 
     def get_alignment_mode(self) -> str:

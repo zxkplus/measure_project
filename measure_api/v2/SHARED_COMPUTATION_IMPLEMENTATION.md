@@ -503,7 +503,6 @@ def search_support(
 | `fine_window_radius_px` | `float=8.0` | >0；精阶段anchor搜索窗口半径下限，单位原图px |
 | `refinement_association_radius_px` | `float=3.0` | >0；相邻位姿关联同一目标的中心距离上限，单位原图px |
 | `pyramid_decimation_exponent` | `int=0` | ≥0；0不降采样，n为2**n倍；不称为 levels |
-| `max_coarse_template_side` | `int=400` | ≥8；仅指数>0时继续加粗直到模板长边不超过该值，实际指数写诊断；指数0禁用降采样 |
 | `min_valid_fraction` | `float=1.0` | `(0,1]`；有效重叠像素 / 变体有效支持像素 |
 
 网格为 `low+i*step≤high`，若最后一项与 high 相差大于浮点容差则补 high；重复端点去重。
@@ -513,6 +512,11 @@ def search_support(
 窗口与region相交；不同候选窗口可以合并计算，但输出候选仍各自追踪到目标。
 V2 `pyramid_levels` 需根据旧实际层级行为解析成实际降采样指数和尺寸策略；无等价转换返回
 `asset_incompatible`，不得直接复制数字。候选数量/内存限制在适配层检查参数后、分配前执行。
+
+降采样因子按 `factor = min(2**-pyramid_levels, pyramid_max_template_size / max(h,w))` 取得，
+并夹紧到模板短边不少于 6px。实际指数 = `round(-log2(factor))`，由诊断回报。模板长边的唯一
+上限参数是 `pyramid_max_template_size`；早期规范中的 `max_coarse_template_side` 从未被实现读取，
+已从契约移除。
 
 ### 7.3 搜索结果与不变性
 

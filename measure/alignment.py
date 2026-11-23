@@ -208,7 +208,7 @@ class AlignmentStrategy:
         coarse_fine: bool = True,
         coarse_angle_step: float = 5.0,
         pyramid_decimate: int = 0,
-        pyramid_max_template_size: int = 400,
+        pyramid_max_template_size: int = 128,
     ):
         """Store the reference geometry and create the parent template.
 

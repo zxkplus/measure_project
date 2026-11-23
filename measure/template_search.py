@@ -85,9 +85,8 @@ class SearchOptions:
     scale_step: float = 0.02
     coarse_angle_step_rad: float = math.radians(5.0)
     coarse_scale_step: float = 0.1
-    max_coarse_template_side: int = 400
     pyramid_levels: int = 0
-    pyramid_max_template_size: int = 400
+    pyramid_max_template_size: int = 128
     fine_search_radius_px: float = 24.0
     angle_list: Optional[Tuple[float, ...]] = None
     scale_list: Optional[Tuple[float, ...]] = None
@@ -498,94 +497,210 @@ def correlate(search: Array, template: Array, mask: Optional[Array] = None) -> A
     return np.nan_to_num(scores, nan=-1.0, posinf=-1.0, neginf=-1.0)
 
 
-def _refine_peak(scores: Array, x: int, y: int) -> Tuple[float, float]:
-    """Refine one correlation peak with two independent 1-D quadratic fits.
+def subpixel_offset(before: float, centre: float, after: float) -> float:
+    """Refine one correlation peak with a local quadratic.
+
+    The vertex sits at ``(before - after) / (2 * (before - 2c + after))``; the
+    code has always used ``(before - after)`` over the inverted denominator,
+    which is a sign convention carried by every recorded observation. This is
+    the single subpixel primitive for every caller: the API layer and the
+    measured-point adapter both report positions produced here.
+
+    The offset is rejected (returns ``0.0``) when the parabola degenerates or
+    the vertex leaves the centre pixel, so a flat or inverted neighbourhood can
+    never shift a peak further than half a pixel.
+
+    Callers pass score samples exactly as they read them (the map is
+    ``float32``), and the neighbour terms are deliberately *not* widened to
+    ``float64``: the denominator is a difference of nearby samples, so widening
+    ``before``/``after`` changes it in the 8th significant digit and shifts the
+    reported centre by a few micro-pixels. Every recorded golden position was
+    produced with the narrow-precision arithmetic, so widening it would make
+    earlier results unreproducible.
+
+    Args:
+        before: Score at the pixel before the peak along one axis.
+        centre: Score at the peak.
+        after: Score at the pixel after the peak along one axis.
+
+    Returns:
+        Offset from the integer peak in ``[-0.5, 0.5]``, or ``0.0``.
+    """
+    denom = float(before - 2 * centre + after)
+    offset = float((before - after) / (2 * denom)) if abs(denom) > 1e-8 else 0.0
+    return offset if np.isfinite(offset) and abs(offset) <= 0.5 else 0.0
+
+
+def refine_peak_xy(scores: Array, x: int, y: int,
+                   centre: Optional[float] = None) -> Tuple[float, float]:
+    """Refine one correlation peak in both axes with :func:`subpixel_offset`.
 
     Args:
         scores: Correlation map.
         x: Integer peak column.
         y: Integer peak row.
+        centre: Score at the peak as the peak finder reported it. Pass it: the
+            neighbour samples are read from the map (``float32``) while the
+            centre arrives as a ``float``, and that mixed width is part of the
+            recorded convention (see :func:`subpixel_offset`). Omitting it
+            falls back to the map's own sample.
 
     Returns:
-        Refined ``(x, y)`` in correlation-map coordinates.
+        Refined ``(x, y)`` in correlation-map coordinates; an axis on the map
+        border keeps its integer position.
     """
     height, width = scores.shape
+    x, y = int(x), int(y)
+    middle = float(scores[y, x]) if centre is None else float(centre)
     refined_x, refined_y = float(x), float(y)
     if 0 < x < width - 1:
-        values = scores[y, x - 1:x + 2].astype(np.float64)
-        coeffs = np.polyfit(np.array([x - 1, x, x + 1], dtype=np.float64), values, 2)
-        if abs(coeffs[0]) > 1e-12:
-            refined_x = float(-coeffs[1] / (2.0 * coeffs[0]))
+        refined_x = float(x) + subpixel_offset(scores[y, x - 1], middle,
+                                               scores[y, x + 1])
     if 0 < y < height - 1:
-        values = scores[y - 1:y + 2, x].astype(np.float64)
-        coeffs = np.polyfit(np.array([y - 1, y, y + 1], dtype=np.float64), values, 2)
-        if abs(coeffs[0]) > 1e-12:
-            refined_y = float(-coeffs[1] / (2.0 * coeffs[0]))
+        refined_y = float(y) + subpixel_offset(scores[y - 1, x], middle,
+                                               scores[y + 1, x])
     return refined_x, refined_y
 
 
-def _peaks(scores: Array, threshold: float, limit: int = 0) -> List[Tuple[int, int, float]]:
+def peaks(scores: Array, threshold: float, limit: int = 0,
+          suppression_box: Optional[Tuple[float, float]] = None,
+          overlap: float = 0.3) -> List[Tuple[float, float, float]]:
     """Return local maxima of a correlation map above a threshold.
 
-    Uses a vectorised 3x3 dilation instead of a Python scan, so a full-frame
-    heatmap costs the same as ``matchTemplate`` instead of millions of loop
-    iterations.
+    Without ``suppression_box`` this is a vectorised 3x3-dilation local-maximum
+    pass: it reports every distinct lobe at once, at the cost of a single
+    dilation, instead of millions of Python loop iterations. With it the scan is
+    greedy instead: after a peak is accepted, a box of
+    ``suppression_box * (1 - overlap)`` around it is blanked, so one instance
+    cannot supply several nearby candidates.
+
+    Both modes sort strongest first, so the caller sees a stable order at any
+    ``limit``.
 
     Args:
         scores: Correlation map.
         threshold: Minimum accepted score.
-        limit: Optional cap on candidates, keeping the highest scores.
+        limit: Optional cap on candidates, keeping the highest scores; ``0``
+            keeps every peak.
+        suppression_box: Optional ``(width, height)`` of the matched variant;
+            enables greedy suppression around each accepted peak.
+        overlap: Fractional overlap still counted as the same instance, used
+            only when ``suppression_box`` is given.
 
     Returns:
-        ``(x, y, score)`` tuples, strongest first.
+        ``(x, y, score)`` tuples, strongest first, at integer correlation-map
+        cells in both modes. Subpixel refinement belongs to the caller
+        (:func:`refine_peak_xy`), so this function never reports a refined
+        coordinate that a caller might refine again.
     """
     finite = np.nan_to_num(scores, nan=-1.0, posinf=-1.0, neginf=-1.0)
-    dilated = cv2.dilate(finite, np.ones((3, 3), dtype=np.float32))
-    mask = (finite >= threshold) & (finite >= dilated - 1e-12)
-    ys, xs = np.nonzero(mask)
-    if xs.size == 0:
-        return []
-    values = finite[ys, xs]
-    order = np.argsort(-values)
-    if limit and order.size > limit:
-        order = order[:limit]
-    return [(int(xs[i]), int(ys[i]), float(values[i])) for i in order]
+    if suppression_box is None:
+        dilated = cv2.dilate(finite, np.ones((3, 3), dtype=np.float32))
+        mask = (finite >= threshold) & (finite >= dilated - 1e-12)
+        ys, xs = np.nonzero(mask)
+        if xs.size == 0:
+            return []
+        values = finite[ys, xs]
+        order = np.argsort(-values)
+        if limit and order.size > limit:
+            order = order[:limit]
+        return [(float(xs[i]), float(ys[i]), float(values[i])) for i in order]
+
+    width, height = suppression_box
+    half_w = max(1, int(width * (1 - overlap)))
+    half_h = max(1, int(height * (1 - overlap)))
+    work = finite.copy()
+    found: List[Tuple[float, float, float]] = []
+    cap = limit or 1000
+    while len(found) < cap:
+        x, y, score = peak_argmax(work)
+        if score < threshold:
+            break
+        found.append((float(x), float(y), float(np.clip(score, -1, 1))))
+        work[max(0, y - half_h):y + half_h + 1, max(0, x - half_w):x + half_w + 1] = -1.0
+    return found
 
 
-def _box_iou(a: TemplateMatch, b: TemplateMatch) -> float:
-    """Return the axis-aligned IoU of two matched boxes."""
-    ax1, ay1 = a.center[0] - a.size_wh[0] / 2.0, a.center[1] - a.size_wh[1] / 2.0
-    ax2, ay2 = a.center[0] + a.size_wh[0] / 2.0, a.center[1] + a.size_wh[1] / 2.0
-    bx1, by1 = b.center[0] - b.size_wh[0] / 2.0, b.center[1] - b.size_wh[1] / 2.0
-    bx2, by2 = b.center[0] + b.size_wh[0] / 2.0, b.center[1] + b.size_wh[1] / 2.0
-    inter_width = max(0.0, min(ax2, bx2) - max(ax1, bx1))
-    inter_height = max(0.0, min(ay2, by2) - max(ay1, by1))
-    intersection = inter_width * inter_height
-    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
-    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
-    union = area_a + area_b - intersection
-    return intersection / union if union > 0.0 else 0.0
+def keep_disjoint(overlap_of, candidates: list, max_overlap: float,
+                  limit: int = 0, score_of=None) -> list:
+    """Greedy overlap suppression over caller-owned candidate records.
+
+    ``suppress`` applies this to :class:`TemplateMatch`; callers that carry
+    their own candidate records (the API layer keeps a pose matrix per
+    candidate) pass their own overlap and score accessors instead of
+    re-implementing the loop, so the selection policy has exactly one
+    implementation.
+
+    Args:
+        overlap_of: ``(candidate, kept_candidate) -> float`` in ``[0, 1]``.
+        candidates: Candidate records, strongest first after sorting.
+        max_overlap: Maximum allowed overlap between kept candidates.
+        limit: Optional cap on kept candidates; ``0`` keeps every survivor.
+        score_of: ``candidate -> float`` ranking key, higher is stronger. Only
+            a tie-breaker for equal scores differs between callers, so every
+            caller ranks through this one function.
+
+    Returns:
+        Kept candidates, strongest first.
+    """
+    rank = score_of if score_of is not None else (lambda item: item[0])
+    ordered = sorted(candidates, key=rank, reverse=True)
+    if max_overlap >= 1.0:
+        return ordered[:limit] if limit else ordered
+    kept: list = []
+    for candidate in ordered:
+        if all(overlap_of(candidate, other) <= max_overlap for other in kept):
+            kept.append(candidate)
+            if limit and len(kept) >= limit:
+                break
+    return kept
 
 
-def _suppress(candidates: List[TemplateMatch], max_overlap: float) -> List[TemplateMatch]:
-    """Greedy IoU suppression, strongest first.
+def match_overlap(a: TemplateMatch, b: TemplateMatch) -> float:
+    """Return the overlap of two matched instances in their own poses.
+
+    Each instance contributes its true rotated rectangle (``size_wh`` scaled by
+    its own pose, rotated by its own angle), so two elongated supports matched
+    a few degrees apart are not treated as overlapping just because their
+    axis-aligned bounding boxes are. The measure is the intersection area over
+    the *smaller* box area, which keeps suppression symmetric in score order and
+    reaches 1.0 exactly when one instance sits inside the other.
+
+    Args:
+        a: First match.
+        b: Second match.
+
+    Returns:
+        Overlap in ``[0, 1]``.
+    """
+    return rotated_box_overlap(
+        a.center, a.size_wh, math.degrees(a.angle_rad),
+        b.center, b.size_wh, math.degrees(b.angle_rad),
+    )
+
+
+def suppress(candidates: List[TemplateMatch], max_overlap: float,
+             limit: int = 0) -> List[TemplateMatch]:
+    """Greedy overlap suppression, strongest first.
+
+    Uses :func:`match_overlap` (rotated geometry), the same primitive the API
+    layer reports through ``max_overlap``, so a model cannot select a different
+    set of instances depending on which caller ran it.
 
     Args:
         candidates: All located instances.
-        max_overlap: Maximum allowed IoU between kept matches; ``1.0`` disables
-            suppression and ``0.0`` keeps only non-overlapping boxes.
+        max_overlap: Maximum allowed overlap between kept matches; ``1.0``
+            disables suppression and ``0.0`` keeps only disjoint instances.
+        limit: Optional cap on kept matches; ``0`` keeps every survivor.
 
     Returns:
         Kept matches sorted by score.
     """
-    ordered = sorted(candidates, key=lambda item: item.score, reverse=True)
-    if max_overlap >= 1.0:
-        return ordered
-    kept: List[TemplateMatch] = []
-    for candidate in ordered:
-        if all(_box_iou(candidate, other) <= max_overlap for other in kept):
-            kept.append(candidate)
-    return kept
+    def overlap_of(candidate: TemplateMatch, other: TemplateMatch) -> float:
+        return match_overlap(candidate, other)
+
+    return keep_disjoint(overlap_of, candidates, max_overlap, limit,
+                         score_of=lambda item: item.score)
 
 
 
@@ -647,7 +762,7 @@ def _search_coarse_fine(gray: Array, prepared: PreparedSupport, options: SearchO
         if found.valid and found.value is not None:
             refined.extend(found.value.matches)
             searched += len(local_angles) * len(local_scales)
-    selected = _suppress(refined, options.max_overlap)
+    selected = suppress(refined, options.max_overlap)
     if options.max_matches:
         selected = selected[: options.max_matches]
     diagnostics = {"requested_variant_count": requested,
@@ -677,7 +792,13 @@ def _coarse_grid(values: List[float], step: float) -> List[float]:
 
 
 def _pyramid_factor(prepared: PreparedSupport, options: SearchOptions) -> float:
-    """Return the decimation factor implied by the pyramid options."""
+    """Return the decimation factor implied by the pyramid options.
+
+    ``pyramid_max_template_size`` is the only side-length cap: a decimation
+    that would leave the support's longest side above it is not used. (A
+    legacy ``max_coarse_template_side`` field claimed the same role but was
+    never read; it has been removed rather than silently ignored.)
+    """
     height, width = np.asarray(prepared.pixels).shape[:2]
     factor = min(2.0 ** -int(options.pyramid_levels),
                  options.pyramid_max_template_size / max(width, height))
@@ -761,7 +882,7 @@ def _search_pyramid(gray: Array, prepared: PreparedSupport, options: SearchOptio
                                               destination=image_space, kind="similarity"),
                 peak_xy=found.peak_xy, size_wh=found.size_wh,
             ))
-    selected = _suppress(refined, options.max_overlap)
+    selected = suppress(refined, options.max_overlap)
     if options.max_matches:
         selected = selected[: options.max_matches]
     diagnostics.update({"searched_variant_count": searched,
@@ -848,11 +969,12 @@ def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
             searched += 1
             if options.max_matches == 1:
                 _, best, _, best_loc = cv2.minMaxLoc(scores)
-                peaks = [(best_loc[0], best_loc[1], float(best))] if best >= options.score_threshold else []
+                found = [(best_loc[0], best_loc[1], float(best))] if best >= options.score_threshold else []
             else:
-                peaks = _peaks(scores, options.score_threshold, limit=8 * max(options.max_matches, 8))
-            for x, y, score in peaks:
-                peak_x, peak_y = (_refine_peak(scores, x, y) if options.subpixel
+                found = peaks(scores, options.score_threshold,
+                              limit=8 * max(options.max_matches, 8))
+            for x, y, score in found:
+                peak_x, peak_y = (refine_peak_xy(scores, x, y) if options.subpixel
                                   else (float(x), float(y)))
                 center_x = peak_x + rendered.center[0] - pad
                 center_y = peak_y + rendered.center[1] - pad
@@ -889,7 +1011,7 @@ def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
     }
     if not candidates:
         return invalid(image_space, "no_matches", diagnostics)
-    selected = _suppress(candidates, options.max_overlap)
+    selected = suppress(candidates, options.max_overlap)
     if options.max_matches:
         selected = selected[: options.max_matches]
     return observed(image_space, MatchSet(matches=tuple(selected)), diagnostics)

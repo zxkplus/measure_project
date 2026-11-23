@@ -1225,7 +1225,7 @@ class MultiTargetWorkflow:
         coarse_fine: bool = True,
         coarse_angle_step: float = 5.0,
         pyramid_decimate: int = 0,
-        pyramid_max_template_size: int = 400,
+        pyramid_max_template_size: int = 128,
     ):
         """
         Define the template from a rotated bounding box on the reference image.
@@ -1306,7 +1306,7 @@ class MultiTargetWorkflow:
                         pyramid_decimate = 0
                 # When pyramid is enabled, compute max_template_size to enforce
                 # downsampling: target scaled template side length ~ 200px
-                _pms = int(params.get("pyramid_max_template_size", 400))
+                _pms = int(params.get("pyramid_max_template_size", 128))
                 if pyramid_decimate > 0:
                     _ts = int(params.get("template_size", 40))
                     _pms = min(_pms, max(_ts // 2, 80))
@@ -2333,11 +2333,9 @@ class MultiTargetWorkflow:
         tp.result = None
         # 初始化 pyramid 相关属性
         tp.pyramid_decimate = meta.get("pyramid_decimate", 0)
-        tp.pyramid_max_template_size = meta.get("pyramid_max_template_size", 400)
-        tp._pyramid_scale = 1.0  # 由 calc_pyramid_scale 延迟计算
-        if tp.pyramid_decimate > 0 and tp.pyramid_max_template_size > 0:
-            max_dim = max(tp._crop_h, tp._crop_w)
-            tp._pyramid_scale = min(1.0, tp.pyramid_max_template_size / float(max_dim))
+        tp.pyramid_max_template_size = meta.get("pyramid_max_template_size", 128)
+        # 走 TemplatePoint 的唯一实现，避免第 3 份忽略 decimate 指数的算法
+        tp._pyramid_scale = tp._compute_pyramid_scale()
         wf._alignment._template_point = tp
 
         # For multi-point alignment, rebuild control point templates

@@ -138,7 +138,7 @@ def _configuration(manifest: dict, image: np.ndarray) -> tuple:
         angle_step=matching['angle_step'], coarse_fine=matching.get('coarse_fine', True),
         coarse_angle_step=matching.get('coarse_angle_step', 5),
         pyramid_levels=matching.get('pyramid_decimate', 0),
-        pyramid_max_template_size=matching.get('pyramid_max_template_size', 400),
+        pyramid_max_template_size=matching.get('pyramid_max_template_size', 128),
         scale_min=1, scale_max=1,
     )
     return roi, pp, search

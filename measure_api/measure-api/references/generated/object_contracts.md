@@ -15,7 +15,7 @@ GUI, API v1 and API v2. If a type is not listed here it does not exist.
 | `EdgePoint` | point | `row`, `col`, `angle`, `length1`, `length2` | `sigma`(1), `threshold`(30), `interpolation`("linear") |
 | `FitCircle` | circle | `center`, `radius`, `measure_length1`, `measure_length2` | `radius_min`(null), `radius_max`(null), `num_measures`(12), `sigma`(1), `threshold`(30), `transition`("all"), `selection`("nearest"), `start_phi`(0), `end_phi`(6.283185) |
 | `FitLine` | line | `start`, `end`, `measure_length1`, `measure_length2` | `num_measures`(10), `sigma`(1), `threshold`(30), `transition`("all") |
-| `TemplateMatchPoint` | point | `row`, `col` | `template_size`(40), `preprocessor_type`("raw"), `match_score_threshold`(0.5), `angle_range_half`(15), `angle_step`(1), `use_subpixel`(true), `pyramid_decimate`(0), `pyramid_max_template_size`(400) |
+| `TemplateMatchPoint` | point | `row`, `col` | `template_size`(40), `preprocessor_type`("raw"), `match_score_threshold`(0.5), `angle_range_half`(15), `angle_step`(1), `use_subpixel`(true), `pyramid_decimate`(0), `pyramid_max_template_size`(128) |
 
 ## Composed types
 

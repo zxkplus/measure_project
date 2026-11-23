@@ -11,6 +11,7 @@ from where.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 
@@ -367,8 +368,13 @@ class TestLoadProject:
         # The whole preprocessor config survives the round-trip, not just its type.
         assert preproc_cfg["type"] == "raw"
         # Pyramid settings are part of the model; dropping them here used to
-        # revert the widget to its default on reopen.
-        assert app.tool_panel.last_pyramid == (0, 400)
+        # revert the widget to its default on reopen.  The fixture teaches with
+        # the defaults, so compare against the engine default rather than a
+        # literal that has to be edited whenever that default changes.
+        from measure.measure_template import TemplatePoint
+        default_side = inspect.signature(
+            TemplatePoint.__init__).parameters["pyramid_max_template_size"].default
+        assert app.tool_panel.last_pyramid == (0, default_side)
 
     def test_pyramid_settings_are_restored_from_the_model(self, tmp_path):
         wf = MultiTargetWorkflow()
