@@ -245,7 +245,7 @@ def test_pyramid_search_refines_a_large_support_at_full_resolution(api, space):
     image[200:800, 200:800] = reference[50:650, 50:650]
     result = api("template_search", "search_support")(
         image, prepared, api("template_search", "SearchOptions")(
-            score_threshold=0.6, pyramid_max_template_size=400,
+            score_threshold=0.6, coarse_template_side=400,
         ), image_space=space("inspection"),
     )
     assert result.valid
@@ -296,7 +296,7 @@ def test_unknown_variant_origin_is_rejected(api):
 
 
 def test_decimation_and_pose_thinning_compose(api, space, textured_image):
-    """``pyramid_levels`` and ``coarse_fine`` are independent knobs, not exclusive.
+    """``decimate_exponent`` and ``coarse_fine`` are independent knobs, not exclusive.
 
     They used to short-circuit each other: a decimated search forced the coarse
     grid to stay at full density, so enabling both cost more than enabling
@@ -315,10 +315,10 @@ def test_decimation_and_pose_thinning_compose(api, space, textured_image):
             image_space=space("inspection"),
         )
 
-    plain = search(coarse_fine=False, pyramid_levels=0)
-    decimated = search(coarse_fine=False, pyramid_levels=1)
-    thinned = search(coarse_fine=True, pyramid_levels=0)
-    both = search(coarse_fine=True, pyramid_levels=1)
+    plain = search(coarse_fine=False, decimate_exponent=0)
+    decimated = search(coarse_fine=False, decimate_exponent=1)
+    thinned = search(coarse_fine=True, decimate_exponent=0)
+    both = search(coarse_fine=True, decimate_exponent=1)
     for result in (plain, decimated, thinned, both):
         assert result.valid, result.reason
         assert result.value.matches[0].center == pytest.approx((120.0, 90.0), abs=0.2)
@@ -344,7 +344,7 @@ def test_single_pass_reports_no_neighbourhoods(api, space, textured_image):
     prepared = prepare(api, space, textured_image).value
     result = api("template_search", "search_support")(
         image, prepared, api("template_search", "SearchOptions")(
-            score_threshold=0.6, coarse_fine=False, pyramid_levels=0,
+            score_threshold=0.6, coarse_fine=False, decimate_exponent=0,
         ), image_space=space("inspection"),
     )
     assert result.valid
@@ -362,7 +362,7 @@ def test_fine_candidates_refines_every_neighbourhood_by_default(api, space, text
     def search(**overrides):
         return api("template_search", "search_support")(
             image, prepared, options(score_threshold=0.3, coarse_fine=True,
-                                     pyramid_levels=1, angle_step_rad=np.deg2rad(5.0),
+                                     decimate_exponent=1, angle_step_rad=np.deg2rad(5.0),
                                      angle_min_rad=np.deg2rad(-30.0),
                                      angle_max_rad=np.deg2rad(30.0), **overrides),
             image_space=space("inspection"),
@@ -389,7 +389,7 @@ def test_fine_candidates_environment_variable_bounds_the_search(api, space, text
     assert options.resolved_fine_candidates() == 2
     result = api("template_search", "search_support")(
         image, prepared, api("template_search", "SearchOptions")(
-            score_threshold=0.3, coarse_fine=True, pyramid_levels=1,
+            score_threshold=0.3, coarse_fine=True, decimate_exponent=1,
             angle_step_rad=np.deg2rad(5.0), angle_min_rad=np.deg2rad(-30.0),
             angle_max_rad=np.deg2rad(30.0),
         ), image_space=space("inspection"),

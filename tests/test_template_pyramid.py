@@ -3,7 +3,7 @@
 ``set_pyramid`` is the single place that recomputes ``_pyramid_scale``; these
 tests pin the shared semantics so the GUI and the engine cannot drift: the
 ratio is the more aggressive of the decimation level (``2**-decimate``) and the
-template side cap (``pyramid_max_template_size / longest``), with the shortest
+template side cap (``coarse_template_side / longest``), with the shortest
 side clamped to at least 6 px.
 """
 
@@ -22,13 +22,13 @@ def reference_image():
 def make_point(image, decimate=0, max_size=400):
     return TemplatePoint(
         image, 100, 120, template_size=80,
-        pyramid_decimate=decimate, pyramid_max_template_size=max_size,
+        decimate_exponent=decimate, coarse_template_side=max_size,
     )
 
 
 def test_disabled_pyramid_keeps_full_resolution(reference_image):
     point = make_point(reference_image, decimate=0, max_size=40)
-    assert point.pyramid_decimate == 0
+    assert point.decimate_exponent == 0
     assert point._pyramid_scale == 1.0
 
 
@@ -85,15 +85,15 @@ def test_matches_the_engine_formula(reference_image):
                 point = make_point(reference_image, decimate=decimate, max_size=cap)
                 point._crop_h = point._crop_w = side
                 expected = _pyramid_factor(
-                    prepared, SearchOptions(pyramid_levels=decimate,
-                                            pyramid_max_template_size=cap))
+                    prepared, SearchOptions(decimate_exponent=decimate,
+                                            coarse_template_side=cap))
                 assert point._compute_pyramid_scale() == pytest.approx(expected)
 
 
 def test_set_pyramid_updates_scale_in_place(reference_image):
     point = make_point(reference_image, decimate=0, max_size=400)
     point.set_pyramid(1, 40)
-    assert point.pyramid_decimate == 1
+    assert point.decimate_exponent == 1
     assert point._pyramid_scale == pytest.approx(0.5)
     point.set_pyramid(0, 40)
     assert point._pyramid_scale == 1.0
@@ -105,8 +105,8 @@ def test_save_roundtrip_keeps_pyramid_scale(reference_image, tmp_path):
     point.save(str(path))
 
     restored = TemplatePoint.from_file(str(path))
-    assert restored.pyramid_decimate == 1
-    assert restored.pyramid_max_template_size == 40
+    assert restored.decimate_exponent == 1
+    assert restored.coarse_template_side == 40
     assert restored._pyramid_scale == pytest.approx(point._pyramid_scale)
 
 
@@ -115,7 +115,7 @@ def test_deserialize_uses_same_formula(reference_image, tmp_path):
     payload = point.to_dict() if hasattr(point, "to_dict") else None
     if payload is None:
         pytest.skip("TemplatePoint has no dict serialization")
-    payload["pyramid_decimate"] = 1
-    payload["pyramid_max_template_size"] = 40
+    payload["decimate_exponent"] = 1
+    payload["coarse_template_side"] = 40
     restored = TemplatePoint.from_dict(payload)
     assert restored._pyramid_scale == pytest.approx(0.5)

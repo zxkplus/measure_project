@@ -458,8 +458,8 @@ def _normalize_matching(
     for key, name in (
         ("coarse_fine", "coarse_fine"),
         ("coarse_angle_step", "coarse_angle_step_deg"),
-        ("pyramid_max_template_size", "pyramid_max_template_size"),
-        ("pyramid_decimate", "pyramid_decimate"),
+        ("coarse_template_side", "coarse_template_side"),
+        ("decimate_exponent", "decimate_exponent"),
         ("scale_min", "scale_min"),
         ("scale_max", "scale_max"),
         ("scale_step", "scale_step"),

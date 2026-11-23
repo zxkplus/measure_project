@@ -74,6 +74,7 @@ from measure.measure_template import (
     TemplatePoint,
     ThresholdPreprocessor,
     _PREPROCESSOR_REGISTRY,
+    pyramid_setting,
     _deserialize_preprocessor,
 )
 
@@ -1224,8 +1225,8 @@ class MultiTargetWorkflow:
         overlap: float = 0.3,
         coarse_fine: bool = True,
         coarse_angle_step: float = 5.0,
-        pyramid_decimate: int = 0,
-        pyramid_max_template_size: int = 128,
+        decimate_exponent: int = 0,
+        coarse_template_side: int = 128,
     ):
         """
         Define the template from a rotated bounding box on the reference image.
@@ -1244,8 +1245,8 @@ class MultiTargetWorkflow:
                      0 = no overlap at all (default 0.3).
             coarse_fine: Use two-stage coarse-to-fine search.
             coarse_angle_step: Step size for coarse angle search.
-            pyramid_decimate: Pyramid decimation level (0=disabled).
-            pyramid_max_template_size: Max template side length after decimation.
+            decimate_exponent: Pyramid decimation level (0=disabled).
+            coarse_template_side: Max template side length after decimation.
         """
         self._alignment.teach(
             reference_image, center, size, angle_deg,
@@ -1254,8 +1255,8 @@ class MultiTargetWorkflow:
             angle_range=angle_range, angle_step=angle_step,
             max_matches=max_matches, overlap=overlap,
             coarse_fine=coarse_fine, coarse_angle_step=coarse_angle_step,
-            pyramid_decimate=pyramid_decimate,
-            pyramid_max_template_size=pyramid_max_template_size,
+            decimate_exponent=decimate_exponent,
+            coarse_template_side=coarse_template_side,
         )
 
         # Keep the workflow-level matching cache in sync with what was taught.
@@ -1294,20 +1295,20 @@ class MultiTargetWorkflow:
                     params.get("preprocessor_type", "raw"), RawPreprocessor()
                 )
                 angle_range_half = float(params.get("angle_range_half", 15.0))
-                _pd_raw = params.get("pyramid_decimate", 0)
+                _pd_raw = params.get("decimate_exponent", 0)
                 _pd_map = {"禁用": 0, "2x": 1, "4x": 2, "8x": 3}
                 if isinstance(_pd_raw, str):
                     # 兼容 "2x"/"4x"/"8x" 字符串和 "禁用" 中文
-                    pyramid_decimate = _pd_map.get(_pd_raw, 0)
+                    decimate_exponent = _pd_map.get(_pd_raw, 0)
                 else:
                     try:
-                        pyramid_decimate = int(_pd_raw)
+                        decimate_exponent = int(_pd_raw)
                     except (ValueError, TypeError):
-                        pyramid_decimate = 0
+                        decimate_exponent = 0
                 # When pyramid is enabled, compute max_template_size to enforce
                 # downsampling: target scaled template side length ~ 200px
-                _pms = int(params.get("pyramid_max_template_size", 128))
-                if pyramid_decimate > 0:
+                _pms = int(params.get("coarse_template_side", 128))
+                if decimate_exponent > 0:
                     _ts = int(params.get("template_size", 40))
                     _pms = min(_pms, max(_ts // 2, 80))
                 tp = TemplatePoint(
@@ -1324,8 +1325,8 @@ class MultiTargetWorkflow:
                     angle_range=(-angle_range_half, angle_range_half),
                     angle_step=float(params.get("angle_step", 1.0)),
                     multi_target=False,
-                    pyramid_decimate=pyramid_decimate,
-                    pyramid_max_template_size=_pms,
+                    decimate_exponent=decimate_exponent,
+                    coarse_template_side=_pms,
                 )
                 self._template_match_points[label] = tp
 
@@ -2007,8 +2008,8 @@ class MultiTargetWorkflow:
                 "overlap": float(tp.overlap),
                 "coarse_fine": bool(tp.coarse_fine),
                 "coarse_angle_step": float(tp.coarse_angle_step),
-                "pyramid_decimate": tp.pyramid_decimate,
-                "pyramid_max_template_size": tp.pyramid_max_template_size,
+                "decimate_exponent": tp.decimate_exponent,
+                "coarse_template_side": tp.coarse_template_side,
             }),
             "physical_scale_mm": self._physical_scale_mm,
             "objects": objects,
@@ -2217,8 +2218,8 @@ class MultiTargetWorkflow:
                 overlap=float(matching["overlap"]),
                 coarse_fine=bool(matching["coarse_fine"]),
                 coarse_angle_step=float(matching["coarse_angle_step"]),
-                pyramid_decimate=int(matching["pyramid_decimate"]),
-                pyramid_max_template_size=int(matching["pyramid_max_template_size"]),
+                decimate_exponent=int(matching["decimate_exponent"]),
+                coarse_template_side=int(matching["coarse_template_side"]),
             )
 
         # Translate the manifest's dependency references back to label form.
@@ -2332,8 +2333,8 @@ class MultiTargetWorkflow:
         tp.overlap = wf._overlap
         tp.result = None
         # 初始化 pyramid 相关属性
-        tp.pyramid_decimate = meta.get("pyramid_decimate", 0)
-        tp.pyramid_max_template_size = meta.get("pyramid_max_template_size", 128)
+        tp.decimate_exponent = pyramid_setting(meta, "decimate_exponent", 0)
+        tp.coarse_template_side = pyramid_setting(meta, "coarse_template_side", 128)
         # 走 TemplatePoint 的唯一实现，避免第 3 份忽略 decimate 指数的算法
         tp._pyramid_scale = tp._compute_pyramid_scale()
         wf._alignment._template_point = tp

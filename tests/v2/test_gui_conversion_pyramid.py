@@ -36,8 +36,8 @@ def _model(tmp_path, *, decimate, cap=400, side=TEMPLATE_SIDE):
         angle_range=(-15.0, 15.0),
         angle_step=5.0,
         max_matches=1,
-        pyramid_decimate=decimate,
-        pyramid_max_template_size=cap,
+        decimate_exponent=decimate,
+        coarse_template_side=cap,
     )
     taught.add_measurement(
         "FitCircle", "circle_1", center=(300.0, 300.0), radius=60.0,

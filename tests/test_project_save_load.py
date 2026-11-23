@@ -99,10 +99,10 @@ class _RecordingToolPanel:
     def set_matching_params(self, preprocessor_type, score_threshold,
                             angle_range_half, max_matches, overlap=0.3,
                             angle_step_deg=1.0, preprocessor=None,
-                            pyramid_decimate=None,
-                            pyramid_max_template_size=None):
+                            decimate_exponent=None,
+                            coarse_template_side=None):
         # Recorded separately so the long-standing 8-tuple stays readable.
-        self.last_pyramid = (pyramid_decimate, pyramid_max_template_size)
+        self.last_pyramid = (decimate_exponent, coarse_template_side)
         self.calls.append(("set_matching_params", preprocessor_type,
                            float(score_threshold), float(angle_range_half),
                            int(max_matches), float(overlap), float(angle_step_deg),
@@ -373,7 +373,7 @@ class TestLoadProject:
         # literal that has to be edited whenever that default changes.
         from measure.measure_template import TemplatePoint
         default_side = inspect.signature(
-            TemplatePoint.__init__).parameters["pyramid_max_template_size"].default
+            TemplatePoint.__init__).parameters["coarse_template_side"].default
         assert app.tool_panel.last_pyramid == (0, default_side)
 
     def test_pyramid_settings_are_restored_from_the_model(self, tmp_path):
@@ -382,7 +382,7 @@ class TestLoadProject:
                           angle_deg=12.5, match_score_threshold=0.4,
                           angle_range=(-25.0, 25.0), angle_step=1.5,
                           max_matches=3, overlap=0.25,
-                          pyramid_decimate=1, pyramid_max_template_size=300)
+                          decimate_exponent=1, coarse_template_side=300)
         wf.add_measurement("FitLine", "line_1", start=(10, 20), end=(60, 90),
                            measure_length1=8.0, measure_length2=3.0)
         project_dir, _ = _saved_project(tmp_path, wf)
@@ -548,8 +548,8 @@ def _write_legacy_project(project_dir: str, workflow: MultiTargetWorkflow,
         "overlap": 0.3,
         "coarse_fine": True,
         "coarse_angle_step": 5.0,
-        "pyramid_decimate": tp.pyramid_decimate,
-        "pyramid_max_template_size": tp.pyramid_max_template_size,
+        "decimate_exponent": tp.decimate_exponent,
+        "coarse_template_side": tp.coarse_template_side,
         "preprocessor_data": tp.preprocessor.serialize(),
         "click_row": tp.click_row,
         "click_col": tp.click_col,

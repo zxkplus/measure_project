@@ -240,12 +240,12 @@ def _angle_range(matching: Dict[str, Any], found: List[CompatibilityDiagnostic])
 def _pyramid_enabled(matching: Dict[str, Any]) -> bool:
     """Whether the GUI model had the pyramid coarse search switched on.
 
-    ``pyramid_decimate`` is only an on/off switch in v1 (the level number is
+    ``decimate_exponent`` is only an on/off switch in v1 (the level number is
     ignored) and the size cap must also be positive for decimation to happen.
     """
     try:
-        decimate = int(matching.get("pyramid_decimate", 0) or 0)
-        cap = int(matching.get("pyramid_max_template_size", 128) or 0)
+        decimate = int(matching.get("decimate_exponent", 0) or 0)
+        cap = int(matching.get("coarse_template_side", 128) or 0)
     except (TypeError, ValueError):
         return False
     return decimate > 0 and cap > 0
@@ -258,7 +258,7 @@ def _pyramid_cap(matching: Dict[str, Any], width: int, height: int) -> int:
     switch off, lifting the cap above the support keeps the factor at 1.0
     instead of silently introducing a downsampling step the operator disabled.
     """
-    cap = int(matching.get("pyramid_max_template_size", 128))
+    cap = int(matching.get("coarse_template_side", 128))
     enabled = matching.get("pyramid_enabled")
     if enabled is None:
         enabled = _pyramid_enabled(matching)
@@ -366,7 +366,7 @@ def normalize_manifest(
         "overlap": float(matching.get("overlap", 0.3)),
         "coarse_fine": bool(matching.get("coarse_fine", True)),
         "coarse_angle_step_deg": float(matching.get("coarse_angle_step", 5.0)),
-        "pyramid_max_template_size": int(matching.get("pyramid_max_template_size", 128)),
+        "coarse_template_side": int(matching.get("coarse_template_side", 128)),
         # v1 disables decimation entirely when the switch is off, while v2's
         # size cap is always active. Keep the flag so the search builder can
         # lift the cap above the support and keep factor == 1.0.

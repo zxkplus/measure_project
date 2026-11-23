@@ -119,13 +119,36 @@ Do not copy a template configuration between generations expecting the same beha
 |---|---|---|
 Score gate | `match_score_threshold` default **0.5** | `score_threshold` default **0.7** |
 Two-pass search | `coarse_fine` default **True** | `coarse_fine` default **False** |
-Pyramid control | `pyramid_decimate` — 0 = disabled, 1 = downsample 2×, 2 = 4× … | `pyramid_levels` — 0..8 level count |
+Pyramid control | `decimate_exponent` (was `pyramid_decimate`) — 0 = off, n = `2**-n` | `pyramid_levels` — 0..8, also `2**-n` |
+Template side cap | `coarse_template_side` (was `pyramid_max_template_size`) — default 128 | `pyramid_max_template_size` — default 128 |
 Angle range | `angle_range` stored as a **half-range** pair, e.g. `[-15, 15]` | `angle_min` / `angle_max` explicit bounds |
 Scale search | `scale_invariant`, `scale_range`, `scale_step` | `scale_min` / `scale_max` / `scale_step`, plus `coarse_scale_step` |
 
-`pyramid_decimate` and `pyramid_levels` are **different quantities**, not renamings: a
-value of 2 means "quarter resolution" in one and "two levels" in the other. Never transfer
-that number directly.
+The pyramid exponent is **the same quantity under two names**, and the numbers transfer
+directly: both compute `factor = 2**-n` (0 = off, 1 = half, 2 = quarter, 3 = eighth). An
+earlier revision of this document claimed a value of 2 meant "quarter resolution" in v1
+and "two levels" in v2, implying the numbers could not be moved between generations. That
+was wrong: `template_imports.py` has always mapped one to the other verbatim, and both
+sides clamp the result by the template side cap. The parameters were unified inside
+`measure/` (see below) precisely because they were the same thing under two spellings.
+
+### Pyramid parameter renaming (2026-11)
+
+`measure/` renamed its two coarse-search fields so one concept has one name:
+
+| Current (`measure/`) | Published v2 field | Legacy spellings still read |
+|---|---|---|
+| `decimate_exponent` | `pyramid_levels` | `pyramid_decimate` |
+| `coarse_template_side` | `pyramid_max_template_size` | `pyramid_max_template_size` |
+
+**v2 request/recipe field names were deliberately kept**: they are the published contract
+(`docs/v2-openapi.json`), and v2 models are strict, so renaming them would turn existing
+callers into HTTP 422s. The single translation point is
+`families/templates.py::request_pyramid_factor()`.
+
+When touching coarse-search plumbing, read
+[coarse-search-renaming.md](coarse-search-renaming.md) first — it lists the four places
+where the two spellings meet and the traps each one sets.
 
 Note also that v2 validates ranges (`ge`/`le` constraints). Values outside them fail with
 HTTP 422 rather than being clamped.

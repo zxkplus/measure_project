@@ -255,8 +255,8 @@ class TemplateMatchPointDialog(BaseParamDialog):
             "angle_range_half": 15.0,
             "angle_step": 1.0,
             "use_subpixel": True,
-            "pyramid_decimate": 0,
-            "pyramid_max_template_size": 128,
+            "decimate_exponent": 0,
+            "coarse_template_side": 128,
         }
         if params:
             defaults.update(params)
@@ -293,13 +293,13 @@ class TemplateMatchPointDialog(BaseParamDialog):
         # 2x/4x/8x list offered three labels for one behaviour).
         ttk.Label(main, text="金字塔粗筛:").grid(
             row=row, column=0, sticky=tk.W, padx=5, pady=2)
-        pyramid_var = tk.BooleanVar(value=bool(self._params.get("pyramid_decimate", 0)))
+        pyramid_var = tk.BooleanVar(value=bool(self._params.get("decimate_exponent", 0)))
         pyramid_cb = ttk.Checkbutton(main, variable=pyramid_var)
         pyramid_cb.grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
-        self._vars["pyramid_decimate"] = pyramid_var
+        self._vars["decimate_exponent"] = pyramid_var
         row += 1
 
-        self._add_int_entry(main, "模板边长上限 (px)", "pyramid_max_template_size",
+        self._add_int_entry(main, "模板边长上限 (px)", "coarse_template_side",
                             400, row, 16, 100000); row += 1
 
         self._add_buttons(main, row + 1)
@@ -313,9 +313,9 @@ class TemplateMatchPointDialog(BaseParamDialog):
         super()._on_ok()
         if self.result is None:
             return
-        self.result["pyramid_decimate"] = 1 if self.result.get("pyramid_decimate") else 0
+        self.result["decimate_exponent"] = 1 if self.result.get("decimate_exponent") else 0
         try:
-            size = int(self.result.get("pyramid_max_template_size", 128))
+            size = int(self.result.get("coarse_template_side", 128))
         except (TypeError, ValueError):
             size = 400
-        self.result["pyramid_max_template_size"] = max(16, size)
+        self.result["coarse_template_side"] = max(16, size)

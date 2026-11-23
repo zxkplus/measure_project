@@ -64,6 +64,17 @@ class LegacyConversionResult(StrictModel):
     manifest: Optional[FileDescriptor] = None
 
 
+def _pyramid_field(mapping: dict, key: str, default):
+    """Read a pyramid setting under either its current or pre-rename spelling."""
+    if key in mapping:
+        return mapping[key]
+    legacy = {"decimate_exponent": "pyramid_decimate",
+              "coarse_template_side": "pyramid_max_template_size"}.get(key)
+    if legacy is not None and legacy in mapping:
+        return mapping[legacy]
+    return default
+
+
 def diagnostic(
     path: str, code: str, message: str, severity: str = "error"
 ) -> CompatibilityDiagnostic:
@@ -370,8 +381,12 @@ PARAMETERS = {
         "angle_range_half",
         "angle_step",
         "use_subpixel",
+        # v1 assets spell these pyramid_decimate / pyramid_max_template_size;
+        # the renamed spellings are accepted so a re-saved asset still converts.
         "pyramid_decimate",
         "pyramid_max_template_size",
+        "decimate_exponent",
+        "coarse_template_side",
     },
 }
 
@@ -565,8 +580,12 @@ def convert_normalized(
             "preprocessing",
             "coarse_fine",
             "coarse_angle_step_deg",
-            "pyramid_max_template_size",
+            # Pyramid keys are accepted under both spellings: v1 assets use the
+            # pyramid_* names, re-saved assets use the current ones.
             "pyramid_decimate",
+            "pyramid_max_template_size",
+            "decimate_exponent",
+            "coarse_template_side",
         },
         "alignment": {"mode", "control_points"},
         "calibration": {"scale_mm_per_px", "square_size_mm", "num_corners", "method"},
@@ -831,8 +850,9 @@ def convert_normalized(
                 search["coarse_fine"] = matching["coarse_fine"]
             if "coarse_angle_step_deg" in matching:
                 search["coarse_angle_step"] = matching["coarse_angle_step_deg"]
-            if "pyramid_max_template_size" in matching:
-                search["pyramid_max_template_size"] = matching["pyramid_max_template_size"]
+            cap = _pyramid_field(matching, "coarse_template_side", None)
+            if cap is not None:
+                search["pyramid_max_template_size"] = cap
             recipe_data["localization"] = {"template": template, "search": search}
             recipe_data["alignment"] = {
                 "width": width,
@@ -847,7 +867,7 @@ def convert_normalized(
                     "warning",
                 )
             )
-            if matching.get("pyramid_decimate"):
+            if _pyramid_field(matching, "decimate_exponent", 0):
                 diagnostics.append(
                     diagnostic(
                         "matching.pyramid_decimate",
@@ -885,11 +905,11 @@ def convert_normalized(
                     "angle_step": p.get("angle_step", 1),
                     "subpixel": p.get("use_subpixel", True),
                     "pyramid_max_template_size": int(
-                        p.get("pyramid_max_template_size", 128)
+                        _pyramid_field(p, "coarse_template_side", 128)
                     ),
                 },
             }
-            if p.get("pyramid_decimate"):
+            if _pyramid_field(p, "decimate_exponent", 0):
                 diagnostics.append(
                     diagnostic(
                         node["id"] + ".pyramid_decimate",

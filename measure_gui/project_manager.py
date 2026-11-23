@@ -361,8 +361,8 @@ class ProjectManager:
                     overlap=matching["overlap"],
                     angle_step_deg=matching["angle_step_deg"],
                     preprocessor=matching.get("preprocessor"),
-                    pyramid_decimate=matching.get("pyramid_decimate"),
-                    pyramid_max_template_size=matching.get("pyramid_max_template_size"),
+                    decimate_exponent=matching.get("decimate_exponent"),
+                    coarse_template_side=matching.get("coarse_template_side"),
                 )
         
             # Restore inspection image if available
@@ -585,9 +585,9 @@ class ProjectManager:
             # Pyramid settings are persisted by the model but used to be
             # dropped here, so reopening a project silently reverted the widget
             # to its default and the next teach changed the search behaviour.
-            "pyramid_decimate": int(matching.get("pyramid_decimate", 0)),
-            "pyramid_max_template_size": int(
-                matching.get("pyramid_max_template_size", 128)),
+            "decimate_exponent": int(matching.get("decimate_exponent", 0)),
+            "coarse_template_side": int(
+                matching.get("coarse_template_side", 128)),
         }
 
     @staticmethod

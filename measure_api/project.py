@@ -342,7 +342,7 @@ class MeasureProject:
 
         A saved asset carries the coarse-search settings it was taught with. The
         deployment config is the operator's lever: retuning
-        ``pyramid_max_template_size`` here must take effect on the next run
+        ``coarse_template_side`` here must take effect on the next run
         without re-teaching every model, so the config value wins over the
         stored one and the pyramid factor is recomputed through the single
         ``TemplatePoint`` implementation.
@@ -359,16 +359,16 @@ class MeasureProject:
             return
         matching = Config.load().get("matching", {}) or {}
         if not any(key in matching for key in
-                   ("pyramid_decimate", "pyramid_max_template_size")):
+                   ("decimate_exponent", "coarse_template_side")):
             return
-        decimate = int(matching.get("pyramid_decimate", template_point.pyramid_decimate))
-        max_side = int(matching.get("pyramid_max_template_size",
-                                    template_point.pyramid_max_template_size))
+        decimate = int(matching.get("decimate_exponent", template_point.decimate_exponent))
+        max_side = int(matching.get("coarse_template_side",
+                                    template_point.coarse_template_side))
         template_point.set_pyramid(decimate, max_side)
-        for attribute in ("_pyramid_decimate", "_pyramid_max_template_size"):
+        for attribute in ("_decimate_exponent", "_coarse_template_side"):
             if hasattr(workflow, attribute):
                 setattr(workflow, attribute, decimate if "decimate" in attribute else max_side)
-        logger.info("Matching config applied: pyramid_decimate=%s max_template_size=%s",
+        logger.info("Matching config applied: decimate_exponent=%s max_template_size=%s",
                     decimate, max_side)
 
     def set_template(
@@ -436,8 +436,8 @@ class MeasureProject:
         if abs(overlap - 0.3) < 1e-9 and "overlap" in _cfg_match:
             overlap = float(_cfg_match["overlap"])
         # Read pyramid config from matching config
-        pyramid_decimate = int(_cfg_match.get("pyramid_decimate", 0))
-        pyramid_max_template_size = int(_cfg_match.get("pyramid_max_template_size", 128))
+        decimate_exponent = int(_cfg_match.get("decimate_exponent", 0))
+        coarse_template_side = int(_cfg_match.get("coarse_template_side", 128))
         self._workflow.teach_template(
             self._reference_image,
             center=tuple(center),
@@ -451,8 +451,8 @@ class MeasureProject:
             coarse_fine=bool(coarse_fine),
             overlap=float(overlap),
             max_matches=int(max_matches),
-            pyramid_decimate=int(pyramid_decimate),
-            pyramid_max_template_size=int(pyramid_max_template_size),
+            decimate_exponent=int(decimate_exponent),
+            coarse_template_side=int(coarse_template_side),
         )
 
         self._phase = PHASE_TEMPLATE_READY

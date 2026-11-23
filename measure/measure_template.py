@@ -403,6 +403,35 @@ def _prefer_fine_result(coarse_result: Dict[str, Any],
     return fallback
 
 
+#: Old manifest/config spellings, mapped to the current parameter names.
+#: Assets taught before the rename must keep loading with the value they were
+#: saved with; reading only the new key would silently restore the default and
+#: change how an existing model searches.
+_LEGACY_PYRAMID_KEYS = {
+    "decimate_exponent": "pyramid_decimate",
+    "coarse_template_side": "pyramid_max_template_size",
+}
+
+
+def pyramid_setting(source: Dict[str, Any], key: str, default):
+    """Read one coarse-search setting, accepting its pre-rename spelling.
+
+    Args:
+        source: Manifest or config mapping.
+        key: Current parameter name.
+        default: Value when neither the current nor the legacy key is present.
+
+    Returns:
+        The stored value, or ``default``.
+    """
+    if key in source:
+        return source[key]
+    legacy = _LEGACY_PYRAMID_KEYS.get(key)
+    if legacy is not None and legacy in source:
+        return source[legacy]
+    return default
+
+
 class TemplatePoint:
     """
     Template-matching point measurement object.
@@ -445,8 +474,8 @@ class TemplatePoint:
                  multi_target: bool = False,
                  max_matches: int = 0,
                  overlap: float = 0.3,
-                 pyramid_decimate: int = 0,
-                 pyramid_max_template_size: int = 128):
+                 decimate_exponent: int = 0,
+                 coarse_template_side: int = 128):
         """
         Initialize a template point from a reference image.
 
@@ -480,10 +509,10 @@ class TemplatePoint:
             overlap: Maximum allowed IoU overlap between detected targets in [0, 1].
                      0 = no overlap at all (most aggressive NMS). Higher values
                      allow more overlap between detected boxes (default 0.3).
-            pyramid_decimate: Pyramid decimation level for coarse search.
+            decimate_exponent: Pyramid decimation level for coarse search.
                               0 = disabled. 1 = downsample 2x, 2 = 4x, etc.
                               (default 0, disabled).
-            pyramid_max_template_size: Maximum template side length (px) after
+            coarse_template_side: Maximum template side length (px) after
                                        decimation. Used to auto-compute the
                                        pyramid scale factor (default 400).
         """
@@ -505,8 +534,8 @@ class TemplatePoint:
         self.multi_target = multi_target
         self.max_matches = max_matches
         self.overlap = float(overlap)
-        self.pyramid_decimate = int(pyramid_decimate)
-        self.pyramid_max_template_size = int(pyramid_max_template_size)
+        self.decimate_exponent = int(decimate_exponent)
+        self.coarse_template_side = int(coarse_template_side)
 
         # Crop the template region (clamped to image bounds)
         gray = self._to_gray(reference_image)
@@ -532,7 +561,7 @@ class TemplatePoint:
         self.edge_template = self.preprocessor(crop)
 
         # Pre-compute pyramid scale factor for coarse matching
-        self.set_pyramid(self.pyramid_decimate, self.pyramid_max_template_size)
+        self.set_pyramid(self.decimate_exponent, self.coarse_template_side)
 
         # Canny-specific: warn if edge content is too sparse
         if isinstance(self.preprocessor, CannyPreprocessor):
@@ -561,9 +590,9 @@ class TemplatePoint:
                 level. Zero or negative disables the size cap, so the factor
                 becomes 1.0 (no downsampling).
         """
-        self.pyramid_decimate = int(decimate)
-        self.pyramid_max_template_size = int(max_template_size)
-        if self.pyramid_decimate > 0 and self.pyramid_max_template_size > 0:
+        self.decimate_exponent = int(decimate)
+        self.coarse_template_side = int(max_template_size)
+        if self.decimate_exponent > 0 and self.coarse_template_side > 0:
             self._pyramid_scale = self._compute_pyramid_scale()
         else:
             self._pyramid_scale = 1.0
@@ -573,8 +602,8 @@ class TemplatePoint:
         Compute the scale factor for the pyramid coarse search.
 
         Mirrors ``measure.template_search`` so both paths agree: the factor is
-        the more aggressive of the decimation level (``2**-pyramid_decimate``)
-        and the template side cap (``pyramid_max_template_size / longest``),
+        the more aggressive of the decimation level (``2**-decimate_exponent``)
+        and the template side cap (``coarse_template_side / longest``),
         clamped so the shortest side keeps at least 6 px.
 
         Both terms matter for models with no fixed template size: the level
@@ -589,11 +618,11 @@ class TemplatePoint:
         width = int(self._crop_w)
         if height <= 0 or width <= 0:
             return 1.0
-        level = int(self.pyramid_decimate)
+        level = int(self.decimate_exponent)
         if level <= 0:
             return 1.0
         factor = min(2.0 ** -level,
-                     self.pyramid_max_template_size / float(max(height, width)))
+                     self.coarse_template_side / float(max(height, width)))
         shortest = max(1, min(height, width))
         return min(1.0, max(factor, min(1.0, 6.0 / shortest)))
 
@@ -2121,8 +2150,8 @@ class TemplatePoint:
             multi_target=self.multi_target,
             max_matches=self.max_matches,
             overlap=self.overlap,
-            pyramid_decimate=self.pyramid_decimate,
-            pyramid_max_template_size=self.pyramid_max_template_size,
+            decimate_exponent=self.decimate_exponent,
+            coarse_template_side=self.coarse_template_side,
         )
 
     @classmethod
@@ -2197,9 +2226,9 @@ class TemplatePoint:
         obj.multi_target = bool(data.get('multi_target', False))
         obj.max_matches = int(data.get('max_matches', 0))
         obj.overlap = float(data.get('overlap', 0.3))
-        obj.pyramid_decimate = int(data.get('pyramid_decimate', 0))
-        obj.pyramid_max_template_size = int(data.get('pyramid_max_template_size', 128))
-        obj.set_pyramid(obj.pyramid_decimate, obj.pyramid_max_template_size)
+        obj.decimate_exponent = int(data.get('decimate_exponent', 0))
+        obj.coarse_template_side = int(pyramid_setting(data, "coarse_template_side", 128))
+        obj.set_pyramid(obj.decimate_exponent, obj.coarse_template_side)
 
         return obj
 
@@ -2252,8 +2281,8 @@ class TemplatePoint:
             "multi_target": self.multi_target,
             "max_matches": self.max_matches,
             "overlap": self.overlap,
-            "pyramid_decimate": self.pyramid_decimate,
-            "pyramid_max_template_size": self.pyramid_max_template_size,
+            "decimate_exponent": self.decimate_exponent,
+            "coarse_template_side": self.coarse_template_side,
         }
 
     @classmethod
@@ -2316,9 +2345,9 @@ class TemplatePoint:
         obj.multi_target = bool(data.get("multi_target", False))
         obj.max_matches = int(data.get("max_matches", 0))
         obj.overlap = float(data.get("overlap", 0.3))
-        obj.pyramid_decimate = int(data.get("pyramid_decimate", 0))
-        obj.pyramid_max_template_size = int(data.get("pyramid_max_template_size", 128))
-        obj.set_pyramid(obj.pyramid_decimate, obj.pyramid_max_template_size)
+        obj.decimate_exponent = int(pyramid_setting(data, "decimate_exponent", 0))
+        obj.coarse_template_side = int(pyramid_setting(data, "coarse_template_side", 128))
+        obj.set_pyramid(obj.decimate_exponent, obj.coarse_template_side)
 
         return obj
 

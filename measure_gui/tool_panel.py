@@ -303,7 +303,7 @@ class ToolPanel(ttk.Frame):
         self._overlap_var.trace_add("write", _update_overlap_label)
 
         # Pyramid coarse search.  The ratio is the more aggressive of two terms:
-        # ``2**-pyramid_decimate`` and ``pyramid_max_template_size / longest``.
+        # ``2**-decimate_exponent`` and ``coarse_template_side / longest``.
         # Models have no fixed template size, so the cap is what keeps the
         # coarse level's cost comparable across a 200 px and a 2000 px support;
         # the level alone would let the coarse template grow with the support.
@@ -765,8 +765,8 @@ class ToolPanel(ttk.Frame):
                             overlap: float = 0.3,
                             angle_step_deg: float = 1.0,
                             preprocessor: Optional[Dict[str, Any]] = None,
-                            pyramid_decimate: Optional[int] = None,
-                            pyramid_max_template_size: Optional[int] = None,
+                            decimate_exponent: Optional[int] = None,
+                            coarse_template_side: Optional[int] = None,
                             template_longest_side: Optional[int] = None):
         """Set matching parameter widgets programmatically (for project restore).
 
@@ -781,9 +781,9 @@ class ToolPanel(ttk.Frame):
                 given, its parameters (clip_limit, thresholds, ...) are restored
                 too; ``preprocessor_type`` alone cannot carry them, which used
                 to make a re-taught template silently revert to the defaults.
-            pyramid_decimate: Non-zero enables the pyramid coarse search. When
+            decimate_exponent: Non-zero enables the pyramid coarse search. When
                 ``None`` the current widget value is kept (legacy callers).
-            pyramid_max_template_size: Longest template side on the coarse level.
+            coarse_template_side: Longest template side on the coarse level.
             template_longest_side: Current template side, only used to render the
                 actual downsampling ratio next to the widgets.
         """
@@ -801,9 +801,9 @@ class ToolPanel(ttk.Frame):
         self._max_matches_var.set(max_matches)
         self._overlap_var.set(overlap)
         self._angle_step_var.set(angle_step_deg)
-        if pyramid_decimate is not None:
-            self.set_pyramid_config(pyramid_decimate,
-                                    pyramid_max_template_size if pyramid_max_template_size is not None else 128,
+        if decimate_exponent is not None:
+            self.set_pyramid_config(decimate_exponent,
+                                    coarse_template_side if coarse_template_side is not None else 128,
                                     template_longest_side)
 
     def get_alignment_mode(self) -> str:

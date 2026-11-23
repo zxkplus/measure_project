@@ -27,7 +27,7 @@ def _reference():
 def test_single_pass_reports_fine():
     reference = _reference()
     point = TemplatePoint(reference, click_row=160, click_col=200, template_size=80,
-                          pyramid_decimate=0)
+                          decimate_exponent=0)
     point.rotation_invariant = True
     point.angle_range = (-5.0, 5.0)
     point.angle_step = 1.0
@@ -38,7 +38,7 @@ def test_single_pass_reports_fine():
 def test_two_stage_reports_fine_when_the_refinement_holds():
     reference = _reference()
     point = TemplatePoint(reference, click_row=160, click_col=200, template_size=80,
-                          pyramid_decimate=1, coarse_fine=False)
+                          decimate_exponent=1, coarse_fine=False)
     point.match_score_threshold = 0.5
     result = point.measure(reference)
     assert result["score_stage"] == "fine"
@@ -53,7 +53,7 @@ def test_fallback_to_the_coarse_pose_is_marked():
     """
     reference = _reference()
     point = TemplatePoint(reference, click_row=160, click_col=200, template_size=80,
-                          pyramid_decimate=1, coarse_fine=False)
+                          decimate_exponent=1, coarse_fine=False)
     coarse_pose = {"matched_row": 160.0, "matched_col": 200.0, "dx": 0.0, "dy": 0.0,
                    "match_score": 0.9, "valid": True, "best_rotation_deg": 0.0,
                    "best_scale": 1.0}

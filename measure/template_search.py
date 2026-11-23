@@ -86,8 +86,8 @@ class SearchOptions:
     scale_step: float = 0.02
     coarse_angle_step_rad: float = math.radians(5.0)
     coarse_scale_step: float = 0.1
-    pyramid_levels: int = 0
-    pyramid_max_template_size: int = 128
+    decimate_exponent: int = 0
+    coarse_template_side: int = 128
     fine_search_radius_px: float = 24.0
     fine_candidates: Optional[int] = None
     angle_list: Optional[Tuple[float, ...]] = None
@@ -751,7 +751,7 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
     Two independent knobs decide what the coarse stage does, and they compose
     instead of excluding each other:
 
-    * ``factor`` (from ``pyramid_levels`` and the template side cap) chooses the
+    * ``factor`` (from ``decimate_exponent`` and the template side cap) chooses the
       *resolution* the coarse scan runs at. At ``factor < 1`` both the support
       and the search image are low-passed and decimated, so each correlation is
       cheap and the coarse template side stays bounded however large the support
@@ -967,14 +967,14 @@ def _rescan_neighbourhood(gray: Array, prepared: PreparedSupport,
 def _pyramid_factor(prepared: PreparedSupport, options: SearchOptions) -> float:
     """Return the decimation factor implied by the pyramid options.
 
-    ``pyramid_max_template_size`` is the only side-length cap: a decimation
+    ``coarse_template_side`` is the only side-length cap: a decimation
     that would leave the support's longest side above it is not used. (A
     legacy ``max_coarse_template_side`` field claimed the same role but was
     never read; it has been removed rather than silently ignored.)
     """
     height, width = np.asarray(prepared.pixels).shape[:2]
-    factor = min(2.0 ** -int(options.pyramid_levels),
-                 options.pyramid_max_template_size / max(width, height))
+    factor = min(2.0 ** -int(options.decimate_exponent),
+                 options.coarse_template_side / max(width, height))
     return min(1.0, max(factor, min(1.0, 6.0 / max(1, min(width, height)))))
 
 

@@ -241,7 +241,7 @@ _SPECS: Tuple[ObjectSpec, ...] = (
         {"template_size": 40, "preprocessor_type": "raw",
          "match_score_threshold": 0.5, "angle_range_half": 15.0,
          "angle_step": 1.0, "use_subpixel": True,
-         "pyramid_decimate": 0, "pyramid_max_template_size": 128},
+         "decimate_exponent": 0, "coarse_template_side": 128},
         (), "point",
     ),
     ObjectSpec(

@@ -19,9 +19,11 @@ from measure.computation_types import (
 from measure.geometry_mapping import similarity_scale
 from measure.rectify import ResampleOptions, patch_source_corners, warp_mapped
 from measure.template_search import (
-    correlate, decimate_matrix, decimate_pixels, has_texture, keep_disjoint,
-    peaks, refine_peak_xy, render_variant, rotated_box_overlap, variant_size,
+    SearchOptions, correlate, decimate_matrix, decimate_pixels, has_texture,
+    PreparedSupport, keep_disjoint, peaks, refine_peak_xy, render_variant,
+    rotated_box_overlap, variant_size,
 )
+from measure.template_search import _pyramid_factor as engine_factor
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.files import ArtifactWriter
 from measure_api.v2.models import (
@@ -405,6 +407,9 @@ class TemplateSearch(StrictModel):
     coarse_score_threshold: float = Field(default=0.3, ge=0, le=1)
     coarse_angle_step: float = Field(default=5, gt=0, le=360)
     coarse_scale_step: float = Field(default=0.1, gt=0, le=10)
+    # Public field names are part of the v2 request contract and stay as they
+    # were published; the engine calls the same quantities decimate_exponent and
+    # coarse_template_side. The mapping happens here and nowhere else.
     pyramid_levels: int = Field(default=0, ge=0, le=8)
     pyramid_max_template_size: int = Field(default=128, ge=8, le=32768)
     # None resolves to MEASURE_V2_TEMPLATE_FINE_POLICY (default "neighborhood").
@@ -857,7 +862,36 @@ def _decimate(pixels: np.ndarray, search: np.ndarray, factor: float,
     return coarse_pixels, coarse_search, mapping, mapping, "blur"
 
 
-@timed("template_match")
+def request_pyramid_factor(pixels: np.ndarray, options: TemplateSearch) -> float:
+    """Return the decimation factor for one request, translated for the engine.
+
+    The v2 request spells these two quantities ``pyramid_levels`` and
+    ``pyramid_max_template_size`` (published names, kept for compatibility);
+    the engine calls them ``decimate_exponent`` and ``coarse_template_side``.
+    This is the only place the two spellings meet, so the formula itself keeps a
+    single owner in the engine.
+
+    Args:
+        pixels: Rectified support pixels; only its shape is read.
+        options: The request's search controls.
+
+    Returns:
+        Decimation factor in ``(0, 1]``.
+    """
+    engine_options = SearchOptions(
+        decimate_exponent=int(options.pyramid_levels),
+        coarse_template_side=int(options.pyramid_max_template_size))
+    height, width = pixels.shape[:2]
+    probe = PreparedSupport(
+        pixels=np.zeros((height, width), dtype=np.float32),
+        valid_mask=np.ones((height, width), dtype=bool),
+        anchor_support=(width / 2.0, height / 2.0),
+        support_to_reference=None, reference_space=None, support_space=None,
+        mask=None,
+    )
+    return engine_factor(probe, engine_options)
+
+
 def match_template(
     request: TemplateMatchRequest, context: CalculationContext,
 ) -> TemplateMatchResult:
@@ -883,9 +917,7 @@ def match_template(
     if search.ndim != pixels.ndim or (search.ndim == 3 and search.shape[2] != pixels.shape[2]):
         raise ServiceError("template.channels_mismatch", "Template and image channels must agree")
     h, w = pixels.shape[:2]
-    factor = min(2.0 ** -options.pyramid_levels,
-                 options.pyramid_max_template_size / max(h, w))
-    factor = min(1.0, max(factor, min(1.0, 6.0 / min(h, w))))
+    factor = request_pyramid_factor(pixels, options)
     coarse_pixels = pixels
     coarse_search = search
     support_map = np.eye(3)

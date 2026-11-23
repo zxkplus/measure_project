@@ -207,8 +207,8 @@ class AlignmentStrategy:
         overlap: float = 0.3,
         coarse_fine: bool = True,
         coarse_angle_step: float = 5.0,
-        pyramid_decimate: int = 0,
-        pyramid_max_template_size: int = 128,
+        decimate_exponent: int = 0,
+        coarse_template_side: int = 128,
     ):
         """Store the reference geometry and create the parent template.
 
@@ -243,8 +243,8 @@ class AlignmentStrategy:
             multi_target=True,
             max_matches=max_matches,
             overlap=overlap,
-            pyramid_decimate=pyramid_decimate,
-            pyramid_max_template_size=pyramid_max_template_size,
+            decimate_exponent=decimate_exponent,
+            coarse_template_side=coarse_template_side,
         )
 
         self._angle_range = angle_range

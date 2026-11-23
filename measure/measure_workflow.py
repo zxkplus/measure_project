@@ -71,6 +71,7 @@ from measure.geometry_ops import (
 from measure.measure1D import Halcon1DMeasure
 from measure.measure2D import CircleMeasureObject, LineMeasureObject
 from measure.constants import EPS
+from measure.measure_template import pyramid_setting
 from measure.viz import to_bgr, draw_text_shadow
 from measure.measure_template import (
     Preprocessor,
@@ -694,8 +695,8 @@ class TemplatePointObject(MeasureObject):
             "coarse_fine": self._coarse_fine,
             "coarse_angle_step": self._coarse_angle_step,
             "coarse_scale_step": self._coarse_scale_step,
-            "pyramid_decimate": self._template_point.pyramid_decimate,
-            "pyramid_max_template_size": self._template_point.pyramid_max_template_size,
+            "decimate_exponent": self._template_point.decimate_exponent,
+            "coarse_template_side": self._template_point.coarse_template_side,
             "pyramid_scale": self._template_point._pyramid_scale,
             "multi_target": self._multi_target,
             "max_matches": self._max_matches,
@@ -739,8 +740,8 @@ class TemplatePointObject(MeasureObject):
         tp.multi_target = data.get("multi_target", False)
         tp.max_matches = data.get("max_matches", 0)
         # 初始化 pyramid 相关属性
-        tp.pyramid_decimate = data.get("pyramid_decimate", 0)
-        tp.pyramid_max_template_size = data.get("pyramid_max_template_size", 128)
+        tp.decimate_exponent = pyramid_setting(data, "decimate_exponent", 0)
+        tp.coarse_template_side = pyramid_setting(data, "coarse_template_side", 128)
         tp._pyramid_scale = data.get("pyramid_scale", 1.0)
 
         obj._template_point = tp

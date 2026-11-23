@@ -1490,7 +1490,7 @@ class MeasureApp:
             strategy = SingleBoxAlignment()
         self._workflow._alignment = strategy
 
-        pyramid_decimate, pyramid_max_size = self._parse_pyramid()
+        decimate_exponent, pyramid_max_size = self._parse_pyramid()
         self._workflow.teach_template(
             self._reference_image,
             center=(center_row, center_col),
@@ -1504,8 +1504,8 @@ class MeasureApp:
             overlap=self.tool_panel._overlap_var.get(),
             coarse_fine=True,
             coarse_angle_step=5.0,
-            pyramid_decimate=pyramid_decimate,
-            pyramid_max_template_size=pyramid_max_size,
+            decimate_exponent=decimate_exponent,
+            coarse_template_side=pyramid_max_size,
         )
         self.tool_panel.update_pyramid_factor(max(height, width))
 
