@@ -705,79 +705,6 @@ def suppress(candidates: List[TemplateMatch], max_overlap: float,
 
 
 
-def _search_coarse_fine(gray: Array, prepared: PreparedSupport, options: SearchOptions,
-                        image_space: Space, angles: List[float], scales: List[float],
-                        requested: int, pad: int) -> Observation[MatchSet]:
-    """Two-stage search: a coarse pose grid locates neighbourhoods, then a fine grid.
-
-    Args:
-        gray: ``float32`` inspection image.
-        prepared: Immutable prepared support.
-        options: Search policy carrying both grid resolutions.
-        image_space: Space of the inspection image.
-        angles: Requested fine clockwise angles in radians.
-        scales: Requested fine scales.
-        requested: Total fine pose count.
-        pad: Border padding already applied for large variants.
-
-    Returns:
-        Selected matches, or ``no_matches``.
-    """
-    coarse_angles = _coarse_grid(angles, options.coarse_angle_step_rad)
-    coarse_scales = _coarse_grid(scales, options.coarse_scale_step)
-    coarse_options = SearchOptions(
-        score_threshold=min(options.score_threshold, options.coarse_score_threshold),
-        max_matches=0, max_overlap=options.max_overlap, subpixel=False,
-        coarse_fine=False, angle_list=tuple(coarse_angles),
-        scale_list=tuple(coarse_scales),
-    )
-    coarse = search_support(gray, prepared, coarse_options, image_space=image_space)
-    if not coarse.valid or coarse.value is None:
-        return invalid(image_space, "no_matches",
-                       {"requested_variant_count": requested,
-                        "searched_variant_count": 0,
-                        "unavailable_variant_count": 0,
-                        "pruned_variant_count": len(coarse_angles) * len(coarse_scales),
-                        "search_complete": True})
-    neighbourhoods = coarse.value.matches
-    limit = options.max_matches if options.max_matches > 0 else len(neighbourhoods)
-    refined: List[TemplateMatch] = []
-    searched = 0
-    for anchor_match in neighbourhoods[:limit]:
-        local_angles = [angle for angle in angles
-                        if abs(angle - anchor_match.angle_rad)
-                        <= options.coarse_angle_step_rad + 1e-12]
-        local_scales = [scale for scale in scales
-                        if abs(scale - anchor_match.scale)
-                        <= options.coarse_scale_step + 1e-12]
-        if not local_angles or not local_scales:
-            continue
-        fine_options = SearchOptions(
-            score_threshold=options.score_threshold, max_matches=0,
-            max_overlap=options.max_overlap, subpixel=options.subpixel,
-            coarse_fine=False, angle_list=tuple(local_angles),
-            scale_list=tuple(local_scales),
-        )
-        found = search_support(gray, prepared, fine_options, image_space=image_space)
-        if found.valid and found.value is not None:
-            refined.extend(found.value.matches)
-            searched += len(local_angles) * len(local_scales)
-    selected = suppress(refined, options.max_overlap)
-    if options.max_matches:
-        selected = selected[: options.max_matches]
-    diagnostics = {"requested_variant_count": requested,
-                   "searched_variant_count": searched,
-                   "unavailable_variant_count": 0,
-                   "pruned_variant_count": len(coarse_angles) * len(coarse_scales),
-                   "search_complete": True,
-                   "ncc_evaluations": searched,
-                   "fine_neighborhoods": len(neighbourhoods[:limit]),
-                   "coarse_poses": len(coarse_angles) * len(coarse_scales)}
-    if not selected:
-        return invalid(image_space, "no_matches", diagnostics)
-    return observed(image_space, MatchSet(matches=tuple(selected)), diagnostics)
-
-
 def _coarse_grid(values: List[float], step: float) -> List[float]:
     """Reduce a fine grid to the coarse values spaced at least ``step`` apart."""
     if not values:
@@ -791,36 +718,148 @@ def _coarse_grid(values: List[float], step: float) -> List[float]:
     return coarse
 
 
-def _pyramid_factor(prepared: PreparedSupport, options: SearchOptions) -> float:
-    """Return the decimation factor implied by the pyramid options.
+def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
+               image_space: Space, factor: float) -> Observation[MatchSet]:
+    """Coarse stage locates neighbourhoods, then each is rescanned at full resolution.
 
-    ``pyramid_max_template_size`` is the only side-length cap: a decimation
-    that would leave the support's longest side above it is not used. (A
-    legacy ``max_coarse_template_side`` field claimed the same role but was
-    never read; it has been removed rather than silently ignored.)
-    """
-    height, width = np.asarray(prepared.pixels).shape[:2]
-    factor = min(2.0 ** -int(options.pyramid_levels),
-                 options.pyramid_max_template_size / max(width, height))
-    return min(1.0, max(factor, min(1.0, 6.0 / max(1, min(width, height)))))
+    Two independent knobs decide what the coarse stage does, and they compose
+    instead of excluding each other:
 
+    * ``factor`` (from ``pyramid_levels`` and the template side cap) chooses the
+      *resolution* the coarse scan runs at. At ``factor < 1`` both the support
+      and the search image are low-passed and decimated, so each correlation is
+      cheap and the coarse template side stays bounded however large the support
+      is.
+    * ``coarse_fine`` chooses the *pose density*: the coarse grid is the fine
+      grid thinned to ``coarse_angle_step_rad`` / ``coarse_scale_step``, and each
+      retained neighbourhood is then rescanned over the fine values near it.
 
-def _search_pyramid(gray: Array, prepared: PreparedSupport, options: SearchOptions,
-                    image_space: Space, factor: float) -> Observation[MatchSet]:
-    """Coarse search on decimated pixels, then rescan each candidate at full resolution.
-
-    Both stages call :func:`_scan_once`, so the pyramid dispatcher can never
-    re-enter itself regardless of the options carried by the caller.
+    With ``coarse_fine`` off and ``factor`` 1 this is a single full-resolution
+    pass, which is why the previous two functions could be replaced by it.
 
     Args:
         gray: ``float32`` inspection image.
         prepared: Immutable prepared support.
-        options: Search policy.
+        options: Search policy carrying both grid resolutions.
         image_space: Space of the inspection image.
+        factor: Decimation factor in ``(0, 1]``; ``1.0`` disables decimation.
+
+    Returns:
+        Matches located in the full-resolution image.
+    """
+    fine_angles = options.angles()
+    fine_scales = options.scales()
+    requested = len(fine_angles) * len(fine_scales)
+    decimated = factor < 1.0 - 1e-12
+
+    scan_gray, scan_support = gray, prepared
+    if decimated:
+        scan_gray, scan_support = _decimate_pair(gray, prepared, factor)
+
+    # The coarse grid is thinned only when the caller asked for a two-pass pose
+    # search; decimation alone does not thin it, because the coarse stage still
+    # has to *find* the target before any neighbourhood exists.
+    if options.coarse_fine and (len(fine_angles) > 1 or len(fine_scales) > 1):
+        coarse_angles = _coarse_grid(fine_angles, options.coarse_angle_step_rad)
+        coarse_scales = _coarse_grid(fine_scales, options.coarse_scale_step)
+    else:
+        coarse_angles, coarse_scales = fine_angles, fine_scales
+
+    coarse = _scan_once(scan_gray, scan_support, SearchOptions(
+        score_threshold=min(options.score_threshold, options.coarse_score_threshold),
+        max_matches=0, max_overlap=options.max_overlap, subpixel=False,
+        coarse_fine=False, angle_list=tuple(coarse_angles),
+        scale_list=tuple(coarse_scales),
+    ), image_space)
+    diagnostics = {
+        "requested_variant_count": requested,
+        "coarse_poses": len(coarse_angles) * len(coarse_scales),
+    }
+    if decimated:
+        diagnostics["pyramid_factor"] = float(factor)
+    if not coarse.valid or coarse.value is None:
+        diagnostics.update({"searched_variant_count": 0, "pruned_variant_count": 0,
+                            "unavailable_variant_count": 0, "search_complete": True})
+        return invalid(image_space, "no_matches", diagnostics)
+
+    # How many coarse neighbourhoods deserve a full-resolution rescan. This is
+    # a cost/accuracy trade-off, not the caller's match count: a single target
+    # can produce several coarse peaks, and refining only one of them would
+    # make the result depend on which peak happened to sort first. RoI is
+    # bounded by max(4, max_matches) so a single-target search still refines
+    # the handful of neighbourhoods a symmetric or multi-peak part produces.
+    neighbourhood_cap = max(4, options.max_matches or 4)
+    if not decimated and not options.coarse_fine:
+        # One pass already covered the whole requested grid at full resolution,
+        # so the coarse matches are final: rescanning them would repeat every
+        # correlation for a subpixel refinement that pass did not ask for.
+        diagnostics.update({
+            "searched_variant_count": len(fine_angles) * len(fine_scales),
+            "ncc_evaluations": len(fine_angles) * len(fine_scales),
+            "pruned_variant_count": 0,
+            "fine_neighborhoods": 0,
+            "unavailable_variant_count": coarse.diagnostics.get(
+                "unavailable_variant_count", 0),
+            "search_complete": coarse.diagnostics.get("search_complete", True),
+        })
+        # The coarse pass ran with the relaxed coarse threshold and without
+        # suppression, because it was meant to feed a refinement. Here it *is*
+        # the result, so it must be filtered at the caller's threshold and
+        # deduplicated exactly as the two-stage path does.
+        accepted = [m for m in coarse.value.matches
+                    if m.score >= options.score_threshold - 1e-12]
+        selected = suppress(accepted, options.max_overlap)
+        if options.max_matches:
+            selected = selected[: options.max_matches]
+        if not selected:
+            return invalid(image_space, "no_matches", diagnostics)
+        return observed(image_space, MatchSet(matches=tuple(selected)), diagnostics)
+
+    neighbourhoods = suppress(coarse.value.matches, options.max_overlap,
+                              neighbourhood_cap)
+    refined: List[TemplateMatch] = []
+    searched = 0
+    for anchor in neighbourhoods:
+        local_angles = ([a for a in fine_angles
+                         if abs(a - anchor.angle_rad) <= options.coarse_angle_step_rad + 1e-12]
+                        if options.coarse_fine else [anchor.angle_rad])
+        local_scales = ([s for s in fine_scales
+                         if abs(s - anchor.scale) <= options.coarse_scale_step + 1e-12]
+                        if options.coarse_fine else [anchor.scale])
+        if not local_angles or not local_scales:
+            continue
+        found = _rescan_neighbourhood(gray, prepared, options, anchor, factor,
+                                      local_angles, local_scales, image_space)
+        searched += len(local_angles) * len(local_scales)
+        refined.extend(found)
+
+    selected = suppress(refined, options.max_overlap)
+    if options.max_matches:
+        selected = selected[: options.max_matches]
+    diagnostics.update({
+        "searched_variant_count": searched,
+        "ncc_evaluations": searched,
+        "pruned_variant_count": len(coarse.value.matches),
+        "fine_neighborhoods": len(neighbourhoods),
+        "unavailable_variant_count": 0,
+        "search_complete": True,
+    })
+    if not selected:
+        return invalid(image_space, "no_matches", diagnostics)
+    return observed(image_space, MatchSet(matches=tuple(selected)), diagnostics)
+
+
+def _decimate_pair(gray: Array, prepared: PreparedSupport, factor: float
+                   ) -> Tuple[Array, PreparedSupport]:
+    """Low-pass and decimate the search image and the support by ``factor``.
+
+    Args:
+        gray: Full-resolution ``float32`` inspection image.
+        prepared: Full-resolution prepared support.
         factor: Decimation factor in ``(0, 1)``.
 
     Returns:
-        Matches located on the full-resolution image.
+        ``(small_gray, small_support)`` on the coarse grid.
     """
     support = np.asarray(prepared.pixels, dtype=np.float32)
     small_support = cv2.resize(support, None, fx=factor, fy=factor,
@@ -838,62 +877,78 @@ def _search_pyramid(gray: Array, prepared: PreparedSupport, options: SearchOptio
         mask=None,
         origin=prepared.origin,
     )
-    coarse_options = SearchOptions(
-        score_threshold=min(options.score_threshold, options.coarse_score_threshold),
-        max_matches=0, max_overlap=options.max_overlap, subpixel=False,
-        coarse_fine=False, angle_list=tuple(options.angles()),
-        scale_list=tuple(options.scales()),
-    )
-    coarse = _scan_once(small_gray, small, coarse_options, image_space)
-    diagnostics = {"requested_variant_count": len(options.angles()) * len(options.scales()),
-                   "unavailable_variant_count": 0, "pyramid_factor": float(factor)}
-    if not coarse.valid or coarse.value is None:
-        diagnostics.update({"searched_variant_count": 0, "pruned_variant_count": 0,
-                            "search_complete": True})
-        return invalid(image_space, "no_matches", diagnostics)
-    limit = min(len(coarse.value.matches), max(4, options.max_matches or 4))
+    return small_gray, small
+
+
+def _rescan_neighbourhood(gray: Array, prepared: PreparedSupport,
+                          options: SearchOptions, anchor: TemplateMatch,
+                          factor: float, angles: List[float], scales: List[float],
+                          image_space: Space) -> List[TemplateMatch]:
+    """Rescan one coarse neighbourhood at full resolution.
+
+    The window is centred on the coarse match mapped back to full resolution and
+    is sized from the support's own extent plus ``fine_search_radius_px``, so it
+    never depends on the whole frame.
+
+    Args:
+        gray: Full-resolution ``float32`` inspection image.
+        prepared: Full-resolution prepared support.
+        options: Search policy (threshold, subpixel, overlap).
+        anchor: The coarse neighbourhood to refine.
+        factor: Decimation factor the anchor was found at; ``1.0`` without one.
+        angles: Fine angles to evaluate in this neighbourhood.
+        scales: Fine scales to evaluate in this neighbourhood.
+        image_space: Space of the inspection image.
+
+    Returns:
+        Matches found inside the window, in full-resolution coordinates.
+    """
+    support_shape = np.asarray(prepared.pixels).shape[:2]
     height, width = gray.shape[:2]
-    radius = max(options.fine_search_radius_px, max(support.shape[:2]) * 0.75)
-    refined: List[TemplateMatch] = []
-    searched = 0
-    for match in coarse.value.matches[:limit]:
-        center_x = match.center[0] / factor
-        center_y = match.center[1] / factor
-        left = int(max(0, center_x - radius))
-        top = int(max(0, center_y - radius))
-        right = int(min(width, center_x + radius))
-        bottom = int(min(height, center_y + radius))
-        window = gray[top:bottom, left:right]
-        if window.size == 0:
-            continue
-        searched += len(options.angles()) * len(options.scales())
-        local = _scan_once(window, prepared, options, image_space)
-        if not local.valid or local.value is None:
-            continue
-        for found in local.value.matches:
-            matrix = np.array(found.support_to_image.matrix, dtype=np.float64)
-            matrix[0, 2] += left
-            matrix[1, 2] += top
-            refined.append(TemplateMatch(
-                center=(found.center[0] + left, found.center[1] + top),
-                anchor=(found.anchor[0] + left, found.anchor[1] + top),
-                angle_rad=found.angle_rad, scale=found.scale, score=found.score,
-                support_to_image=make_mapping(matrix, source=prepared.support_space,
-                                              destination=image_space, kind="similarity"),
-                peak_xy=found.peak_xy, size_wh=found.size_wh,
-            ))
-    selected = suppress(refined, options.max_overlap)
-    if options.max_matches:
-        selected = selected[: options.max_matches]
-    diagnostics.update({"searched_variant_count": searched,
-                        "pruned_variant_count": len(coarse.value.matches),
-                        "search_complete": True,
-                        "ncc_evaluations": searched,
-                        "fine_neighborhoods": len(coarse.value.matches[:limit]),
-                        "coarse_poses": len(coarse.value.matches)})
-    if not selected:
-        return invalid(image_space, "no_matches", diagnostics)
-    return observed(image_space, MatchSet(matches=tuple(selected)), diagnostics)
+    centre_x, centre_y = anchor.center[0] / factor, anchor.center[1] / factor
+    radius = max(options.fine_search_radius_px, max(support_shape) * 0.75)
+    left = int(max(0, centre_x - radius))
+    top = int(max(0, centre_y - radius))
+    right = int(min(width, centre_x + radius))
+    bottom = int(min(height, centre_y + radius))
+    window = gray[top:bottom, left:right]
+    if window.size == 0:
+        return []
+    local = _scan_once(window, prepared, SearchOptions(
+        score_threshold=options.score_threshold, max_matches=0,
+        max_overlap=options.max_overlap, subpixel=options.subpixel,
+        coarse_fine=False, angle_list=tuple(angles), scale_list=tuple(scales),
+    ), image_space)
+    if not local.valid or local.value is None:
+        return []
+    shifted: List[TemplateMatch] = []
+    for found in local.value.matches:
+        matrix = np.array(found.support_to_image.matrix, dtype=np.float64)
+        matrix[0, 2] += left
+        matrix[1, 2] += top
+        shifted.append(TemplateMatch(
+            center=(found.center[0] + left, found.center[1] + top),
+            anchor=(found.anchor[0] + left, found.anchor[1] + top),
+            angle_rad=found.angle_rad, scale=found.scale, score=found.score,
+            support_to_image=make_mapping(matrix, source=prepared.support_space,
+                                          destination=image_space, kind="similarity"),
+            peak_xy=found.peak_xy, size_wh=found.size_wh,
+        ))
+    return shifted
+
+
+def _pyramid_factor(prepared: PreparedSupport, options: SearchOptions) -> float:
+    """Return the decimation factor implied by the pyramid options.
+
+    ``pyramid_max_template_size`` is the only side-length cap: a decimation
+    that would leave the support's longest side above it is not used. (A
+    legacy ``max_coarse_template_side`` field claimed the same role but was
+    never read; it has been removed rather than silently ignored.)
+    """
+    height, width = np.asarray(prepared.pixels).shape[:2]
+    factor = min(2.0 ** -int(options.pyramid_levels),
+                 options.pyramid_max_template_size / max(width, height))
+    return min(1.0, max(factor, min(1.0, 6.0 / max(1, min(width, height)))))
 
 
 def search_support(
@@ -920,9 +975,7 @@ def search_support(
     gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     gray = np.array(gray, dtype=np.float32, copy=True)
     factor = _pyramid_factor(prepared, options)
-    if factor < 1.0 - 1e-12:
-        return _search_pyramid(gray, prepared, options, image_space, factor)
-    return _scan_once(gray, prepared, options, image_space)
+    return _two_stage(gray, prepared, options, image_space, factor)
 
 
 def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
@@ -941,9 +994,6 @@ def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
     largest = int(math.ceil(max(support_width, support_height)
                             * max(scales) * math.sqrt(2.0))) + 2
     pad = max(0, largest - min(gray.shape[:2]))
-    if options.coarse_fine and (len(angles) > 1 or len(scales) > 1):
-        return _search_coarse_fine(gray, prepared, options, image_space,
-                                   angles, scales, requested, pad)
     padded = cv2.copyMakeBorder(gray, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0.0)
 
     for angle in angles:

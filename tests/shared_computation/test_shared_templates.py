@@ -293,3 +293,61 @@ def test_unknown_variant_origin_is_rejected(api):
         api("template_search", "render_variant")(
             np.zeros((8, 8), dtype=np.float32), 0.0, 1.0, origin="corner")
     assert "origin" in str(error.value)
+
+
+def test_decimation_and_pose_thinning_compose(api, space, textured_image):
+    """``pyramid_levels`` and ``coarse_fine`` are independent knobs, not exclusive.
+
+    They used to short-circuit each other: a decimated search forced the coarse
+    grid to stay at full density, so enabling both cost more than enabling
+    neither. Each knob must now change its own quantity and leave the recovered
+    pose unchanged.
+    """
+    image = stamp(textured_image, center=(120.0, 90.0))
+    prepared = prepare(api, space, textured_image).value
+    options = api("template_search", "SearchOptions")
+
+    def search(**overrides):
+        return api("template_search", "search_support")(
+            image, prepared, options(score_threshold=0.6, angle_step_rad=np.deg2rad(2.0),
+                                     angle_min_rad=np.deg2rad(-8.0),
+                                     angle_max_rad=np.deg2rad(8.0), **overrides),
+            image_space=space("inspection"),
+        )
+
+    plain = search(coarse_fine=False, pyramid_levels=0)
+    decimated = search(coarse_fine=False, pyramid_levels=1)
+    thinned = search(coarse_fine=True, pyramid_levels=0)
+    both = search(coarse_fine=True, pyramid_levels=1)
+    for result in (plain, decimated, thinned, both):
+        assert result.valid, result.reason
+        assert result.value.matches[0].center == pytest.approx((120.0, 90.0), abs=0.2)
+
+    # Decimation alone records a factor; pose thinning alone does not.
+    assert plain.diagnostics.get("pyramid_factor") is None
+    assert decimated.diagnostics["pyramid_factor"] == pytest.approx(0.5)
+    assert both.diagnostics["pyramid_factor"] == pytest.approx(0.5)
+
+    # Thinning cuts the coarse pose count; decimation does not.
+    assert thinned.diagnostics["coarse_poses"] < plain.diagnostics["coarse_poses"]
+    assert decimated.diagnostics["coarse_poses"] == plain.diagnostics["coarse_poses"]
+
+    # Composing them pays the coarse cost of the thinned grid, not the full one.
+    assert both.diagnostics["coarse_poses"] == thinned.diagnostics["coarse_poses"]
+    assert both.diagnostics["searched_variant_count"] <= \
+        thinned.diagnostics["searched_variant_count"] + 4
+
+
+def test_single_pass_reports_no_neighbourhoods(api, space, textured_image):
+    """With neither knob set the search is one full-resolution grid pass."""
+    image = stamp(textured_image, center=(120.0, 90.0))
+    prepared = prepare(api, space, textured_image).value
+    result = api("template_search", "search_support")(
+        image, prepared, api("template_search", "SearchOptions")(
+            score_threshold=0.6, coarse_fine=False, pyramid_levels=0,
+        ), image_space=space("inspection"),
+    )
+    assert result.valid
+    assert result.diagnostics["fine_neighborhoods"] == 0
+    assert result.diagnostics["pruned_variant_count"] == 0
+    assert "pyramid_factor" not in result.diagnostics
