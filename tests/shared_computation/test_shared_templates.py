@@ -351,3 +351,47 @@ def test_single_pass_reports_no_neighbourhoods(api, space, textured_image):
     assert result.diagnostics["fine_neighborhoods"] == 0
     assert result.diagnostics["pruned_variant_count"] == 0
     assert "pyramid_factor" not in result.diagnostics
+
+
+def test_fine_candidates_refines_every_neighbourhood_by_default(api, space, textured_image):
+    """The default refines all coarse neighbourhoods; the knob can bound it."""
+    image = stamp(textured_image, center=(120.0, 90.0))
+    prepared = prepare(api, space, textured_image).value
+    options = api("template_search", "SearchOptions")
+
+    def search(**overrides):
+        return api("template_search", "search_support")(
+            image, prepared, options(score_threshold=0.3, coarse_fine=True,
+                                     pyramid_levels=1, angle_step_rad=np.deg2rad(5.0),
+                                     angle_min_rad=np.deg2rad(-30.0),
+                                     angle_max_rad=np.deg2rad(30.0), **overrides),
+            image_space=space("inspection"),
+        )
+
+    unbounded = search()
+    bounded = search(fine_candidates=1)
+    assert unbounded.valid and bounded.valid
+    assert options(fine_candidates=None).resolved_fine_candidates() is None
+    assert options(fine_candidates=3).resolved_fine_candidates() == 3
+    # A finite bound can only reduce the refined set, never enlarge it.
+    assert bounded.diagnostics["fine_neighborhoods"] <= \
+        unbounded.diagnostics["fine_neighborhoods"]
+    assert max(1, bounded.diagnostics["fine_neighborhoods"]) == 1
+
+
+def test_fine_candidates_environment_variable_bounds_the_search(api, space, textured_image,
+                                                                monkeypatch):
+    """A site can bound the refined set without editing models."""
+    image = stamp(textured_image, center=(120.0, 90.0))
+    prepared = prepare(api, space, textured_image).value
+    monkeypatch.setenv("MEASURE_TEMPLATE_FINE_CANDIDATES", "2")
+    options = api("template_search", "SearchOptions")(fine_candidates=None)
+    assert options.resolved_fine_candidates() == 2
+    result = api("template_search", "search_support")(
+        image, prepared, api("template_search", "SearchOptions")(
+            score_threshold=0.3, coarse_fine=True, pyramid_levels=1,
+            angle_step_rad=np.deg2rad(5.0), angle_min_rad=np.deg2rad(-30.0),
+            angle_max_rad=np.deg2rad(30.0),
+        ), image_space=space("inspection"),
+    )
+    assert result.diagnostics["fine_neighborhoods"] <= 2

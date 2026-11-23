@@ -34,6 +34,7 @@ Usage:
 """
 
 import base64
+import os
 import time
 import logging
 import json
@@ -358,6 +359,49 @@ def check_roi_covers_template(roi_xyxy: Tuple[float, float, float, float],
 # =========================================================================
 # TemplatePoint
 # =========================================================================
+
+def _fine_candidate_limit() -> int:
+    """Return how many coarse candidates the fine stage may refine (0 = all).
+
+    Mirrors ``SearchOptions.resolved_fine_candidates`` so the GUI path and the
+    engine honour the same knob. Equal-looking coarse peaks can rank within a
+    hundredth of each other, so refining them all is the accurate default; a
+    deployment that needs the saving sets ``MEASURE_TEMPLATE_FINE_CANDIDATES``.
+    """
+    configured = os.environ.get("MEASURE_TEMPLATE_FINE_CANDIDATES", "").strip()
+    if configured.isdigit() and int(configured) > 0:
+        return int(configured)
+    return 0
+
+
+def _prefer_fine_result(coarse_result: Dict[str, Any],
+                       fine_result: Dict[str, Any]) -> Dict[str, Any]:
+    """Choose between a coarse pose and the refinement of it.
+
+    A refinement that scores below 90% of the coarse candidate it came from is
+    usually a false peak inside the neighbourhood, so the coarse pose is the
+    safer report. Either way the returned result names the stage that produced
+    its score, so two scores are never compared across stages unknowingly.
+
+    Args:
+        coarse_result: The coarse match that seeded the refinement.
+        fine_result: The refinement, with coordinates already in the parent frame.
+
+    Returns:
+        ``fine_result`` marked ``score_stage="fine"``, or a copy of
+        ``coarse_result`` marked ``score_stage="coarse_fallback"``.
+    """
+    coarse_valid = coarse_result.get('valid', False)
+    coarse_score = coarse_result.get('match_score', 0.0)
+    fine_used = (fine_result.get('valid', False) or coarse_valid) and (
+        fine_result.get('match_score', 0.0) >= coarse_score * 0.9)
+    if fine_used:
+        fine_result['score_stage'] = 'fine'
+        return fine_result
+    fallback = dict(coarse_result)
+    fallback['score_stage'] = 'coarse_fallback'
+    return fallback
+
 
 class TemplatePoint:
     """
@@ -751,12 +795,7 @@ class TemplatePoint:
             fine_result['matched_row'] = orig_row
             fine_result['matched_col'] = orig_col
 
-        # If fine search has a higher score or is valid, use it
-        if fine_result.get('valid', False) or coarse_valid:
-            if fine_result.get('match_score', 0.0) >= coarse_score * 0.9:
-                return fine_result
-
-        return coarse_result
+        return _prefer_fine_result(coarse_result, fine_result)
 
     # ------------------------------------------------------------------
     # Core measurement
@@ -950,6 +989,11 @@ class TemplatePoint:
                     result = self._match_multi_angle_scale_multi(search_img, r1, c1)
                 else:
                     result = self._match_multi_angle_scale(search_img, r1, c1)
+
+        # Every path reports which stage produced the score. The two-stage
+        # refinement already tags itself; everything else is a single pass over
+        # the resolution it was asked for, so its score is the fine score.
+        result.setdefault('score_stage', 'fine')
 
         # Tag the result with ROI clipping diagnostics (peak pinned to the
         # search-region border) before returning it.
@@ -1218,10 +1262,10 @@ class TemplatePoint:
 
             # Step 2: NMS on coarse results to find distinct candidate regions
             coarse_nms = self._spatial_nms(coarse_flat, self.overlap, max_matches=0)
-            # Take top-K for fine refinement (K=5 to cover sparse targets well)
+            # Refine every distinct coarse region unless a deployment bound is set.
             coarse_nms.sort(key=lambda x: x[0], reverse=True)
-            K = min(5, len(coarse_nms))
-            top_candidates = coarse_nms[:K]
+            _limit = _fine_candidate_limit()
+            top_candidates = coarse_nms[:_limit] if _limit else coarse_nms
 
             # Step 3: Fine search around each candidate's angle/scale
             fine_angles_set = set()
@@ -1363,10 +1407,10 @@ class TemplatePoint:
             if not coarse_results:
                 return self._make_invalid_result()
 
-            # Step 2: Select top-K candidates (K=3)
+            # Step 2: Select candidates to refine
             coarse_results.sort(key=lambda x: x[0], reverse=True)
-            K = min(3, len(coarse_results))
-            top_candidates = coarse_results[:K]
+            _limit = _fine_candidate_limit()
+            top_candidates = coarse_results[:_limit] if _limit else coarse_results
 
             # Step 3: Fine search around each candidate
             fine_angles_set = set()
@@ -1492,10 +1536,10 @@ class TemplatePoint:
 
             # Step 2: NMS on coarse results to find distinct candidate regions
             coarse_nms = self._spatial_nms(coarse_flat, self.overlap, max_matches=0)
-            # Take top-K for fine refinement (K=5 to cover sparse targets well)
+            # Refine every distinct coarse region unless a deployment bound is set.
             coarse_nms.sort(key=lambda x: x[0], reverse=True)
-            K = min(5, len(coarse_nms))
-            top_candidates = coarse_nms[:K]
+            _limit = _fine_candidate_limit()
+            top_candidates = coarse_nms[:_limit] if _limit else coarse_nms
 
             # Step 3: Fine search around each candidate's angle/scale
             fine_angles_set = set()

@@ -10,6 +10,7 @@ silently dropped (the historical D07 defect).
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
 
@@ -88,6 +89,7 @@ class SearchOptions:
     pyramid_levels: int = 0
     pyramid_max_template_size: int = 128
     fine_search_radius_px: float = 24.0
+    fine_candidates: Optional[int] = None
     angle_list: Optional[Tuple[float, ...]] = None
     scale_list: Optional[Tuple[float, ...]] = None
     inplace_variants: bool = False
@@ -115,6 +117,30 @@ class SearchOptions:
         if self.scale_step <= 0.0:
             raise contract_error("contract.invalid_parameter", "scale_step must be positive",
                                  "search.scale_step")
+        if self.fine_candidates is not None and self.fine_candidates < 1:
+            raise contract_error("contract.invalid_parameter",
+                                 "fine_candidates must be >= 1 or None",
+                                 "search.fine_candidates")
+
+    def resolved_fine_candidates(self) -> Optional[int]:
+        """Return how many coarse neighbourhoods the fine stage may refine.
+
+        ``None`` refines every neighbourhood the coarse stage kept, which is the
+        accurate-and-stable default: equal-looking coarse peaks can rank within a
+        hundredth of each other, so cutting the set can report a different — but
+        equally valid — rotation than the full rescan would.
+
+        The bound exists because a symmetric part searched over a full turn
+        produces many near-equal peaks, and each costs a full-resolution rescan.
+        ``MEASURE_TEMPLATE_FINE_CANDIDATES`` supplies a deployment-wide bound so
+        a site can trade accuracy for cost without editing models.
+        """
+        if self.fine_candidates is not None:
+            return int(self.fine_candidates)
+        configured = os.environ.get("MEASURE_TEMPLATE_FINE_CANDIDATES", "").strip()
+        if configured.isdigit() and int(configured) > 0:
+            return int(configured)
+        return None
 
     def angles(self) -> List[float]:
         """Return the requested clockwise angles in radians (inclusive)."""
@@ -782,13 +808,6 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
                             "unavailable_variant_count": 0, "search_complete": True})
         return invalid(image_space, "no_matches", diagnostics)
 
-    # How many coarse neighbourhoods deserve a full-resolution rescan. This is
-    # a cost/accuracy trade-off, not the caller's match count: a single target
-    # can produce several coarse peaks, and refining only one of them would
-    # make the result depend on which peak happened to sort first. RoI is
-    # bounded by max(4, max_matches) so a single-target search still refines
-    # the handful of neighbourhoods a symmetric or multi-peak part produces.
-    neighbourhood_cap = max(4, options.max_matches or 4)
     if not decimated and not options.coarse_fine:
         # One pass already covered the whole requested grid at full resolution,
         # so the coarse matches are final: rescanning them would repeat every
@@ -815,8 +834,16 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
             return invalid(image_space, "no_matches", diagnostics)
         return observed(image_space, MatchSet(matches=tuple(selected)), diagnostics)
 
+    # How many coarse neighbourhoods deserve a full-resolution rescan. This is
+    # a cost/accuracy trade-off, not the caller's match count: one target can
+    # produce several coarse peaks, and refining only one of them would make the
+    # outcome depend on which peak happened to sort first. The default refines
+    # every neighbourhood the coarse stage kept; fine_candidates (or the
+    # MEASURE_TEMPLATE_FINE_CANDIDATES environment variable) bounds it for a
+    # symmetric part where near-equal peaks each cost a full rescan.
     neighbourhoods = suppress(coarse.value.matches, options.max_overlap,
-                              neighbourhood_cap)
+                              options.resolved_fine_candidates() or 0)
+
     refined: List[TemplateMatch] = []
     searched = 0
     for anchor in neighbourhoods:
