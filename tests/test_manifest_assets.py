@@ -364,3 +364,32 @@ class TestMigrationScript:
 
         assert migrate.main([str(model_dir), "--dry-run"]) == 0
         assert not (model_dir / MANIFEST_FILENAME).exists()
+
+class TestLegacyPyramidSpellings:
+    """Assets saved before the rename must keep loading with their own values.
+
+    The rename gave the two coarse-search fields current names and left the old
+    ones readable everywhere. A loader that reads only the current key does not
+    fail loudly on an old asset -- it raises ``KeyError`` -- so this pins the
+    read path rather than the value.
+    """
+
+    def test_load_accepts_the_pyramid_spelling(self, tmp_path: Path):
+        workflow = taught_workflow()
+        model_dir = tmp_path / "model"
+        workflow.save(str(model_dir))
+        path = model_dir / MANIFEST_FILENAME
+        document = json.loads(path.read_text(encoding="utf-8"))
+        matching = document["matching"]
+        matching["pyramid_decimate"] = 2
+        matching["pyramid_max_template_size"] = 96
+        matching.pop("decimate_exponent", None)
+        matching.pop("coarse_template_side", None)
+        path.write_text(json.dumps(document), encoding="utf-8")
+
+        restored = MultiTargetWorkflow.load(str(model_dir))
+        point = restored._alignment._template_point
+        assert point.decimate_exponent == 2
+        assert point.coarse_template_side == 96
+        assert point._pyramid_scale == pytest.approx(min(2 ** -2, 96 / max(point._crop_h,
+                                                                          point._crop_w)))

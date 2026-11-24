@@ -70,3 +70,19 @@ def test_fallback_to_the_coarse_pose_is_marked():
     held = _prefer_fine_result(coarse_pose, dict(collapsed, match_score=0.95))
     assert held["score_stage"] == "fine"
     assert held["matched_row"] == pytest.approx(165.0)
+
+
+def test_validity_follows_the_reported_score():
+    """A result whose score misses the threshold must not report valid.
+
+    Each stage gates at its own threshold -- the coarse stage deliberately uses
+    the relaxed coarse_score_threshold -- so a result can carry a validity
+    decided by one stage and a score produced by another. The reported pair must
+    agree, because callers branch on ``valid`` and log ``match_score``.
+    """
+    reference = _reference()
+    point = TemplatePoint(reference, click_row=160, click_col=200, template_size=80,
+                          decimate_exponent=1, coarse_fine=False)
+    point.match_score_threshold = 0.95
+    result = point.measure(reference)
+    assert result["valid"] == (result["match_score"] >= point.match_score_threshold)

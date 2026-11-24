@@ -1024,6 +1024,14 @@ class TemplatePoint:
         # the resolution it was asked for, so its score is the fine score.
         result.setdefault('score_stage', 'fine')
 
+        # The reported validity must follow the reported score. Every stage
+        # gates at its own threshold -- the coarse stage deliberately uses the
+        # relaxed coarse_score_threshold -- so a result chosen by one stage can
+        # carry a validity decided by another. Re-decide here, at the single
+        # exit, against the caller's threshold.
+        result['valid'] = bool(result.get('valid', False)) and (
+            float(result.get('match_score', 0.0)) >= float(self.match_score_threshold))
+
         # Tag the result with ROI clipping diagnostics (peak pinned to the
         # search-region border) before returning it.
         self._attach_search_diagnostics(result, search_region, r1, c1, search_img)

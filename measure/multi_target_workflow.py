@@ -2218,8 +2218,8 @@ class MultiTargetWorkflow:
                 overlap=float(matching["overlap"]),
                 coarse_fine=bool(matching["coarse_fine"]),
                 coarse_angle_step=float(matching["coarse_angle_step"]),
-                decimate_exponent=int(matching["decimate_exponent"]),
-                coarse_template_side=int(matching["coarse_template_side"]),
+                decimate_exponent=int(pyramid_setting(matching, "decimate_exponent", 0)),
+                coarse_template_side=int(pyramid_setting(matching, "coarse_template_side", 128)),
             )
 
         # Translate the manifest's dependency references back to label form.
