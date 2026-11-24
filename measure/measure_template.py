@@ -48,38 +48,6 @@ from measure.viz import to_bgr, to_gray, draw_text_shadow
 logger = logging.getLogger(__name__)
 
 
-def _build_grid(invariant: bool, range_tuple: Tuple[float, float],
-                step: float) -> List[float]:
-    """Return the pose values to enumerate for one invariant axis.
-
-    A non-invariant axis has nothing to sweep: a zero/one range means "no pose
-    search" (the single identity value), any other range collapses to its
-    midpoint, because the axis is not actually swept.
-
-    Args:
-        invariant: Whether this axis (angle or scale) is being searched.
-        range_tuple: ``(low, high)`` search bounds for the axis.
-        step: Grid step for the axis.
-
-    Returns:
-        The ascending grid values, inclusive of ``high`` within ``step * 0.01``.
-    """
-    if not invariant:
-        if range_tuple[0] == 0.0 and abs(range_tuple[1] - 1.0) < 1e-6:
-            return [0.0]
-        return [(range_tuple[0] + range_tuple[1]) / 2.0]
-    values = []
-    value = range_tuple[0]
-    tolerance = step * 0.01
-    while value <= range_tuple[1] + tolerance:
-        values.append(value)
-        value += step
-    return values
-
-
-# =========================================================================
-# Preprocessor Protocol & Built-in Implementations
-# =========================================================================
 
 class Preprocessor(Protocol):
     """
@@ -360,6 +328,17 @@ def check_roi_covers_template(roi_xyxy: Tuple[float, float, float, float],
 # TemplatePoint
 # =========================================================================
 
+#: How many coarse candidates the GUI's fine stage refines by default.
+#: Refining every coarse peak is the accurate choice, but a full-turn search on
+#: a symmetric part produces dozens of near-equal peaks and each costs a
+#: full-resolution rescan. A cap of 8 was measured selecting a different
+#: candidate (score 0.716 at a wrong position) on a real 360 degree project
+#: whose coarse stage produced 28 neighbourhoods; 100 covers that set and
+#: reproduced the uncapped answer exactly. Raise it further only with evidence,
+#: and treat a cap below the coarse neighbourhood count as an accuracy risk.
+DEFAULT_FINE_CANDIDATES = 100
+
+
 def _fine_candidate_limit() -> int:
     """Return how many coarse candidates the fine stage may refine (0 = all).
 
@@ -475,7 +454,8 @@ class TemplatePoint:
                  max_matches: int = 0,
                  overlap: float = 0.3,
                  decimate_exponent: int = 0,
-                 coarse_template_side: int = 128):
+                 coarse_template_side: int = 128,
+                 fine_candidates: int = DEFAULT_FINE_CANDIDATES):
         """
         Initialize a template point from a reference image.
 
@@ -536,6 +516,7 @@ class TemplatePoint:
         self.overlap = float(overlap)
         self.decimate_exponent = int(decimate_exponent)
         self.coarse_template_side = int(coarse_template_side)
+        self.fine_candidates = int(fine_candidates)
 
         # Crop the template region (clamped to image bounds)
         gray = self._to_gray(reference_image)
@@ -626,210 +607,6 @@ class TemplatePoint:
         shortest = max(1, min(height, width))
         return min(1.0, max(factor, min(1.0, 6.0 / shortest)))
 
-    def _pyramid_downsample(self, image: np.ndarray) -> np.ndarray:
-        """
-        Downsample an image by the pre-computed pyramid scale factor.
-
-        Args:
-            image: Input image (any shape).
-
-        Returns:
-            Downsampled image (or original if scale == 1.0).
-        """
-        if self._pyramid_scale >= 1.0:
-            return image
-        new_w = max(1, int(round(image.shape[1] * self._pyramid_scale)))
-        new_h = max(1, int(round(image.shape[0] * self._pyramid_scale)))
-        return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-    def _pyramid_upscale_coord(self, row: float, col: float) -> tuple[float, float]:
-        """
-        Map coordinates from the downsampled space back to the original space.
-
-        Args:
-            row: Row coordinate in the downsampled image.
-            col: Column coordinate in the downsampled image.
-
-        Returns:
-            (orig_row, orig_col) in the original image coordinate space.
-        """
-        if self._pyramid_scale >= 1.0:
-            return row, col
-        inv = 1.0 / self._pyramid_scale
-        return row * inv, col * inv
-
-    def _run_fine_search_on_roi(
-        self,
-        search_img: np.ndarray,
-        r1: int,
-        c1: int,
-        coarse_result: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """
-        Given a coarse match result, run a fine search on a small ROI
-        around the detected position in the original (full-res) search image.
-
-        Args:
-            search_img: Full-resolution preprocessed search image.
-            r1, c1: Top-left offset of the search region in the original image.
-            coarse_result: Result dict from a coarse match call.
-
-        Returns:
-            Refined result dict with coordinates in the original image space.
-        """
-        # Map the coarse match center to original coordinates
-        coarse_center_row = coarse_result.get('matched_row', 0.0)
-        coarse_center_col = coarse_result.get('matched_col', 0.0)
-        coarse_best_rotation = coarse_result.get('best_rotation_deg', 0.0)
-        coarse_best_scale = coarse_result.get('best_scale', 1.0)
-        coarse_score = coarse_result.get('match_score', 0.0)
-        coarse_valid = coarse_result.get('valid', False)
-
-        # Compute ROI in the full-res search image
-        # 金字塔模式下 ROI 基于降采样后的尺寸，避免全分辨率大 ROI 导致精搜索过慢
-        _pyr_scale = self._pyramid_scale if self._pyramid_scale < 1.0 else 1.0
-        roi_size = max(self._crop_h, self._crop_w) * 1.2 * _pyr_scale
-        half_roi = roi_size / 2.0
-
-        # Convert to search-image-local coordinates (relative to r1, c1)
-        local_center_row = coarse_center_row - r1
-        local_center_col = coarse_center_col - c1
-
-        roi_r1 = max(0, int(local_center_row - half_roi))
-        roi_r2 = min(search_img.shape[0], int(local_center_row + half_roi))
-        roi_c1 = max(0, int(local_center_col - half_roi))
-        roi_c2 = min(search_img.shape[1], int(local_center_col + half_roi))
-
-        if roi_r2 - roi_r1 < self._crop_h or roi_c2 - roi_c1 < self._crop_w:
-            # ROI too small for full-res template
-            if self._pyramid_scale < 1.0:
-                # 金字塔模式：在降采样空间做精搜索，而非直接 fallback
-                pyr_scale = self._pyramid_scale
-                pyr_search = self._pyramid_downsample(search_img)
-                pyr_tmpl = self._pyramid_downsample(self.edge_template)
-
-                # coarse_center 是原始图像坐标，转为 search_img 局部坐标再降采样
-                pyr_center_row = (coarse_center_row - r1) * pyr_scale
-                pyr_center_col = (coarse_center_col - c1) * pyr_scale
-
-                # 取降采样空间的 ROI（比模板稍大）
-                p_roi_size = max(pyr_tmpl.shape[0], pyr_tmpl.shape[1]) * 1.5
-                p_half = p_roi_size / 2.0
-                pr1 = max(0, int(pyr_center_row - p_half))
-                pr2 = min(pyr_search.shape[0], int(pyr_center_row + p_half))
-                pc1 = max(0, int(pyr_center_col - p_half))
-                pc2 = min(pyr_search.shape[1], int(pyr_center_col + p_half))
-
-                if pr2 - pr1 >= pyr_tmpl.shape[0] and pc2 - pc1 >= pyr_tmpl.shape[1]:
-                    # 在降采样 ROI 上做单角度匹配
-                    pyr_roi = pyr_search[pr1:pr2, pc1:pc2]
-                    fine_heatmap = cv2.matchTemplate(pyr_roi, pyr_tmpl, cv2.TM_CCOEFF_NORMED)
-                    _, fine_score, _, fine_max_loc = cv2.minMaxLoc(fine_heatmap)
-
-                    # 亚像素精化
-                    fine_x, fine_y = float(fine_max_loc[0]), float(fine_max_loc[1])
-                    if self.use_subpixel and fine_heatmap.shape[0] >= 3 and fine_heatmap.shape[1] >= 3:
-                        try:
-                            sp_x, sp_y = self._refine_subpixel_2d(fine_heatmap, int(fine_y), int(fine_x))
-                            fine_x, fine_y = sp_x, sp_y
-                        except Exception:
-                            pass
-
-                    # 映射回全分辨率原始图像坐标
-                    orig_row = r1 + (pr1 + fine_y + pyr_tmpl.shape[0] / 2.0) / pyr_scale
-                    orig_col = c1 + (pc1 + fine_x + pyr_tmpl.shape[1] / 2.0) / pyr_scale
-
-                    result = dict(coarse_result)
-                    result['matched_row'] = orig_row
-                    result['matched_col'] = orig_col
-                    result['match_score'] = float(fine_score)
-                    result['fine_refined'] = True
-                    return result
-
-            return coarse_result
-
-        # Crop ROI from full-res search image
-        roi_img = search_img[roi_r1:roi_r2, roi_c1:roi_c2]
-
-        # --- Fine-stage 2x downsampling for extra speed ---
-        # Downsample both the ROI and the edge_template by 2x
-        _orig_edge_template = self.edge_template
-        _orig_fine_h = self._crop_h
-        _orig_fine_w = self._crop_w
-        # Only downscale if ROI is large enough
-        # 金字塔模式下精搜索与金字塔同比例，否则用 0.5
-        fine_scale = _pyr_scale if _pyr_scale < 1.0 else 0.5
-        fine_roi = cv2.resize(roi_img, (0, 0), fx=fine_scale, fy=fine_scale, interpolation=cv2.INTER_LINEAR)
-        fine_tmpl = cv2.resize(self.edge_template, (0, 0), fx=fine_scale, fy=fine_scale, interpolation=cv2.INTER_LINEAR)
-        self.edge_template = fine_tmpl
-        self._crop_h = fine_tmpl.shape[0]
-        self._crop_w = fine_tmpl.shape[1]
-
-        # Save and temporarily override matching parameters for fine search
-        _orig_rotation = self.rotation_invariant
-        _orig_angle_range = self.angle_range
-        _orig_angle_step = self.angle_step
-        _orig_scale_invariant = self.scale_invariant
-        _orig_scale_range = self.scale_range
-        _orig_scale_step = self.scale_step
-        _orig_coarse_fine = self.coarse_fine
-        _orig_multi_target = self.multi_target
-
-        # Fine search: only search around the coarse best angle/scale
-        if self.rotation_invariant:
-            fine_angle_half = max(self.angle_step * 1.5, 2.0)
-            self.angle_range = (coarse_best_rotation - fine_angle_half,
-                                coarse_best_rotation + fine_angle_half)
-        else:
-            self.angle_range = (0.0, 0.0)
-        if self.scale_invariant:
-            fine_scale_half = max(self.scale_step * 1.5, 0.03)
-            self.scale_range = (coarse_best_scale - fine_scale_half,
-                                coarse_best_scale + fine_scale_half)
-        else:
-            self.scale_range = (1.0, 1.0)
-        # Disable coarse-fine for the fine search (we already found the region)
-        self.coarse_fine = False
-        self.multi_target = False
-
-        # Run the appropriate match method on the ROI
-        if not self.rotation_invariant and not self.scale_invariant:
-            fine_result = self._match_translation_only(roi_img, roi_r1 + r1, roi_c1 + c1)
-        else:
-            fine_result = self._match_multi_angle_scale(roi_img, roi_r1 + r1, roi_c1 + c1)
-
-        # Restore original parameters
-        self.rotation_invariant = _orig_rotation
-        self.angle_range = _orig_angle_range
-        self.angle_step = _orig_angle_step
-        self.scale_invariant = _orig_scale_invariant
-        self.scale_range = _orig_scale_range
-        self.scale_step = _orig_scale_step
-        self.coarse_fine = _orig_coarse_fine
-        self.multi_target = _orig_multi_target
-
-        # Restore original template
-        self.edge_template = _orig_edge_template
-        self._crop_h = _orig_fine_h
-        self._crop_w = _orig_fine_w
-
-        # Map fine match coordinates from downsampled space back to original space
-        if fine_result.get('valid', False):
-            fine_row = fine_result['matched_row']
-            fine_col = fine_result['matched_col']
-            # fine_result is in the coordinate space of (roi_r1 + r1, roi_c1 + c1)
-            # Subtract the offset, upscale by fine_scale, add back the offset
-            orig_row = (roi_r1 + r1) + (fine_row - (roi_r1 + r1)) / fine_scale
-            orig_col = (roi_c1 + c1) + (fine_col - (roi_c1 + c1)) / fine_scale
-            fine_result['matched_row'] = orig_row
-            fine_result['matched_col'] = orig_col
-
-        return _prefer_fine_result(coarse_result, fine_result)
-
-    # ------------------------------------------------------------------
-    # Core measurement
-    # ------------------------------------------------------------------
-
     def measure(self,
                 inspection_image: np.ndarray,
                 search_region: Optional[Tuple[int, int, int, int]] = None) -> Dict[str, Any]:
@@ -890,134 +667,21 @@ class TemplatePoint:
 
         # Dispatch: fast path vs multi-angle/scale vs multi-target
         t0 = time.perf_counter()
-        if self._pyramid_scale < 1.0:
-            # === Pyramid coarse-to-fine ===
-            t_pyr_start = time.perf_counter()
-            # Step 1: coarse match on downsampled image
-            pyramid_search = self._pyramid_downsample(search_img)
-            t_downsample = time.perf_counter()
-            # Also downsample the template dimensions for validation
-            _orig_crop_h, _orig_crop_w = self._crop_h, self._crop_w
-            # Temporarily adjust template size check for pyramid
-            pyr_h = max(1, int(round(self._crop_h * self._pyramid_scale)))
-            pyr_w = max(1, int(round(self._crop_w * self._pyramid_scale)))
-            self._crop_h = pyr_h
-            self._crop_w = pyr_w
-
-            if pyramid_search.shape[0] < pyr_h or pyramid_search.shape[1] < pyr_w:
-                # Pyramid too small, fall back to original
-                self._crop_h, self._crop_w = _orig_crop_h, _orig_crop_w
-                if not self.rotation_invariant and not self.scale_invariant:
-                    if self.multi_target:
-                        result = self._match_translation_multi(search_img, r1, c1)
-                    else:
-                        result = self._match_translation_only(search_img, r1, c1)
-                else:
-                    if self.multi_target:
-                        result = self._match_multi_angle_scale_multi(search_img, r1, c1)
-                    else:
-                        result = self._match_multi_angle_scale(search_img, r1, c1)
-                t_coarse = time.perf_counter()
-                t_fine = t_coarse  # no fine search
-                logger.info("[TIMING] Pyramid: downsample=%(ds)8.1fms  coarse=%(co)8.1fms  fine=%(fi)8.1fms  total=%(to)8.1fms  FALLBACK no coarse match",
-                             {"ds": (t_downsample - t_pyr_start) * 1000,
-                              "co": (t_coarse - t_downsample) * 1000,
-                              "fi": 0.0,
-                              "to": (t_fine - t_pyr_start) * 1000})
+        # One dispatch. Every pose search -- translation only, angle, scale,
+        # multi-target, decimated or not -- runs through the shared engine,
+        # which owns the decimation and the coarse/fine stages. This used to
+        # branch into a GUI pyramid shell that downsampled first, so a model
+        # with the pyramid enabled was decimated twice on the way down.
+        if not self.rotation_invariant and not self.scale_invariant:
+            if self.multi_target:
+                result = self._match_translation_multi(search_img, r1, c1)
             else:
-                # Coarse match on pyramid
-                # Temporarily downsample edge_template to match pyramid search
-                _orig_tmpl = self.edge_template
-                self.edge_template = self._pyramid_downsample(self.edge_template)
-                if not self.rotation_invariant and not self.scale_invariant:
-                    coarse_result = self._match_translation_only(pyramid_search, r1, c1)
-                else:
-                    # Temporarily disable coarse-fine (we handle it via pyramid)
-                    _orig_cf = self.coarse_fine
-                    self.coarse_fine = True  # keep coarse-fine but on downsampled image
-                    if self.multi_target:
-                        coarse_result = self._match_multi_angle_scale_multi(pyramid_search, r1, c1)
-                    else:
-                        coarse_result = self._match_multi_angle_scale(pyramid_search, r1, c1)
-                    self.coarse_fine = _orig_cf
-
-                # Restore original template dimensions and template
-                self._crop_h, self._crop_w = _orig_crop_h, _orig_crop_w
-                self.edge_template = _orig_tmpl
-                t_coarse = time.perf_counter()
-
-                if not coarse_result.get('valid', False):
-                    result = coarse_result  # propagate invalid result
-                    t_coarse = time.perf_counter()
-                    t_fine = t_coarse  # no fine search
-                    logger.info("[TIMING] Pyramid: downsample=%(ds)8.1fms  coarse=%(co)8.1fms  fine=%(fi)8.1fms  total=%(to)8.1fms  COARSE_INVALID",
-                                 {"ds": (t_downsample - t_pyr_start) * 1000,
-                                  "co": (t_coarse - t_downsample) * 1000,
-                                  "fi": 0.0,
-                                  "to": (t_fine - t_pyr_start) * 1000})
-                else:
-                    # Step 2: fine search on full-res around coarse candidate(s)
-                    if self.multi_target:
-                        matches = coarse_result.get('matches', [])
-                        if not matches and coarse_result.get('valid', False):
-                            matches = [coarse_result]
-                        refined_matches = []
-                        for m in matches:
-                            # Upscale the match center coordinates
-                            m_center_row = self._pyramid_upscale_coord(
-                                m['matched_row'] - r1, 0)[0] + r1
-                            m_center_col = self._pyramid_upscale_coord(
-                                0, m['matched_col'] - c1)[1] + c1
-                            m['matched_row'] = m_center_row
-                            m['matched_col'] = m_center_col
-                            # Run fine search on full-res
-                            refined = self._run_fine_search_on_roi(search_img, r1, c1, m)
-                            refined_matches.append(refined)
-
-                        if refined_matches:
-                            result = self._build_multi_result(refined_matches)
-                        else:
-                            result = coarse_result
-                        t_fine = time.perf_counter()
-                        coarse_hits = len(matches)
-                        logger.info("[TIMING] Pyramid: downsample=%(ds)8.1fms  coarse=%(co)8.1fms  fine=%(fi)8.1fms  total=%(to)8.1fms  multi_target=%(mt)d  pyr_size=%(pw)dx%(ph)d  scale=%(sc).3f",
-                                     {"ds": (t_downsample - t_pyr_start) * 1000,
-                                      "co": (t_coarse - t_downsample) * 1000,
-                                      "fi": (t_fine - t_coarse) * 1000,
-                                      "to": (t_fine - t_pyr_start) * 1000,
-                                      "mt": coarse_hits,
-                                      "pw": pyramid_search.shape[1], "ph": pyramid_search.shape[0],
-                                      "sc": self._pyramid_scale})
-                    else:
-                        # Upscale coarse match center
-                        coarse_center_r = coarse_result.get('matched_row', r1)
-                        coarse_center_c = coarse_result.get('matched_col', c1)
-                        coarse_result['matched_row'] = self._pyramid_upscale_coord(
-                            coarse_center_r - r1, 0)[0] + r1
-                        coarse_result['matched_col'] = self._pyramid_upscale_coord(
-                            0, coarse_center_c - c1)[1] + c1
-
-                        result = self._run_fine_search_on_roi(search_img, r1, c1, coarse_result)
-                        t_fine = time.perf_counter()
-                        logger.info("[TIMING] Pyramid: downsample=%(ds)8.1fms  coarse=%(co)8.1fms  fine=%(fi)8.1fms  total=%(to)8.1fms  pyr_size=%(pw)dx%(ph)d  scale=%(sc).3f",
-                                     {"ds": (t_downsample - t_pyr_start) * 1000,
-                                      "co": (t_coarse - t_downsample) * 1000,
-                                      "fi": (t_fine - t_coarse) * 1000,
-                                      "to": (t_fine - t_pyr_start) * 1000,
-                                      "pw": pyramid_search.shape[1], "ph": pyramid_search.shape[0],
-                                      "sc": self._pyramid_scale})
+                result = self._match_translation_only(search_img, r1, c1)
         else:
-            # === Original code path (no pyramid) ===
-            if not self.rotation_invariant and not self.scale_invariant:
-                if self.multi_target:
-                    result = self._match_translation_multi(search_img, r1, c1)
-                else:
-                    result = self._match_translation_only(search_img, r1, c1)
+            if self.multi_target:
+                result = self._match_multi_angle_scale_multi(search_img, r1, c1)
             else:
-                if self.multi_target:
-                    result = self._match_multi_angle_scale_multi(search_img, r1, c1)
-                else:
-                    result = self._match_multi_angle_scale(search_img, r1, c1)
+                result = self._match_multi_angle_scale(search_img, r1, c1)
 
         # Every path reports which stage produced the score. The two-stage
         # refinement already tags itself; everything else is a single pass over
@@ -1264,406 +928,94 @@ class TemplatePoint:
             })
         return matches
 
-    def _match_multi_angle_scale_multi(self, search_img: np.ndarray,
-                                        r1: int, c1: int) -> Dict[str, Any]:
-        """
-        Multi-target multi-angle / multi-scale matching.
-
-        Enumerates (angle, scale) combinations, finds ALL local maxima in
-        each heatmap, pools all candidates, applies global spatial NMS to
-        deduplicate across angles/scales, then subpixel-refines each
-        surviving match.
-        """
-        H, W = search_img.shape
-        tmpl_h, tmpl_w = self.edge_template.shape
-
-        if self.coarse_fine:
-            # Coarse grid
-            coarse_angles = _build_grid(self.rotation_invariant, self.angle_range,
-                                        self.coarse_angle_step)
-            coarse_scales = _build_grid(self.scale_invariant, self.scale_range,
-                                        self.coarse_scale_step)
-
-            # Step 1: Coarse search — collect all peaks from all heatmaps
-            coarse_results = self._enumerate_angles_scales(
-                search_img, coarse_angles, coarse_scales, W, H, tmpl_w, tmpl_h,
-                multi_peak=True, score_threshold=self.match_score_threshold
-            )
-            if not coarse_results:
-                return self._build_multi_result([])
-
-            # Normalise candidates: (score, (py,px,hm), angle, scale, w, h)
-            #                -> (score, py, px, angle, scale, w, h)
-            coarse_flat = [(s, loc[0], loc[1], a, sc, ww, wh)
-                           for s, loc, a, sc, ww, wh in coarse_results]
-
-            # Step 2: NMS on coarse results to find distinct candidate regions
-            coarse_nms = self._spatial_nms(coarse_flat, self.overlap, max_matches=0)
-            # Refine every distinct coarse region unless a deployment bound is set.
-            coarse_nms.sort(key=lambda x: x[0], reverse=True)
-            _limit = _fine_candidate_limit()
-            top_candidates = coarse_nms[:_limit] if _limit else coarse_nms
-
-            # Step 3: Fine search around each candidate's angle/scale
-            fine_angles_set = set()
-            fine_scales_set = set()
-            for _, _, _, angle, scale, _, _ in top_candidates:
-                fine_angles_set.add(angle)
-                fine_scales_set.add(scale)
-                if self.rotation_invariant:
-                    for offset in [-1, 1]:
-                        na = angle + offset * self.angle_step
-                        if self.angle_range[0] - 1e-6 <= na <= self.angle_range[1] + 1e-6:
-                            fine_angles_set.add(na)
-                if self.scale_invariant:
-                    for offset in [-1, 1]:
-                        ns = scale + offset * self.scale_step
-                        if self.scale_range[0] - 1e-6 <= ns <= self.scale_range[1] + 1e-6:
-                            fine_scales_set.add(ns)
-
-            fine_angles = sorted(fine_angles_set) if self.rotation_invariant else [0.0]
-            fine_scales = sorted(fine_scales_set) if self.scale_invariant else [1.0]
-        else:
-            fine_angles = _build_grid(self.rotation_invariant, self.angle_range,
-                                      self.angle_step)
-            fine_scales = _build_grid(self.scale_invariant, self.scale_range,
-                                      self.scale_step)
-
-        # ---- 2. Fine enumeration (multi-peak) ----
-        all_results = self._enumerate_angles_scales(
-            search_img, fine_angles, fine_scales, W, H, tmpl_w, tmpl_h,
-            multi_peak=True, score_threshold=self.match_score_threshold
-        )
-        if not all_results:
-            return self._build_multi_result([])
-
-        # Normalise: (score, (py,px,hm), angle, scale, w, h)
-        #        -> (score, py, px, hm, angle, scale, w, h)
-        all_flat = [(s, loc[0], loc[1], loc[2] if len(loc) > 2 else None,
-                      a, sc, ww, wh)
-                     for s, loc, a, sc, ww, wh in all_results]
-
-        # ---- 3. Global spatial NMS ----
-        selected = self._spatial_nms(all_flat, self.overlap, self.max_matches)
-
-        # ---- 4. Subpixel refinement per selected match ----
-        matches = []
-        for score, py, px, heatmap, angle, scale, ww, wh in selected:
-            # Position refinement
-            if self.use_subpixel and heatmap is not None:
-                spx, spy = self._refine_subpixel_2d(heatmap, py, px)
-            else:
-                spx, spy = float(px), float(py)
-
-            # Angle refinement via 1D quadratic interpolation
-            if self.rotation_invariant and len(fine_angles) >= 3:
-                refined_angle = self._refine_1d_subpixel(
-                    all_results, angle, self.rotation_invariant, self.scale_invariant,
-                    index_dim=2, value_dim=0
-                )
-            else:
-                refined_angle = angle
-
-            # Scale refinement
-            if self.scale_invariant and len(fine_scales) >= 3:
-                refined_scale = self._refine_1d_subpixel(
-                    all_results, scale, self.rotation_invariant, self.scale_invariant,
-                    index_dim=3, value_dim=0
-                )
-            else:
-                refined_scale = scale
-
-            matched_row = r1 + spy + wh / 2.0
-            matched_col = c1 + spx + ww / 2.0
-
-            matches.append({
-                'matched_row': matched_row,
-                'matched_col': matched_col,
-                'dx': matched_col - self.click_col,
-                'dy': matched_row - self.click_row,
-                'match_score': float(score),
-                'valid': True,
-                'int_peak_y': py,
-                'int_peak_x': px,
-                'best_rotation_deg': float(refined_angle),
-                'best_scale': float(refined_scale),
-            })
-
-        return self._build_multi_result(matches)
-
-    def _build_multi_result(self, matches: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Build the result dict for multi-target mode.
-
-        The top-level fields contain the best match (for backward compatibility).
-        The 'matches' key holds all matches sorted by score descending.
-        """
-        if matches:
-            best = matches[0]
-            return {
-                'matched_row': best['matched_row'],
-                'matched_col': best['matched_col'],
-                'dx': best['dx'],
-                'dy': best['dy'],
-                'match_score': best['match_score'],
-                'valid': True,
-                'int_peak_y': best['int_peak_y'],
-                'int_peak_x': best['int_peak_x'],
-                'best_rotation_deg': best['best_rotation_deg'],
-                'best_scale': best['best_scale'],
-                'matches': matches,
-                'num_matches': len(matches),
-            }
-        else:
-            result = self._make_invalid_result()
-            result['matches'] = []
-            result['num_matches'] = 0
-            return result
-
     def _match_multi_angle_scale(self, search_img: np.ndarray,
                                   r1: int, c1: int) -> Dict[str, Any]:
         """
-        Multi-angle / multi-scale search via cv2.matchTemplate enumeration.
+        Multi-angle / multi-scale search, delegated to the shared engine.
 
-        Enumerates (angle, scale) combinations, finding the global-best
-        correlation peak. Uses optional coarse-to-fine two-stage search.
-        Subpixel refinement is applied to position, angle, and scale.
+        This used to enumerate (angle, scale) pairs with its own
+        ``cv2.matchTemplate`` loop, its own template rotation and its own
+        two-stage search, so the same model searched differently here and
+        through the API. The engine owns all of that now; this method only
+        adapts the GUI's attribute names and dict result.
         """
-        H, W = search_img.shape
-        tmpl_h, tmpl_w = self.edge_template.shape
-
-        if self.coarse_fine:
-            # Coarse grid
-            coarse_angles = _build_grid(self.rotation_invariant, self.angle_range, self.coarse_angle_step)
-            coarse_scales = _build_grid(self.scale_invariant, self.scale_range, self.coarse_scale_step)
-
-            # Step 1: Coarse search — collect all results
-            coarse_results = self._enumerate_angles_scales(
-                search_img, coarse_angles, coarse_scales, W, H, tmpl_w, tmpl_h
-            )
-            if not coarse_results:
-                return self._make_invalid_result()
-
-            # Step 2: Select candidates to refine
-            coarse_results.sort(key=lambda x: x[0], reverse=True)
-            _limit = _fine_candidate_limit()
-            top_candidates = coarse_results[:_limit] if _limit else coarse_results
-
-            # Step 3: Fine search around each candidate
-            fine_angles_set = set()
-            fine_scales_set = set()
-            for _, _, angle, scale, _, _ in top_candidates:
-                # Add candidate point
-                fine_angles_set.add(angle)
-                fine_scales_set.add(scale)
-                # Add neighbours at fine step
-                if self.rotation_invariant:
-                    for offset in [-1, 1]:
-                        na = angle + offset * self.angle_step
-                        if self.angle_range[0] - 1e-6 <= na <= self.angle_range[1] + 1e-6:
-                            fine_angles_set.add(na)
-                if self.scale_invariant:
-                    for offset in [-1, 1]:
-                        ns = scale + offset * self.scale_step
-                        if self.scale_range[0] - 1e-6 <= ns <= self.scale_range[1] + 1e-6:
-                            fine_scales_set.add(ns)
-
-            fine_angles = sorted(fine_angles_set) if self.rotation_invariant else [0.0]
-            fine_scales = sorted(fine_scales_set) if self.scale_invariant else [1.0]
-        else:
-            fine_angles = _build_grid(self.rotation_invariant, self.angle_range, self.angle_step)
-            fine_scales = _build_grid(self.scale_invariant, self.scale_range, self.scale_step)
-
-        # ---- 2. Fine enumeration ----
-        all_results = self._enumerate_angles_scales(
-            search_img, fine_angles, fine_scales, W, H, tmpl_w, tmpl_h
-        )
-        if not all_results:
+        found = self._shared_pose_matches(search_img, r1, c1, multi_target=False)
+        if not found:
             return self._make_invalid_result()
-
-        best_score, best_loc, best_angle, best_scale, best_w, best_h = max(
-            all_results, key=lambda x: x[0]
-        )
-        best_heatmap = best_loc[2] if len(best_loc) > 2 else None
-
-        # ---- 3. Subpixel refinement ----
-        # 3a. Position (re-run matchTemplate at best angle/scale if we don't have the heatmap)
-        if best_heatmap is None and self.use_subpixel:
-            warped = self._rotate_scale_template(best_angle, best_scale)
-            if warped is not None:
-                best_heatmap = cv2.matchTemplate(search_img, warped, cv2.TM_CCOEFF_NORMED)
-
-        int_peak_y, int_peak_x = best_loc[0], best_loc[1]
-        if self.use_subpixel and best_heatmap is not None:
-            subpixel_x, subpixel_y = self._refine_subpixel_2d(
-                best_heatmap, int_peak_y, int_peak_x
-            )
-        else:
-            subpixel_x = float(int_peak_x)
-            subpixel_y = float(int_peak_y)
-
-        # 3b. Angle (1D quadratic interpolation across 3 grid points)
-        if self.rotation_invariant and len(fine_angles) >= 3:
-            refined_angle = self._refine_1d_subpixel(
-                all_results, best_angle, self.rotation_invariant, self.scale_invariant,
-                index_dim=2, value_dim=0
-            )
-        else:
-            refined_angle = best_angle
-
-        # 3c. Scale
-        if self.scale_invariant and len(fine_scales) >= 3:
-            refined_scale = self._refine_1d_subpixel(
-                all_results, best_scale, self.rotation_invariant, self.scale_invariant,
-                index_dim=3, value_dim=0
-            )
-        else:
-            refined_scale = best_scale
-
-        # ---- 4. Coordinate transform ----
-        # The warped template dimensions affect the center offset
-        matched_row = r1 + subpixel_y + best_h / 2.0
-        matched_col = c1 + subpixel_x + best_w / 2.0
-
-        return {
-            'matched_row': matched_row,
-            'matched_col': matched_col,
-            'dx': matched_col - self.click_col,
-            'dy': matched_row - self.click_row,
-            'match_score': float(best_score),
-            'valid': best_score >= self.match_score_threshold,
-            'int_peak_y': int_peak_y,
-            'int_peak_x': int_peak_x,
-            'best_rotation_deg': float(refined_angle),
-            'best_scale': float(refined_scale),
-        }
+        return self._build_multi_result(found)
 
     def _match_multi_angle_scale_multi(self, search_img: np.ndarray,
                                         r1: int, c1: int) -> Dict[str, Any]:
         """
-        Multi-target multi-angle / multi-scale matching.
+        Multi-target multi-angle / multi-scale search, delegated to the engine.
 
-        Enumerates (angle, scale) combinations, finds ALL local maxima in
-        each heatmap, pools all candidates, applies global spatial NMS to
-        deduplicate across angles/scales, then subpixel-refines each
-        surviving match.
+        See ``_match_multi_angle_scale``: the engine owns the pose grid, the
+        coarse/fine stages and the instance selection. The only GUI-specific
+        part left is expressing the result as the legacy dict.
         """
-        H, W = search_img.shape
-        tmpl_h, tmpl_w = self.edge_template.shape
+        found = self._shared_pose_matches(search_img, r1, c1, multi_target=True)
+        return self._build_multi_result(found)
 
-        if self.coarse_fine:
-            # Coarse grid
-            coarse_angles = _build_grid(self.rotation_invariant, self.angle_range,
-                                        self.coarse_angle_step)
-            coarse_scales = _build_grid(self.scale_invariant, self.scale_range,
-                                        self.coarse_scale_step)
+    def _shared_pose_matches(self, search_img: np.ndarray, r1: int, c1: int,
+                             *, multi_target: bool) -> List[Dict[str, Any]]:
+        """Run the engine's search over the GUI's configured pose grid.
 
-            # Step 1: Coarse search — collect all peaks from all heatmaps
-            coarse_results = self._enumerate_angles_scales(
-                search_img, coarse_angles, coarse_scales, W, H, tmpl_w, tmpl_h,
-                multi_peak=True, score_threshold=self.match_score_threshold
-            )
-            if not coarse_results:
-                return self._build_multi_result([])
+        Args:
+            search_img: Preprocessed search image.
+            r1: Row offset of ``search_img`` in the inspection image.
+            c1: Column offset of ``search_img`` in the inspection image.
+            multi_target: Whether every accepted instance is reported.
 
-            # Normalise candidates: (score, (py,px,hm), angle, scale, w, h)
-            #                -> (score, py, px, angle, scale, w, h)
-            coarse_flat = [(s, loc[0], loc[1], a, sc, ww, wh)
-                           for s, loc, a, sc, ww, wh in coarse_results]
+        Returns:
+            Legacy match dicts, strongest first.
+        """
+        from measure.computation_types import Space
+        from measure.template_search import SearchOptions, search_support
 
-            # Step 2: NMS on coarse results to find distinct candidate regions
-            coarse_nms = self._spatial_nms(coarse_flat, self.overlap, max_matches=0)
-            # Refine every distinct coarse region unless a deployment bound is set.
-            coarse_nms.sort(key=lambda x: x[0], reverse=True)
-            _limit = _fine_candidate_limit()
-            top_candidates = coarse_nms[:_limit] if _limit else coarse_nms
-
-            # Step 3: Fine search around each candidate's angle/scale
-            fine_angles_set = set()
-            fine_scales_set = set()
-            for _, _, _, angle, scale, _, _ in top_candidates:
-                fine_angles_set.add(angle)
-                fine_scales_set.add(scale)
-                if self.rotation_invariant:
-                    for offset in [-1, 1]:
-                        na = angle + offset * self.angle_step
-                        if self.angle_range[0] - 1e-6 <= na <= self.angle_range[1] + 1e-6:
-                            fine_angles_set.add(na)
-                if self.scale_invariant:
-                    for offset in [-1, 1]:
-                        ns = scale + offset * self.scale_step
-                        if self.scale_range[0] - 1e-6 <= ns <= self.scale_range[1] + 1e-6:
-                            fine_scales_set.add(ns)
-
-            fine_angles = sorted(fine_angles_set) if self.rotation_invariant else [0.0]
-            fine_scales = sorted(fine_scales_set) if self.scale_invariant else [1.0]
-        else:
-            fine_angles = _build_grid(self.rotation_invariant, self.angle_range,
-                                      self.angle_step)
-            fine_scales = _build_grid(self.scale_invariant, self.scale_range,
-                                      self.scale_step)
-
-        # ---- 2. Fine enumeration (multi-peak) ----
-        all_results = self._enumerate_angles_scales(
-            search_img, fine_angles, fine_scales, W, H, tmpl_w, tmpl_h,
-            multi_peak=True, score_threshold=self.match_score_threshold
+        space = Space("engine", "px")
+        angle_min, angle_max = self.angle_range
+        scale_min, scale_max = self.scale_range
+        options = SearchOptions(
+            score_threshold=float(self.match_score_threshold),
+            max_matches=int(self.max_matches) if multi_target else 1,
+            max_overlap=float(getattr(self, "overlap", 0.3)),
+            subpixel=self.use_subpixel,
+            coarse_fine=bool(self.coarse_fine),
+            coarse_angle_step_rad=float(np.deg2rad(self.coarse_angle_step)),
+            coarse_scale_step=float(self.coarse_scale_step),
+            angle_min_rad=float(np.deg2rad(angle_min)) if self.rotation_invariant else 0.0,
+            angle_max_rad=float(np.deg2rad(angle_max)) if self.rotation_invariant else 0.0,
+            angle_step_rad=float(np.deg2rad(self.angle_step)),
+            scale_min=float(scale_min) if self.scale_invariant else 1.0,
+            scale_max=float(scale_max) if self.scale_invariant else 1.0,
+            scale_step=float(self.scale_step),
+            decimate_exponent=int(self.decimate_exponent),
+            coarse_template_side=int(self.coarse_template_side),
+            fine_candidates=int(self.fine_candidates) or None,
+            fine_search_radius_px=float(getattr(self, "fine_search_radius_px", 24.0)),
         )
-        if not all_results:
-            return self._build_multi_result([])
-
-        # Normalise: (score, (py,px,hm), angle, scale, w, h)
-        #        -> (score, py, px, hm, angle, scale, w, h)
-        all_flat = [(s, loc[0], loc[1], loc[2] if len(loc) > 2 else None,
-                      a, sc, ww, wh)
-                     for s, loc, a, sc, ww, wh in all_results]
-
-        # ---- 3. Global spatial NMS ----
-        selected = self._spatial_nms(all_flat, self.overlap, self.max_matches)
-
-        # ---- 4. Subpixel refinement per selected match ----
+        found = search_support(search_img, self._shared_support(), options,
+                               image_space=space)
+        if not found.valid or found.value is None:
+            return []
         matches = []
-        for score, py, px, heatmap, angle, scale, ww, wh in selected:
-            # Position refinement
-            if self.use_subpixel and heatmap is not None:
-                spx, spy = self._refine_subpixel_2d(heatmap, py, px)
-            else:
-                spx, spy = float(px), float(py)
-
-            # Angle refinement via 1D quadratic interpolation
-            if self.rotation_invariant and len(fine_angles) >= 3:
-                refined_angle = self._refine_1d_subpixel(
-                    all_results, angle, self.rotation_invariant, self.scale_invariant,
-                    index_dim=2, value_dim=0
-                )
-            else:
-                refined_angle = angle
-
-            # Scale refinement
-            if self.scale_invariant and len(fine_scales) >= 3:
-                refined_scale = self._refine_1d_subpixel(
-                    all_results, scale, self.rotation_invariant, self.scale_invariant,
-                    index_dim=3, value_dim=0
-                )
-            else:
-                refined_scale = scale
-
-            matched_row = r1 + spy + wh / 2.0
-            matched_col = c1 + spx + ww / 2.0
-
+        for match in found.value.matches:
+            matched_row = r1 + match.center[1]
+            matched_col = c1 + match.center[0]
+            peak_x, peak_y = match.peak_xy if match.peak_xy else (0, 0)
             matches.append({
                 'matched_row': matched_row,
                 'matched_col': matched_col,
                 'dx': matched_col - self.click_col,
                 'dy': matched_row - self.click_row,
-                'match_score': float(score),
-                'valid': True,
-                'int_peak_y': py,
-                'int_peak_x': px,
-                'best_rotation_deg': float(refined_angle),
-                'best_scale': float(refined_scale),
+                'match_score': float(match.score),
+                'valid': match.score >= self.match_score_threshold,
+                'int_peak_y': int(peak_y),
+                'int_peak_x': int(peak_x),
+                'best_rotation_deg': float(np.rad2deg(match.angle_rad)),
+                'best_scale': float(match.scale),
             })
-
-        return self._build_multi_result(matches)
+        return matches
 
     def _build_multi_result(self, matches: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -1674,238 +1026,15 @@ class TemplatePoint:
         """
         if matches:
             best = matches[0]
-            return {
-                'matched_row': best['matched_row'],
-                'matched_col': best['matched_col'],
-                'dx': best['dx'],
-                'dy': best['dy'],
-                'match_score': best['match_score'],
-                'valid': True,
-                'int_peak_y': best['int_peak_y'],
-                'int_peak_x': best['int_peak_x'],
-                'best_rotation_deg': best['best_rotation_deg'],
-                'best_scale': best['best_scale'],
-                'matches': matches,
-                'num_matches': len(matches),
-            }
-        else:
-            result = self._make_invalid_result()
-            result['matches'] = []
-            result['num_matches'] = 0
+            result = dict(best)
+            result['matches'] = matches
+            result['num_matches'] = len(matches)
             return result
+        result = self._make_invalid_result()
+        result['matches'] = []
+        result['num_matches'] = 0
+        return result
 
-    def _enumerate_angles_scales(self, search_img, angles, scales,
-                                  W, H, tmpl_w, tmpl_h,
-                                  multi_peak: bool = False,
-                                  score_threshold: float = 0.0):
-        """
-        Enumerate all (angle, scale) combinations, calling matchTemplate
-        for each valid combination.
-
-        Args:
-            multi_peak: If True, find ALL local maxima above score_threshold
-                       for each heatmap (multi-target mode). If False, only
-                       the single global peak (backward compatible).
-            score_threshold: Minimum score for peaks when multi_peak=True.
-
-        Returns:
-            List of (score, (peak_y, peak_x, heatmap), angle, scale, warped_w, warped_h)
-        """
-        results = []
-        for angle in angles:
-            for scale in scales:
-                warped = self._rotate_scale_template(angle, scale)
-                if warped is None:
-                    continue
-                wh, ww = warped.shape
-                if wh > H or ww > W:
-                    continue
-                heatmap = cv2.matchTemplate(search_img, warped, cv2.TM_CCOEFF_NORMED)
-
-                if multi_peak:
-                    peaks = self._find_peaks(heatmap, score_threshold)
-                    for score, py, px in peaks:
-                        results.append((score, (py, px, heatmap),
-                                        angle, scale, ww, wh))
-                else:
-                    _, max_val, _, max_loc = cv2.minMaxLoc(heatmap)
-                    results.append((float(max_val), (max_loc[1], max_loc[0], heatmap),
-                                    angle, scale, ww, wh))
-        return results
-
-    def _rotate_scale_template(self, angle_deg: float, scale: float) -> Optional[np.ndarray]:
-        """
-        Generate a rotated and scaled version of the template.
-
-        Rotation is applied around the template center. The output array
-        is sized to fully contain the rotated+scaled template with no clipping.
-
-        Returns:
-            Warped template array, or None if the template is empty or degenerate.
-        """
-        h_t, w_t = self.edge_template.shape
-        center = (w_t / 2.0, h_t / 2.0)
-
-        # Build affine matrix: rotation around center + scale
-        M = cv2.getRotationMatrix2D(center, angle_deg, scale)
-
-        # Compute bounding box of the warped template
-        corners = np.array([
-            [0, 0], [w_t, 0], [w_t, h_t], [0, h_t]
-        ], dtype=np.float32)
-        transformed = cv2.transform(corners.reshape(1, -1, 2), M).reshape(-1, 2)
-        min_x = np.floor(transformed[:, 0].min())
-        max_x = np.ceil(transformed[:, 0].max())
-        min_y = np.floor(transformed[:, 1].min())
-        max_y = np.ceil(transformed[:, 1].max())
-        new_w = int(max_x - min_x)
-        new_h = int(max_y - min_y)
-
-        if new_w <= 0 or new_h <= 0:
-            return None
-
-        # Adjust translation so all content fits in the output
-        M[0, 2] -= min_x
-        M[1, 2] -= min_y
-
-        # Use template mean as border value to avoid introducing artificial
-        # edges at rotated borders (which would bias NCC toward 0°).
-        border_value = float(np.mean(self.edge_template))
-
-        warped = cv2.warpAffine(self.edge_template, M, (new_w, new_h),
-                                flags=cv2.INTER_LINEAR,
-                                borderMode=cv2.BORDER_CONSTANT,
-                                borderValue=border_value)
-        return warped
-
-    @staticmethod
-    def _find_peaks(heatmap: np.ndarray,
-                    threshold: float) -> List[Tuple[float, int, int]]:
-        """
-        Find all local maxima in a correlation heatmap above a threshold.
-
-        Delegates to the shared peak primitive in ``measure.template_search``,
-        which owns the 3x3-dilation local-maximum rule for every caller.
-
-        Args:
-            heatmap: 2D correlation heatmap (e.g. from cv2.matchTemplate).
-            threshold: Minimum score for a peak to be included.
-
-        Returns:
-            List of (score, row, col) tuples, sorted by score descending.
-        """
-        return [(score, int(y), int(x))
-                for x, y, score in peaks(heatmap, threshold)]
-
-    @staticmethod
-    def _spatial_nms(candidates: List[tuple],
-                     overlap: float,
-                     max_matches: int = 0) -> List[tuple]:
-        """
-        Non-maximum suppression for template match candidates.
-
-        The greedy selection policy lives in ``measure.template_search``
-        (``keep_disjoint``); this method only supplies the geometry. It is
-        axis-aligned on each candidate's rendered variant size, because these
-        records carry no pose matrix - the API layer's ``_suppress`` uses the
-        rotated-geometry form where a pose is available.
-
-        Candidates must be tuples where:
-          index 0 = score
-          index 1 = row (center y)
-          index 2 = col (center x)
-          index -2 = width (c[-2])
-          index -1 = height (c[-1])
-
-        Args:
-            candidates: List of (score, row, col, ..., w, h) tuples.
-            overlap: Maximum allowed IoU in [0, 1]. 0 = no overlap at all.
-            max_matches: Maximum number of matches (0 = unlimited).
-
-        Returns:
-            Filtered list of candidates, sorted by score descending.
-        """
-        boxes = {}
-
-        def bounds_of(candidate) -> tuple:
-            key = (candidate[1], candidate[2], candidate[-2], candidate[-1])
-            box = boxes.get(key)
-            if box is None:
-                row, col, w, h = key
-                box = (col - w / 2.0, row - h / 2.0,
-                       col + w / 2.0, row + h / 2.0, w * h)
-                boxes[key] = box
-            return box
-
-        def overlap_of(candidate, previous) -> float:
-            ax1, ay1, ax2, ay2, area = bounds_of(candidate)
-            bx1, by1, bx2, by2, barea = bounds_of(previous)
-            iw = max(0.0, min(ax2, bx2) - max(ax1, bx1))
-            ih = max(0.0, min(ay2, by2) - max(ay1, by1))
-            intersection = iw * ih
-            if intersection <= 0.0:
-                return 0.0
-            return intersection / (area + barea - intersection)
-
-        return keep_disjoint(overlap_of, candidates, overlap, max_matches)
-
-    @staticmethod
-    def _refine_1d_subpixel(results, best_val, rotation_invariant, scale_invariant,
-                             index_dim, value_dim):
-        """
-        Refine angle or scale to sub-step accuracy via 1D quadratic interpolation.
-
-        Filters results to those matching best_val in the other dimension, then
-        fits a parabola through the best value and its two neighbours.
-
-        Args:
-            results: List of (score, loc, angle, scale, w, h) tuples.
-            best_val: The best angle (or scale) from the discrete search.
-            rotation_invariant, scale_invariant: Flags.
-            index_dim: 2 for angle, 3 for scale.
-            value_dim: 0 for score.
-
-        Returns:
-            Refined angle or scale value (clamped to the neighbour range).
-        """
-        other_dim = 3 if index_dim == 2 else 2
-
-        # Collect unique values of the target dimension and their best scores
-        val_scores = {}  # {angle_or_scale: max_score}
-        for r in results:
-            v = r[index_dim]
-            score = r[value_dim]
-            if v not in val_scores or score > val_scores[v]:
-                val_scores[v] = score
-
-        sorted_vals = sorted(val_scores.keys())
-        if len(sorted_vals) < 3:
-            return best_val
-
-        try:
-            idx = sorted_vals.index(best_val)
-        except ValueError:
-            return best_val
-
-        # Need at least one neighbour on each side
-        if idx == 0 or idx == len(sorted_vals) - 1:
-            return best_val
-
-        x = np.array([sorted_vals[idx - 1], sorted_vals[idx], sorted_vals[idx + 1]],
-                     dtype=np.float64)
-        y = np.array([val_scores[xi] for xi in sorted_vals[idx - 1:idx + 2]],
-                     dtype=np.float64)
-
-        try:
-            coeffs = np.polyfit(x, y, 2)
-            a = coeffs[0]
-            if abs(a) > 1e-12:
-                refined = -coeffs[1] / (2.0 * a)
-                refined = max(x[0], min(x[-1], refined))
-                return float(refined)
-        except Exception:
-            pass
-        return best_val
 
     def _make_invalid_result(self) -> Dict[str, Any]:
         """Return an invalid result dict when no valid template could be generated."""

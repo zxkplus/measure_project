@@ -18,6 +18,12 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 
 from .dialogs import ComposedMeasureDialog
+
+#: Default cap on the coarse stage's template side, in pixels. Mirrors the
+#: engine default so a model saved without the field is shown as it will run.
+DEFAULT_COARSE_TEMPLATE_SIDE = 128
+#: Default decimation exponent shown for a model that has not chosen one.
+DEFAULT_DECIMATE_EXPONENT = 1
 from measure.preview import (
     PREPROCESSOR_TYPES,
     config_from_values,
@@ -309,18 +315,24 @@ class ToolPanel(ttk.Frame):
         # the level alone would let the coarse template grow with the support.
         # Both paths (this panel and the shared engine) compute it identically.
         ttk.Label(self._template_form, text="金字塔粗筛").pack(anchor=tk.W, **pad)
-        self._pyramid_enabled_var = tk.BooleanVar(value=True)
-        pyramid_check = ttk.Checkbutton(
-            self._template_form, text="启用（粗搜在降采样图上做）",
-            variable=self._pyramid_enabled_var,
-            command=self._fire_pyramid,
-        )
-        pyramid_check.pack(anchor=tk.W, **pad)
+        # A number, not a checkbox: models in service are taught with
+        # decimate 2 and 3, and a checkbox could only ever show them as "on",
+        # running 4x/8x while the operator saw a tick.
+        pyramid_level_row = ttk.Frame(self._template_form)
+        pyramid_level_row.pack(fill=tk.X, **pad)
+        ttk.Label(pyramid_level_row, text="降采样指数").pack(side=tk.LEFT)
+        self._pyramid_decimate_var = tk.StringVar(value="1")
+        pyramid_level_entry = ttk.Entry(
+            pyramid_level_row, textvariable=self._pyramid_decimate_var, width=4)
+        pyramid_level_entry.pack(side=tk.LEFT, padx=4)
+        ttk.Label(pyramid_level_row, text="(0=关闭, n=缩小 2ⁿ 倍)").pack(side=tk.LEFT)
+        pyramid_level_entry.bind("<Return>", lambda _event: self._fire_pyramid())
+        pyramid_level_entry.bind("<FocusOut>", lambda _event: self._fire_pyramid())
 
         pyramid_size_row = ttk.Frame(self._template_form)
         pyramid_size_row.pack(fill=tk.X, **pad)
         ttk.Label(pyramid_size_row, text="模板边长上限").pack(side=tk.LEFT)
-        self._pyramid_size_var = tk.StringVar(value="400")
+        self._pyramid_size_var = tk.StringVar(value=str(DEFAULT_COARSE_TEMPLATE_SIDE))
         pyramid_size_entry = ttk.Entry(
             pyramid_size_row, textvariable=self._pyramid_size_var, width=6)
         pyramid_size_entry.pack(side=tk.LEFT, padx=4)
@@ -329,8 +341,11 @@ class ToolPanel(ttk.Frame):
         pyramid_size_entry.bind("<FocusOut>", lambda _event: self._fire_pyramid())
 
         self._pyramid_factor_label = ttk.Label(
-            self._template_form, text="实际比例: 1.00× (未降采样)", foreground="gray")
+            self._template_form, foreground="gray")
         self._pyramid_factor_label.pack(anchor=tk.W, **pad)
+        # Seed the label from the defaults so it cannot claim "未降采样" while
+        # the exponent above it asks for a decimated search.
+        self.update_pyramid_factor()
 
         # ROI display (read-only)
         self._roi_label = ttk.Label(tmpl_frame, text="ROI: (未设置)", foreground="gray")
@@ -712,25 +727,33 @@ class ToolPanel(ttk.Frame):
         return dict(self._preproc_committed)
 
     def pyramid_config(self) -> tuple:
-        """Return ``(decimate, max_template_size)`` from the current widgets.
+        """Return ``(decimate_exponent, coarse_template_side)`` from the widgets.
 
-        ``decimate`` is 1/0 (the engine only uses it as an on/off switch) and
-        the ratio comes from ``max_template_size``.  A malformed or non-positive
-        size falls back to 400 px instead of silently disabling the pyramid.
+        ``decimate_exponent`` is the real exponent the engine applies: 0 turns
+        the coarse pyramid off, ``n`` targets ``2**-n`` resolution. It is a
+        number rather than a flag because taught models use 2 and 3, which a
+        checkbox could not express.
+
+        A blank or malformed field falls back to the engine default instead of
+        silently disabling the pyramid; a negative exponent clamps to 0.
         """
-        enabled = bool(self._pyramid_enabled_var.get())
+        try:
+            decimate = int(float(self._pyramid_decimate_var.get()))
+        except (TypeError, ValueError):
+            decimate = DEFAULT_DECIMATE_EXPONENT
+        decimate = max(0, decimate)
         try:
             size = int(float(self._pyramid_size_var.get()))
         except (TypeError, ValueError):
-            size = 400
+            size = DEFAULT_COARSE_TEMPLATE_SIDE
         if size <= 0:
-            size = 400
-        return (1 if enabled else 0, size)
+            size = DEFAULT_COARSE_TEMPLATE_SIDE
+        return (decimate, size)
 
     def set_pyramid_config(self, decimate: int, max_template_size: int,
                            template_longest_side: Optional[int] = None) -> None:
         """Restore the pyramid widgets (project load / model switch)."""
-        self._pyramid_enabled_var.set(bool(int(decimate)))
+        self._pyramid_decimate_var.set(str(int(decimate)))
         self._pyramid_size_var.set(str(int(max_template_size)))
         self.update_pyramid_factor(template_longest_side)
 
@@ -739,17 +762,21 @@ class ToolPanel(ttk.Frame):
 
         Args:
             template_longest_side: Longest side of the current template. Without
-                it only the size cap can be shown, because the ratio is
-                ``min(1, cap / side)``.
+                it only the bounds can be shown, because the ratio depends on
+                the support size.
         """
         decimate, size = self.pyramid_config()
         if not decimate:
             text = "实际比例: 1.00× (未降采样)"
         elif template_longest_side and template_longest_side > 0:
-            factor = min(1.0, size / float(template_longest_side))
+            # Same rule the engine applies: the more aggressive of the exponent
+            # and the side cap. Showing the cap alone would report 1.00x for a
+            # small support that the exponent does decimate.
+            factor = min(2.0 ** -decimate, size / float(template_longest_side))
+            factor = min(1.0, max(factor, min(1.0, 6.0 / float(template_longest_side))))
             text = f"实际比例: {factor:.2f}×"
         else:
-            text = f"实际比例: ≤1.00× (上限 {size}px)"
+            text = f"实际比例: ≤{2.0 ** -decimate:.2f}× (上限 {size}px)"
         self._pyramid_factor_label.config(text=text)
 
     def _fire_pyramid(self) -> None:

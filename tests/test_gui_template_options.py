@@ -111,8 +111,13 @@ def panel():
 
 
 @gui_only
-def test_default_pyramid_is_enabled_with_a_400px_cap(panel):
-    assert panel.pyramid_config() == (1, 400)
+def test_default_pyramid_is_exponent_one_with_a_128px_cap(panel):
+    """The default matches the engine: exponent 1 and a 128 px coarse cap.
+
+    The exponent is a number rather than a flag because taught models use 2 and
+    3; showing them as a tick would understate what they run.
+    """
+    assert panel.pyramid_config() == (1, 128)
 
 
 @gui_only
@@ -130,9 +135,26 @@ def test_factor_label_shows_the_real_ratio(panel):
 
 
 @gui_only
-def test_invalid_size_falls_back_to_400(panel):
+def test_invalid_size_falls_back_to_the_engine_default(panel):
     panel._pyramid_size_var.set("not-a-number")
-    assert panel.pyramid_config() == (1, 400)
+    assert panel.pyramid_config() == (1, 128)
+
+
+@gui_only
+def test_invalid_exponent_falls_back_to_enabled(panel):
+    """A blank exponent must not silently disable the pyramid."""
+    panel._pyramid_decimate_var.set("")
+    decimate, size = panel.pyramid_config()
+    assert decimate == 1
+    assert size == 128
+
+
+@gui_only
+def test_exponent_is_a_number_not_a_flag(panel):
+    """A model taught at decimate 3 must round-trip as 3, not as 1."""
+    panel.set_pyramid_config(3, 96)
+    assert panel.pyramid_config() == (3, 96)
+    assert panel._pyramid_decimate_var.get() == "3"
 
 
 @gui_only
@@ -146,5 +168,6 @@ def test_change_callback_receives_both_values(panel):
 
 @gui_only
 def test_restore_keeps_legacy_callers_working(panel):
+    """A caller that omits the pyramid fields keeps the panel defaults."""
     panel.set_matching_params("raw", 0.5, 15.0, 1, overlap=0.3, angle_step_deg=1.0)
-    assert panel.pyramid_config() == (1, 400)
+    assert panel.pyramid_config() == (1, 128)

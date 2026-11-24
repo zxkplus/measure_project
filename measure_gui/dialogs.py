@@ -291,16 +291,17 @@ class TemplateMatchPointDialog(BaseParamDialog):
         # Pyramid: an on/off switch plus the size cap that actually sets the
         # downsampling ratio (the engine ignores the level number, so the old
         # 2x/4x/8x list offered three labels for one behaviour).
-        ttk.Label(main, text="金字塔粗筛:").grid(
+        ttk.Label(main, text="降采样指数 (0=关):").grid(
             row=row, column=0, sticky=tk.W, padx=5, pady=2)
-        pyramid_var = tk.BooleanVar(value=bool(self._params.get("decimate_exponent", 0)))
-        pyramid_cb = ttk.Checkbutton(main, variable=pyramid_var)
-        pyramid_cb.grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
-        self._vars["decimate_exponent"] = pyramid_var
+        decimate_var = tk.StringVar(
+            value=str(int(self._params.get("decimate_exponent", 1))))
+        decimate_entry = ttk.Entry(main, textvariable=decimate_var, width=6)
+        decimate_entry.grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
+        self._vars["decimate_exponent"] = decimate_var
         row += 1
 
         self._add_int_entry(main, "模板边长上限 (px)", "coarse_template_side",
-                            400, row, 16, 100000); row += 1
+                            128, row, 16, 100000); row += 1
 
         self._add_buttons(main, row + 1)
 
@@ -313,9 +314,16 @@ class TemplateMatchPointDialog(BaseParamDialog):
         super()._on_ok()
         if self.result is None:
             return
-        self.result["decimate_exponent"] = 1 if self.result.get("decimate_exponent") else 0
+        # The exponent is a number, not a flag: taught models use 2 and 3.
+        # A blank field keeps the engine default rather than turning the
+        # pyramid off, which is what the previous checkbox logic did.
+        try:
+            decimate = int(float(self.result.get("decimate_exponent")))
+        except (TypeError, ValueError):
+            decimate = 1
+        self.result["decimate_exponent"] = max(0, decimate)
         try:
             size = int(self.result.get("coarse_template_side", 128))
         except (TypeError, ValueError):
-            size = 400
+            size = 128
         self.result["coarse_template_side"] = max(16, size)

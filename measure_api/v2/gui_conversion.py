@@ -240,8 +240,9 @@ def _angle_range(matching: Dict[str, Any], found: List[CompatibilityDiagnostic])
 def _pyramid_enabled(matching: Dict[str, Any]) -> bool:
     """Whether the GUI model had the pyramid coarse search switched on.
 
-    ``decimate_exponent`` is only an on/off switch in v1 (the level number is
-    ignored) and the size cap must also be positive for decimation to happen.
+    The exponent is a real level number in v1 as well (``2**-n``); decimation
+    additionally needs a positive size cap, so both must be set for the model to
+    have searched a coarse level at all.
     """
     try:
         decimate = int(matching.get("decimate_exponent", 0) or 0)
