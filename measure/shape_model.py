@@ -338,7 +338,8 @@ def point_energy(gx: Array, gy: Array, model: ShapeModel) -> Array:
 
 
 def score_map(gx: Array, gy: Array, model: ShapeModel,
-              energy: Optional[Array] = None) -> Array:
+              energy: Optional[Array] = None, *,
+              polarity_invariant: bool = False) -> Array:
     """Return the shape score of every window position.
 
     Args:
@@ -346,6 +347,8 @@ def score_map(gx: Array, gy: Array, model: ShapeModel,
         gy: Gradient ``y`` plane of the search image.
         model: A posed model whose box fits inside the image.
         energy: Optional precomputed ``point_energy`` for this model.
+        polarity_invariant: Accept a globally inverted part by using the score
+            magnitude, matching Halcon's ``ignore_global_polarity``.
 
     Returns:
         A ``float32`` map of scores in ``[-1, 1]``, shaped like the position
@@ -362,11 +365,15 @@ def score_map(gx: Array, gy: Array, model: ShapeModel,
         energy = point_energy(gx, gy, model)
     denominator = np.sqrt(np.maximum(energy, 1e-6)) * math.sqrt(max(model.count, 1))
     scores = numerator / denominator
+    if polarity_invariant:
+        # Inverting the part negates every gradient, so the score flips sign.
+        scores = np.abs(scores)
     return np.clip(scores, -1.0, 1.0).astype(np.float32)
 
 
 def score_at(gx: Array, gy: Array, model: ShapeModel,
-             rows: Sequence[int], cols: Sequence[int]) -> Array:
+             rows: Sequence[int], cols: Sequence[int], *,
+             polarity_invariant: bool = False) -> Array:
     """Score a few explicit window positions without building a full map.
 
     Used once the coarse pass has narrowed the search: gathering a few thousand
@@ -379,6 +386,8 @@ def score_at(gx: Array, gy: Array, model: ShapeModel,
         model: A posed model.
         rows: Window top offsets, one per position.
         cols: Window left offsets, one per position.
+        polarity_invariant: Accept a globally inverted part by using the score
+            magnitude.
 
     Returns:
         A ``float32`` vector of scores in ``[-1, 1]``.
@@ -394,8 +403,10 @@ def score_at(gx: Array, gy: Array, model: ShapeModel,
         sample_x = image_x[rows[index] + point_rows, cols[index] + point_cols]
         numerator = float((model.dir_y * sample_y + model.dir_x * sample_x).sum())
         energy = float((sample_y * sample_y + sample_x * sample_x).sum())
-        scores[index] = float(np.clip(numerator / (math.sqrt(max(energy, 1e-6)) * norm),
-                                      -1.0, 1.0))
+        value = numerator / (math.sqrt(max(energy, 1e-6)) * norm)
+        if polarity_invariant:
+            value = abs(value)
+        scores[index] = float(np.clip(value, -1.0, 1.0))
     return scores
 
 

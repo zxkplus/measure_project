@@ -68,6 +68,10 @@ class SupportSpec:
             object.__setattr__(self, "mask", np.array(mask, dtype=bool, copy=True))
 
 
+#: The polarity policies Halcon's ``Metric`` offers.
+METRIC_VALUES = ("use_polarity", "ignore_global_polarity")
+
+
 @dataclass(frozen=True)
 class SearchOptions:
     """NCC localization policy; angles are clockwise radians, scales dimensionless."""
@@ -112,6 +116,16 @@ class SearchOptions:
     #: Shape-only: edge points weaker than this are dropped from the model. A
     #: zero value selects a percentile of the support's gradient magnitude.
     min_contrast: float = 0.0
+    #: Halcon's Metric: ``use_polarity`` requires the part to keep its contrast,
+    #: ``ignore_global_polarity`` also accepts a globally inverted one. The
+    #: latter is a score magnitude, so it accepts the photographic negative too
+    #: and therefore trades some discrimination for that tolerance.
+    metric: str = "use_polarity"
+
+    @property
+    def polarity_invariant(self) -> bool:
+        """Return whether a globally inverted part should still match."""
+        return self.metric == "ignore_global_polarity"
 
     def __post_init__(self) -> None:
         require_finite((self.score_threshold, self.coarse_score_threshold), "search.score")
@@ -153,6 +167,9 @@ class SearchOptions:
         if self.min_contrast < 0.0:
             raise contract_error("contract.invalid_parameter",
                                  "min_contrast must be >= 0", "search.min_contrast")
+        if self.metric not in METRIC_VALUES:
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown metric {self.metric!r}", "search.metric")
 
     def resolved_fine_candidates(self) -> Optional[int]:
         """Return how many coarse neighbourhoods the fine stage may refine.
@@ -533,7 +550,8 @@ def decimate_pixels(image: Array, factor: float, *, sigma: float
     return coarse, matrix
 
 
-def correlate(search: Array, template: Array, mask: Optional[Array] = None) -> Array:
+def correlate(search: Array, template: Array, mask: Optional[Array] = None, *,
+              metric: str = "use_polarity") -> Array:
     """Return the normalised cross-correlation score map of one template.
 
     This is the single place the correlation score is computed; the scanning
@@ -546,6 +564,8 @@ def correlate(search: Array, template: Array, mask: Optional[Array] = None) -> A
         search: Search-area pixels.
         template: Rendered variant pixels.
         mask: Optional variant footprint mask; ``None`` uses ordinary NCC.
+        metric: ``use_polarity`` keeps the sign, ``ignore_global_polarity``
+            takes the magnitude so a globally inverted part still scores.
 
     Returns:
         A score map with every non-finite value replaced by ``-1``, so masked
@@ -562,6 +582,12 @@ def correlate(search: Array, template: Array, mask: Optional[Array] = None) -> A
         else:
             scores = cv2.matchTemplate(area, variant, cv2.TM_CCORR_NORMED,
                                        mask=footprint)
+    if metric == "ignore_global_polarity":
+        # A globally inverted part correlates with the negated score, so the
+        # magnitude accepts both. It must happen before the invalid sentinel
+        # below, otherwise the -1 that marks a non-finite score becomes a 1 and
+        # turns an unusable region into a perfect match.
+        scores = np.abs(scores)
     return np.nan_to_num(scores, nan=-1.0, posinf=-1.0, neginf=-1.0)
 
 
@@ -919,7 +945,7 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
         score_threshold=min(options.score_threshold, options.coarse_score_threshold),
         max_matches=0, max_overlap=options.max_overlap, subpixel=False,
         coarse_fine=False, angle_list=tuple(coarse_angles),
-        scale_list=tuple(coarse_scales),
+        scale_list=tuple(coarse_scales), metric=options.metric,
     ), image_space)
     diagnostics = {
         "requested_variant_count": requested,
@@ -1118,7 +1144,8 @@ def _shape_search(gray: Array, prepared: PreparedSupport, options: SearchOptions
             # this angle simply cannot be scored.
             unavailable_angles += 1
             continue
-        scores = score_map(coarse_gx, coarse_gy, posed)
+        scores = score_map(coarse_gx, coarse_gy, posed,
+                           polarity_invariant=options.polarity_invariant)
         searched_angles += 1
         # Record the anchor, not the box origin: the box is tight around the
         # points, so its origin depends on the angle's bounding box while the
@@ -1178,7 +1205,8 @@ def _shape_search(gray: Array, prepared: PreparedSupport, options: SearchOptions
         if not rows:
             continue
         placed_any = True
-        scores = score_at(image_gx, image_gy, posed, rows, cols)
+        scores = score_at(image_gx, image_gy, posed, rows, cols,
+                          polarity_invariant=options.polarity_invariant)
         best = int(np.argmax(scores))
         best_anchor = (rows[best] + posed.anchor_y, cols[best] + posed.anchor_x)
         searched += 1
@@ -1202,7 +1230,8 @@ def _shape_search(gray: Array, prepared: PreparedSupport, options: SearchOptions
                     and row + candidate.size_hw[0] <= gray.shape[0]
                     and col + candidate.size_hw[1] <= gray.shape[1]):
                 continue
-            extra = score_at(image_gx, image_gy, candidate, [row], [col])
+            extra = score_at(image_gx, image_gy, candidate, [row], [col],
+                             polarity_invariant=options.polarity_invariant)
             searched += 1
             if float(extra[0]) > best_score:
                 best_score = float(extra[0])
@@ -1247,7 +1276,11 @@ def _shape_search(gray: Array, prepared: PreparedSupport, options: SearchOptions
         merged["algorithm"] = "shape"
         return replace(fallback, diagnostics=merged)
 
-    distinct = suppress(refined, options.max_overlap)
+    # The refinement gated on the relaxed coarse threshold so a candidate could
+    # be re-examined; the caller's threshold decides what is reported.
+    accepted = [match for match in refined
+                if match.score >= options.score_threshold - 1e-12]
+    distinct = suppress(accepted, options.max_overlap)
     diagnostics.update(ambiguity_report(distinct, _support_longest(prepared)))
     selected = distinct
     if options.max_matches:
@@ -1395,6 +1428,7 @@ def _rescan_neighbourhood(gray: Array, prepared: PreparedSupport,
         score_threshold=options.score_threshold, max_matches=0,
         max_overlap=options.max_overlap, subpixel=options.subpixel,
         coarse_fine=False, angle_list=tuple(angles), scale_list=tuple(scales),
+        metric=options.metric,
     ), image_space)
     if not local.valid or local.value is None:
         return []
@@ -1573,7 +1607,7 @@ def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
             if variant_height > gray.shape[0] or variant_width > gray.shape[1]:
                 unavailable += 1
                 continue
-            scores = correlate(gray, variant, variant_mask)
+            scores = correlate(gray, variant, variant_mask, metric=options.metric)
             searched += 1
             if options.max_matches == 1:
                 _, best, _, best_loc = cv2.minMaxLoc(scores)
