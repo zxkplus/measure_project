@@ -35,6 +35,7 @@ from measure.computation_types import (
 )
 from measure.preprocessing import RawSpec, preprocess_pixels
 from measure.rectify import ResampleOptions, crop_region
+from measure import template_backend
 
 #: Fraction of a support that must be inside the image for a variant to be usable.
 MIN_VALID_FRACTION = 1.0
@@ -504,6 +505,10 @@ def decimate_pixels(image: Array, factor: float, *, sigma: float
 def correlate(search: Array, template: Array, mask: Optional[Array] = None) -> Array:
     """Return the normalised cross-correlation score map of one template.
 
+    The computation is delegated to :mod:`measure.template_backend`; the
+    default backend is OpenCV, and ``MEASURE_TEMPLATE_BACKEND=tm_ref`` selects
+    the optional pure Python reference implementation.
+
     Args:
         search: Search-area pixels.
         template: Rendered variant pixels.
@@ -513,14 +518,7 @@ def correlate(search: Array, template: Array, mask: Optional[Array] = None) -> A
         A score map with every non-finite value replaced by ``-1``, so masked
         correlation over a constant background cannot produce a false peak.
     """
-    area = np.ascontiguousarray(search, dtype=np.float32)
-    variant = np.ascontiguousarray(template, dtype=np.float32)
-    if mask is None:
-        scores = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED)
-    else:
-        scores = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED,
-                                   mask=np.ascontiguousarray(mask, dtype=np.float32))
-    return np.nan_to_num(scores, nan=-1.0, posinf=-1.0, neginf=-1.0)
+    return template_backend.correlate(search, template, mask)
 
 
 def subpixel_offset(before: float, centre: float, after: float) -> float:
