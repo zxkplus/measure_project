@@ -536,6 +536,12 @@ def decimate_pixels(image: Array, factor: float, *, sigma: float
 def correlate(search: Array, template: Array, mask: Optional[Array] = None) -> Array:
     """Return the normalised cross-correlation score map of one template.
 
+    This is the single place the correlation score is computed; the scanning
+    loops call it rather than reaching for ``cv2.matchTemplate`` themselves.
+    The three branches are kept exactly as they were: an unmasked variant and a
+    fully valid masked variant both use the mean-subtracted coefficient, while a
+    genuinely masked variant falls back to the (masked) correlation coefficient.
+
     Args:
         search: Search-area pixels.
         template: Rendered variant pixels.
@@ -550,8 +556,12 @@ def correlate(search: Array, template: Array, mask: Optional[Array] = None) -> A
     if mask is None:
         scores = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED)
     else:
-        scores = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED,
-                                   mask=np.ascontiguousarray(mask, dtype=np.float32))
+        footprint = np.ascontiguousarray(mask, dtype=np.float32)
+        if float(footprint.sum()) > footprint.size * 0.999:
+            scores = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED)
+        else:
+            scores = cv2.matchTemplate(area, variant, cv2.TM_CCORR_NORMED,
+                                       mask=footprint)
     return np.nan_to_num(scores, nan=-1.0, posinf=-1.0, neginf=-1.0)
 
 
@@ -826,13 +836,33 @@ def _support_longest(prepared: PreparedSupport) -> float:
 
 
 def _coarse_grid(values: List[float], step: float) -> List[float]:
-    """Reduce a fine grid to the coarse values spaced at least ``step`` apart."""
+    """Reduce a fine grid to the coarse values spaced at least ``step`` apart.
+
+    The thinning is phased on the value closest to zero rather than on the first
+    entry. Zero rotation is the cheapest pose to fit -- a support as wide as the
+    frame fits only there -- and a grid whose phase happened to skip it left such
+    a model with no usable pose at all, so the whole search failed for a reason
+    that had nothing to do with the image.
+
+    Args:
+        values: Fine grid, ascending.
+        step: Minimum spacing of the coarse values.
+
+    Returns:
+        The coarse subset, still ascending and still containing both ends.
+    """
     if not values:
         return []
-    coarse = [values[0]]
-    for value in values[1:]:
-        if abs(value - coarse[-1]) >= step - 1e-12:
-            coarse.append(value)
+    anchor = min(range(len(values)), key=lambda index: abs(values[index]))
+    coarse = [values[anchor]]
+    for index in range(anchor - 1, -1, -1):
+        if coarse[0] - values[index] >= step - 1e-12:
+            coarse.insert(0, values[index])
+    for index in range(anchor + 1, len(values)):
+        if values[index] - coarse[-1] >= step - 1e-12:
+            coarse.append(values[index])
+    if coarse[0] != values[0]:
+        coarse.insert(0, values[0])
     if coarse[-1] != values[-1]:
         coarse.append(values[-1])
     return coarse
@@ -902,8 +932,10 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
         diagnostics["pyramid_factor"] = float(factor)
     if not coarse.valid or coarse.value is None:
         diagnostics.update({"searched_variant_count": 0, "pruned_variant_count": 0,
-                            "unavailable_variant_count": 0, "search_complete": True})
-        return invalid(image_space, "no_matches", diagnostics)
+                            "unavailable_variant_count": coarse.diagnostics.get(
+                                "unavailable_variant_count", 0),
+                            "search_complete": True})
+        return invalid(image_space, coarse.reason or "no_matches", diagnostics)
 
     if not decimated and not options.coarse_fine:
         # One pass already covered the whole requested grid at full resolution,
@@ -1076,23 +1108,33 @@ def _shape_search(gray: Array, prepared: PreparedSupport, options: SearchOptions
     limit_per_angle = 8 * max(options.max_matches, 8)
     coarse_angles = _coarse_grid(fine_angles, options.coarse_angle_step_rad) or list(fine_angles)
     found: List[Tuple[float, float, float, float]] = []
+    searched_angles = 0
+    unavailable_angles = 0
     for angle in coarse_angles:
         posed = rotate_model(coarse_model, angle)
         height, width = posed.size_hw
         if height > coarse_gray.shape[0] or width > coarse_gray.shape[1]:
+            # The rotated box leaves the frame: the support must fit whole, so
+            # this angle simply cannot be scored.
+            unavailable_angles += 1
             continue
         scores = score_map(coarse_gx, coarse_gy, posed)
+        searched_angles += 1
         # Record the anchor, not the box origin: the box is tight around the
         # points, so its origin depends on the angle's bounding box while the
         # anchor's image position does not.
         for x, y, score in peaks(scores, coarse_limit, limit=limit_per_angle):
             found.append((float(score), float(angle),
                           float(y) + posed.anchor_y, float(x) + posed.anchor_x))
-    searched = len(coarse_angles)
+    searched = searched_angles
     if not found:
         diagnostics.update({"searched_variant_count": searched, "coarse_peaks": 0,
-                            "unavailable_variant_count": 0, "search_complete": True})
-        return invalid(image_space, "no_matches", diagnostics)
+                            "unavailable_variant_count": unavailable_angles,
+                            "search_complete": True})
+        reason = ("support_exceeds_search_area"
+                  if searched_angles == 0 and unavailable_angles
+                  else "no_matches")
+        return invalid(image_space, reason, diagnostics)
 
     found.sort(reverse=True)
     budget = (limit_per_angle if options.max_matches == 0
@@ -1330,12 +1372,22 @@ def _rescan_neighbourhood(gray: Array, prepared: PreparedSupport,
     support_shape = np.asarray(prepared.pixels).shape[:2]
     height, width = gray.shape[:2]
     centre_x, centre_y = anchor.center[0] / factor, anchor.center[1] / factor
-    radius = min(_fine_radius_px(prepared, options),
-                 max(1.0, min(height, width) // 2.0))
-    left = int(max(0, centre_x - radius))
-    top = int(max(0, centre_y - radius))
-    right = int(min(width, centre_x + radius))
-    bottom = int(min(height, centre_y + radius))
+    # The window is clipped to the search area below, so it never needs an extra
+    # cap. A cap is in fact harmful: anything below the support's own extent
+    # leaves the support unable to fit the window, and a support larger than the
+    # frame is no longer padded, so the refinement would find nothing at all.
+    radius = _fine_radius_px(prepared, options)
+    # The window must be able to hold the support whole, because the search no
+    # longer pads. When the candidate sits near a border, clipping would shrink
+    # the window below the support; slide it instead of shrinking it. The
+    # support fits the frame (checked before scanning), so a window of at least
+    # the support's size always exists.
+    span_x = min(width, max(int(math.ceil(2.0 * radius)), int(support_shape[1])))
+    span_y = min(height, max(int(math.ceil(2.0 * radius)), int(support_shape[0])))
+    left = int(min(max(0, round(centre_x - span_x / 2.0)), width - span_x))
+    top = int(min(max(0, round(centre_y - span_y / 2.0)), height - span_y))
+    right = min(width, left + span_x)
+    bottom = min(height, top + span_y)
     window = gray[top:bottom, left:right]
     if window.size == 0:
         return []
@@ -1460,6 +1512,15 @@ def search_support(
                              "image must be uint8 or float32", "image")
     gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     gray = np.array(gray, dtype=np.float32, copy=True)
+    # Halcon requires the model to lie completely inside the search area. Saying
+    # so before scanning beats returning a "no match" the caller would read as
+    # "the part is missing".
+    support_height, support_width = np.asarray(prepared.pixels).shape[:2]
+    if support_height > gray.shape[0] or support_width > gray.shape[1]:
+        return invalid(image_space, "support_exceeds_search_area", {
+            "support_hw": (int(support_height), int(support_width)),
+            "search_hw": (int(gray.shape[0]), int(gray.shape[1])),
+        })
     factor = _pyramid_factor(prepared, options)
     if options.algorithm == "shape":
         return _shape_search(gray, prepared, options, image_space)
@@ -1478,12 +1539,10 @@ def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
     unavailable = 0
     candidates: List[TemplateMatch] = []
 
-    # Every variant may be larger than the image; pad instead of dropping it.
-    largest = int(math.ceil(max(support_width, support_height)
-                            * max(scales) * math.sqrt(2.0))) + 2
-    pad = max(0, largest - min(gray.shape[:2]))
-    padded = cv2.copyMakeBorder(gray, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0.0)
-
+    # The support must lie completely inside the search area, exactly as Halcon
+    # requires: a variant larger than the frame is dropped rather than padded,
+    # because a padded correlation scores against invented zeros and reports a
+    # confidence the image never supported.
     for angle in angles:
         for scale in scales:
             rendered = render_variant(
@@ -1492,18 +1551,29 @@ def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
                 inplace=options.inplace_variants, origin=prepared.origin)
             variant = rendered.pixels
             variant_mask = rendered.mask
+            offset_x = offset_y = 0
+            if variant_mask is not None:
+                # A masked support is mostly empty: trim the variant to the
+                # bounding box of its valid pixels. Correlation ignores masked
+                # pixels anyway, so the score is unchanged, but the footprint
+                # that has to fit the frame is the content rather than the box.
+                # Without this a 45 degree masked support is dropped for a
+                # bounding box far larger than anything it actually contains
+                # (the historical D07 defect).
+                rows, cols = np.nonzero(variant_mask)
+                if rows.size:
+                    top, left = int(rows.min()), int(cols.min())
+                    bottom, right = int(rows.max()) + 1, int(cols.max()) + 1
+                    if (top or left or bottom != variant.shape[0]
+                            or right != variant.shape[1]):
+                        variant = variant[top:bottom, left:right]
+                        variant_mask = variant_mask[top:bottom, left:right]
+                        offset_y, offset_x = top, left
             variant_height, variant_width = variant.shape[:2]
-            if variant_height > padded.shape[0] or variant_width > padded.shape[1]:
+            if variant_height > gray.shape[0] or variant_width > gray.shape[1]:
                 unavailable += 1
                 continue
-            if variant_mask is not None and float(variant_mask.sum()) > len(variant_mask.flat) * 0.999:
-                scores = cv2.matchTemplate(padded, variant, cv2.TM_CCOEFF_NORMED)
-            elif variant_mask is not None:
-                scores = cv2.matchTemplate(padded, variant, cv2.TM_CCORR_NORMED,
-                                           mask=variant_mask)
-            else:
-                scores = cv2.matchTemplate(padded, variant, cv2.TM_CCOEFF_NORMED)
-            scores = np.nan_to_num(scores, nan=-1.0, posinf=-1.0, neginf=-1.0)
+            scores = correlate(gray, variant, variant_mask)
             searched += 1
             if options.max_matches == 1:
                 _, best, _, best_loc = cv2.minMaxLoc(scores)
@@ -1514,16 +1584,16 @@ def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
             for x, y, score in found:
                 peak_x, peak_y = (refine_peak_xy(scores, x, y) if options.subpixel
                                   else (float(x), float(y)))
-                center_x = peak_x + rendered.center[0] - pad
-                center_y = peak_y + rendered.center[1] - pad
+                center_x = peak_x + rendered.center[0] - offset_x
+                center_y = peak_y + rendered.center[1] - offset_y
                 if not (0.0 <= center_x <= gray.shape[1] - 1
                         and 0.0 <= center_y <= gray.shape[0] - 1):
                     continue
                 # Reuse the render matrix, shifted to this peak: the reported
                 # pose is then exact by construction instead of re-derived.
                 pose = rendered.matrix.copy()
-                pose[0, 2] += peak_x - pad
-                pose[1, 2] += peak_y - pad
+                pose[0, 2] += peak_x - offset_x
+                pose[1, 2] += peak_y - offset_y
                 anchor = pose @ np.array([prepared.anchor_support[0],
                                           prepared.anchor_support[1], 1.0],
                                          dtype=np.float64)
@@ -1548,6 +1618,11 @@ def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
         "search_complete": searched + unavailable == requested,
     }
     if not candidates:
+        if unavailable and searched == 0:
+            # Nothing could be evaluated at all: every pose was larger than the
+            # search area. Saying "no match" would blame the image for a model
+            # that can never fit.
+            return invalid(image_space, "support_exceeds_search_area", diagnostics)
         return invalid(image_space, "no_matches", diagnostics)
     selected = suppress(candidates, options.max_overlap)
     if options.max_matches:
