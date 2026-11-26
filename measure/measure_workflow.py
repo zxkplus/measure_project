@@ -71,7 +71,7 @@ from measure.geometry_ops import (
 from measure.measure1D import Halcon1DMeasure
 from measure.measure2D import CircleMeasureObject, LineMeasureObject
 from measure.constants import EPS
-from measure.measure_template import pyramid_setting
+from measure.measure_template import DEFAULT_FINE_CANDIDATES, pyramid_setting
 from measure.viz import to_bgr, draw_text_shadow
 from measure.measure_template import (
     Preprocessor,
@@ -742,6 +742,7 @@ class TemplatePointObject(MeasureObject):
         # 初始化 pyramid 相关属性
         tp.decimate_exponent = pyramid_setting(data, "decimate_exponent", 0)
         tp.coarse_template_side = pyramid_setting(data, "coarse_template_side", 128)
+        tp.fine_candidates = int(data.get("fine_candidates", DEFAULT_FINE_CANDIDATES))
         tp._pyramid_scale = data.get("pyramid_scale", 1.0)
 
         obj._template_point = tp

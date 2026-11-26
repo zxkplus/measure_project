@@ -74,6 +74,7 @@ from measure.measure_template import (
     TemplatePoint,
     ThresholdPreprocessor,
     _PREPROCESSOR_REGISTRY,
+    DEFAULT_FINE_CANDIDATES,
     pyramid_setting,
     _deserialize_preprocessor,
 )
@@ -2335,6 +2336,8 @@ class MultiTargetWorkflow:
         # 初始化 pyramid 相关属性
         tp.decimate_exponent = pyramid_setting(meta, "decimate_exponent", 0)
         tp.coarse_template_side = pyramid_setting(meta, "coarse_template_side", 128)
+        # __new__ bypasses __init__: every attribute it sets must be restored here.
+        tp.fine_candidates = int(meta.get("fine_candidates", DEFAULT_FINE_CANDIDATES))
         # 走 TemplatePoint 的唯一实现，避免第 3 份忽略 decimate 指数的算法
         tp._pyramid_scale = tp._compute_pyramid_scale()
         wf._alignment._template_point = tp

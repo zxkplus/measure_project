@@ -973,7 +973,10 @@ class TemplatePoint:
         from measure.template_search import SearchOptions, search_support
 
         space = Space("engine", "px")
-        angle_min, angle_max = self.angle_range
+        # GUI angles are counter-clockwise (cv2.getRotationMatrix2D convention);
+        # the engine's are clockwise. The sign flips here, which also swaps the
+        # bounds, so the engine is handed (-max, -min).
+        angle_min, angle_max = -float(self.angle_range[1]), -float(self.angle_range[0])
         scale_min, scale_max = self.scale_range
         options = SearchOptions(
             score_threshold=float(self.match_score_threshold),
@@ -1012,7 +1015,7 @@ class TemplatePoint:
                 'valid': match.score >= self.match_score_threshold,
                 'int_peak_y': int(peak_y),
                 'int_peak_x': int(peak_x),
-                'best_rotation_deg': float(np.rad2deg(match.angle_rad)),
+                'best_rotation_deg': float(-np.rad2deg(match.angle_rad)),
                 'best_scale': float(match.scale),
             })
         return matches
@@ -1365,6 +1368,9 @@ class TemplatePoint:
         obj.overlap = float(data.get('overlap', 0.3))
         obj.decimate_exponent = int(data.get('decimate_exponent', 0))
         obj.coarse_template_side = int(pyramid_setting(data, "coarse_template_side", 128))
+        # from_dict bypasses __init__, so every attribute the constructor sets has
+        # to be restored here; a missing one only shows up when measure() reads it.
+        obj.fine_candidates = int(data.get("fine_candidates", DEFAULT_FINE_CANDIDATES))
         obj.set_pyramid(obj.decimate_exponent, obj.coarse_template_side)
 
         return obj
@@ -1420,6 +1426,7 @@ class TemplatePoint:
             "overlap": self.overlap,
             "decimate_exponent": self.decimate_exponent,
             "coarse_template_side": self.coarse_template_side,
+            "fine_candidates": self.fine_candidates,
         }
 
     @classmethod
@@ -1484,6 +1491,9 @@ class TemplatePoint:
         obj.overlap = float(data.get("overlap", 0.3))
         obj.decimate_exponent = int(pyramid_setting(data, "decimate_exponent", 0))
         obj.coarse_template_side = int(pyramid_setting(data, "coarse_template_side", 128))
+        # from_dict bypasses __init__, so every attribute the constructor sets has
+        # to be restored here; a missing one only shows up when measure() reads it.
+        obj.fine_candidates = int(data.get("fine_candidates", DEFAULT_FINE_CANDIDATES))
         obj.set_pyramid(obj.decimate_exponent, obj.coarse_template_side)
 
         return obj
