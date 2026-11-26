@@ -149,3 +149,93 @@ def field_floor():
 def test_model_refuses_too_few_points():
     with pytest.raises(Exception):
         build_shape_model(textured(), SPACE, max_points=MIN_POINTS - 1)
+
+
+# --- End-to-end: the shape search must agree with the correlation search ------
+
+
+def _prepared(reference, center=(360.0, 260.0), size=(120.0, 120.0)):
+    """Teach one square support on ``reference`` with a raw preprocessor."""
+    from measure.computation_types import RotatedBox
+    from measure.preprocessing import RawSpec
+    from measure.template_search import SupportSpec, prepare_support
+
+    spec = SupportSpec(box=RotatedBox(center, size, 0.0), anchor_reference=center)
+    result = prepare_support(reference, spec, RawSpec(),
+                             reference_space=Space("reference", "px"),
+                             support_space=Space("support", "px"))
+    assert result.valid
+    return result.value
+
+
+def _scene(angle_deg=0.0, top=200, left=300, size=120):
+    """Return a synthetic scene with one asymmetric target at a known place."""
+    rng = np.random.RandomState(3)
+    texture = cv2.GaussianBlur((rng.rand(size, size) * 255).astype(np.uint8), (5, 5), 1.5)
+    cv2.rectangle(texture, (20, 20), (size - 20, size // 2), 255, 2)
+    cv2.line(texture, (10, size - 10), (size - 10, size - 30), 200, 3)
+    rotated = cv2.warpAffine(
+        texture, cv2.getRotationMatrix2D((size / 2.0, size / 2.0), -angle_deg, 1.0),
+        (size, size))
+    reference = np.zeros((500, 600), np.uint8)
+    reference[top:top + size, left:left + size] = texture
+    scene = np.zeros((500, 600), np.uint8)
+    scene[top:top + size, left:left + size] = rotated
+    return reference, scene
+
+
+def _search(image, prepared, algorithm, angle_half_deg=0.0):
+    """Run one search over a symmetric angle range."""
+    from measure.template_search import SearchOptions, search_support
+
+    half = np.deg2rad(angle_half_deg)
+    options = SearchOptions(
+        score_threshold=0.4, max_matches=1, subpixel=True, algorithm=algorithm,
+        angle_min_rad=-half, angle_max_rad=half,
+        angle_step_rad=np.deg2rad(1.0), coarse_fine=bool(angle_half_deg),
+        coarse_angle_step_rad=np.deg2rad(5.0))
+    return search_support(image, prepared, options,
+                          image_space=Space("inspection", "px"))
+
+
+def test_shape_search_agrees_with_correlation_on_position():
+    reference, scene = _scene()
+    prepared = _prepared(reference)
+    correlated = _search(scene, prepared, "ncc")
+    shaped = _search(scene, prepared, "shape")
+    assert correlated.valid and shaped.valid
+    ncc_match = correlated.value.matches[0]
+    shape_match = shaped.value.matches[0]
+    assert shape_match.center == pytest.approx(ncc_match.center, abs=1.5)
+    assert shaped.diagnostics["search_strategy"] == "shape_two_level"
+    assert shaped.diagnostics["shape_points"] > 0
+
+
+def test_shape_search_agrees_with_correlation_on_rotation_sign():
+    reference, _ = _scene()
+    prepared = _prepared(reference)
+    for degrees in (15.0, -15.0):
+        _, scene = _scene(angle_deg=degrees)
+        correlated = _search(scene, prepared, "ncc", angle_half_deg=30.0)
+        shaped = _search(scene, prepared, "shape", angle_half_deg=30.0)
+        assert correlated.valid and shaped.valid
+        ncc_angle = np.rad2deg(correlated.value.matches[0].angle_rad)
+        shape_angle = np.rad2deg(shaped.value.matches[0].angle_rad)
+        # A mirrored sign would still score well, so compare against correlation
+        # rather than asserting a hard-coded value.
+        assert shape_angle == pytest.approx(ncc_angle, abs=3.0), (
+            f"shape {shape_angle:.1f} disagrees with correlation {ncc_angle:.1f}")
+
+
+def test_shape_search_falls_back_for_multi_scale():
+    reference, scene = _scene()
+    prepared = _prepared(reference)
+    from measure.template_search import SearchOptions, search_support
+
+    options = SearchOptions(
+        score_threshold=0.4, max_matches=1, algorithm="shape",
+        scale_min=0.9, scale_max=1.1, scale_step=0.1)
+    result = search_support(scene, prepared, options,
+                            image_space=Space("inspection", "px"))
+    assert result.valid
+    assert result.diagnostics.get("shape_scale_fallback") == "multi_scale_uses_correlation"

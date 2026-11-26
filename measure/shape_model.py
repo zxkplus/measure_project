@@ -260,14 +260,16 @@ def rotate_model(model: ShapeModel, angle_rad: float) -> ShapeModel:
     sin_a = math.sin(angle_rad)
     dy = model.points_y - centre_y
     dx = model.points_x - centre_x
-    # (x, y) -> (x cos + y sin, -x sin + y cos), the convention _variant_geometry
-    # uses for rendered variants.
-    rot_x = dx * cos_a + dy * sin_a
-    rot_y = -dx * sin_a + dy * cos_a
-    anchor_dy = model.anchor_y - centre_y
+    # (x, y) -> (x cos - y sin, x sin + y cos), the same linear part
+    # _variant_geometry applies to a rendered variant. Getting this sign wrong
+    # reports a mirrored pose that still scores well, so a rotation test
+    # compares against render_variant rather than trusting the formula.
+    rot_x = dx * cos_a - dy * sin_a
+    rot_y = dx * sin_a + dy * cos_a
     anchor_dx = model.anchor_x - centre_x
-    anchor_x = anchor_dx * cos_a + anchor_dy * sin_a
-    anchor_y = -anchor_dx * sin_a + anchor_dy * cos_a
+    anchor_dy = model.anchor_y - centre_y
+    anchor_x = anchor_dx * cos_a - anchor_dy * sin_a
+    anchor_y = anchor_dx * sin_a + anchor_dy * cos_a
     low_x = float(min(rot_x.min(), anchor_x))
     low_y = float(min(rot_y.min(), anchor_y))
     high_x = float(max(rot_x.max(), anchor_x))
@@ -279,8 +281,8 @@ def rotate_model(model: ShapeModel, angle_rad: float) -> ShapeModel:
     return ShapeModel(
         points_y=np.ascontiguousarray(rot_y - top, dtype=np.float32),
         points_x=np.ascontiguousarray(rot_x - left, dtype=np.float32),
-        dir_y=np.ascontiguousarray(-model.dir_x * sin_a + model.dir_y * cos_a),
-        dir_x=np.ascontiguousarray(model.dir_x * cos_a + model.dir_y * sin_a),
+        dir_y=np.ascontiguousarray(model.dir_x * sin_a + model.dir_y * cos_a),
+        dir_x=np.ascontiguousarray(model.dir_x * cos_a - model.dir_y * sin_a),
         size_hw=(out_height, out_width),
         anchor_y=anchor_y - top,
         anchor_x=anchor_x - left,

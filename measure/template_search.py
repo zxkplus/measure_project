@@ -912,6 +912,278 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
     return observed(image_space, MatchSet(matches=tuple(selected)), diagnostics)
 
 
+def _shape_pose_matrix(angle_rad: float, scale: float,
+                       anchor_support: Tuple[float, float],
+                       anchor_image: Tuple[float, float]) -> np.ndarray:
+    """Return the support-to-image similarity matrix for one shape pose.
+
+    The linear part uses the same convention as ``_variant_geometry``, so a
+    shape pose and a correlated pose mean the same rotation. The translation is
+    solved from the anchor rather than re-derived from a rendered box, because
+    the shape model's box tightly bounds its points and therefore is not the
+    variant box.
+
+    Args:
+        angle_rad: Clockwise pose angle in radians.
+        scale: Dimensionless pose scale.
+        anchor_support: Anchor position in support coordinates, ``(x, y)``.
+        anchor_image: Where that anchor lands in the image, ``(x, y)``.
+
+    Returns:
+        A 3x3 homogeneous similarity matrix.
+    """
+    alpha = scale * math.cos(angle_rad)
+    beta = scale * math.sin(angle_rad)
+    anchor_x, anchor_y = anchor_support
+    image_x, image_y = anchor_image
+    return np.array([
+        [alpha, -beta, image_x - (alpha * anchor_x - beta * anchor_y)],
+        [beta, alpha, image_y - (beta * anchor_x + alpha * anchor_y)],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float64)
+
+
+def _shape_search(gray: Array, prepared: PreparedSupport, options: SearchOptions,
+                  image_space: Space) -> Observation[MatchSet]:
+    """Locate a support by edge direction instead of intensity correlation.
+
+    A coarse pass scores a decimated copy over the whole frame, the way Halcon's
+    top pyramid level does, and each surviving peak is then refined at full
+    resolution against the complete point set. The scoring cost is
+    ``points * positions`` rather than ``image_area * support_area``, which is
+    what makes a support that nearly fills the frame affordable.
+
+    Args:
+        gray: Full-resolution ``float32`` inspection image.
+        prepared: Immutable prepared support.
+        options: Search policy; only unit scale is supported for shape.
+        image_space: Space of the inspection image.
+
+    Returns:
+        Selected matches, or ``no_matches`` when nothing exceeds the threshold.
+    """
+    from measure.shape_model import (build_shape_model, gradient_planes,
+                                     rotate_model, score_at, score_map)
+
+    fine_angles = options.angles()
+    fine_scales = options.scales()
+    diagnostics: dict = {
+        "algorithm": "shape",
+        "search_strategy": "shape_two_level",
+        "requested_variant_count": len(fine_angles) * len(fine_scales),
+        "ncc_evaluations": 0,
+    }
+    if len(fine_scales) > 1:
+        # Multi-scale shape search is not implemented; correlation already
+        # covers it, and silently ignoring the scale range would be a wrong
+        # answer rather than a slower one.
+        from dataclasses import replace
+
+        fallback = _two_stage(gray, prepared, options, image_space,
+                              _pyramid_factor(prepared, options))
+        merged = dict(fallback.diagnostics)
+        merged["shape_scale_fallback"] = "multi_scale_uses_correlation"
+        merged["algorithm"] = "shape"
+        return replace(fallback, diagnostics=merged)
+
+    support_height, support_width = np.asarray(prepared.pixels).shape[:2]
+    anchor_x, anchor_y = (float(prepared.anchor_support[0]),
+                          float(prepared.anchor_support[1]))
+    levels = max(1, _resolve_levels(prepared, options))
+    factor = 2.0 ** -levels
+    coarse_gray, coarse_support = _decimate_pair(gray, prepared, factor)
+    coarse_anchor = (anchor_x * factor, anchor_y * factor)
+    coarse_obs = build_shape_model(
+        np.asarray(coarse_support.pixels), prepared.support_space,
+        anchor=(coarse_anchor[1], coarse_anchor[0]),
+        min_contrast=options.min_contrast, level=levels)
+    if not coarse_obs.valid:
+        diagnostics["shape_points"] = 0
+        return invalid(image_space, coarse_obs.reason or "template_no_texture",
+                       diagnostics)
+    coarse_model = coarse_obs.value
+    diagnostics["shape_points"] = coarse_model.count
+    diagnostics["coarse_level"] = levels
+
+    coarse_gx, coarse_gy = gradient_planes(coarse_gray)
+    coarse_limit = min(options.score_threshold, options.coarse_score_threshold)
+    limit_per_angle = 8 * max(options.max_matches, 8)
+    coarse_angles = _coarse_grid(fine_angles, options.coarse_angle_step_rad) or list(fine_angles)
+    found: List[Tuple[float, float, float, float]] = []
+    for angle in coarse_angles:
+        posed = rotate_model(coarse_model, angle)
+        height, width = posed.size_hw
+        if height > coarse_gray.shape[0] or width > coarse_gray.shape[1]:
+            continue
+        scores = score_map(coarse_gx, coarse_gy, posed)
+        # Record the anchor, not the box origin: the box is tight around the
+        # points, so its origin depends on the angle's bounding box while the
+        # anchor's image position does not.
+        for x, y, score in peaks(scores, coarse_limit, limit=limit_per_angle):
+            found.append((float(score), float(angle),
+                          float(y) + posed.anchor_y, float(x) + posed.anchor_x))
+    searched = len(coarse_angles)
+    if not found:
+        diagnostics.update({"searched_variant_count": searched, "coarse_peaks": 0,
+                            "unavailable_variant_count": 0, "search_complete": True})
+        return invalid(image_space, "no_matches", diagnostics)
+
+    found.sort(reverse=True)
+    budget = (limit_per_angle if options.max_matches == 0
+              else max(1, options.max_matches) * PRUNE_FACTOR)
+    diagnostics["coarse_peaks"] = len(found)
+
+    full_obs = build_shape_model(
+        np.asarray(prepared.pixels), prepared.support_space,
+        mask=None if prepared.mask is None else prepared.mask,
+        anchor=(anchor_y, anchor_x),
+        min_contrast=options.min_contrast, level=0)
+    if not full_obs.valid:
+        return invalid(image_space, full_obs.reason or "template_no_texture",
+                       diagnostics)
+    full_model = full_obs.value
+    image_gx, image_gy = gradient_planes(gray)
+
+    # The coarse peak is only accurate to about one coarse pixel, so the
+    # refinement window must cover that at full resolution, doubled for
+    # slack, and never so wide that the per-position cost dominates.
+    radius = max(4, min(24, int(round(1.0 / factor)) * 2 + 2))
+    refined: List[TemplateMatch] = []
+    placed_any = False
+    for _score, coarse_angle, coarse_anchor_row, coarse_anchor_col in found[:budget]:
+        anchor_row = coarse_anchor_row / factor
+        anchor_col = coarse_anchor_col / factor
+        posed = rotate_model(full_model, coarse_angle)
+        base_row = int(round(anchor_row - posed.anchor_y))
+        base_col = int(round(anchor_col - posed.anchor_x))
+        rows: List[int] = []
+        cols: List[int] = []
+        for delta_row in range(-radius, radius + 1):
+            for delta_col in range(-radius, radius + 1):
+                row = base_row + delta_row
+                col = base_col + delta_col
+                if (row >= 0 and col >= 0
+                        and row + posed.size_hw[0] <= gray.shape[0]
+                        and col + posed.size_hw[1] <= gray.shape[1]):
+                    rows.append(row)
+                    cols.append(col)
+        if not rows:
+            continue
+        placed_any = True
+        scores = score_at(image_gx, image_gy, posed, rows, cols)
+        best = int(np.argmax(scores))
+        best_anchor = (rows[best] + posed.anchor_y, cols[best] + posed.anchor_x)
+        searched += 1
+
+        # With the position settled, the angle neighbourhood is cheap: one
+        # evaluation per angle instead of one per angle-position pair.
+        local_angles = ([a for a in fine_angles
+                         if abs(a - coarse_angle) <= options.coarse_angle_step_rad + 1e-12]
+                        or [coarse_angle])
+        best_angle = coarse_angle
+        best_score = float(scores[best])
+        best_row = rows[best]
+        best_col = cols[best]
+        for angle in local_angles:
+            if angle == coarse_angle:
+                continue
+            candidate = rotate_model(full_model, angle)
+            row = int(round(best_anchor[0] - candidate.anchor_y))
+            col = int(round(best_anchor[1] - candidate.anchor_x))
+            if not (row >= 0 and col >= 0
+                    and row + candidate.size_hw[0] <= gray.shape[0]
+                    and col + candidate.size_hw[1] <= gray.shape[1]):
+                continue
+            extra = score_at(image_gx, image_gy, candidate, [row], [col])
+            searched += 1
+            if float(extra[0]) > best_score:
+                best_score = float(extra[0])
+                best_angle = angle
+                best_row = row
+                best_col = col
+        if best_score < coarse_limit:
+            continue
+        peak_x, peak_y = float(best_col), float(best_row)
+        if options.subpixel:
+            peak_x, peak_y = _shape_subpixel(image_gx, image_gy, full_model,
+                                             best_angle, best_row, best_col)
+        anchor_image = (peak_y + rotate_model(full_model, best_angle).anchor_y,
+                        peak_x + rotate_model(full_model, best_angle).anchor_x)
+        matrix = _shape_pose_matrix(best_angle, 1.0, (anchor_x, anchor_y),
+                                    (anchor_image[1], anchor_image[0]))
+        if prepared.origin == "pixel_center":
+            centre_x, centre_y = (support_width - 1) / 2.0, (support_height - 1) / 2.0
+        else:
+            centre_x, centre_y = support_width / 2.0, support_height / 2.0
+        centre = matrix @ np.array([centre_x, centre_y, 1.0], dtype=np.float64)
+        refined.append(TemplateMatch(
+            center=(float(centre[0]), float(centre[1])),
+            anchor=(float(anchor_image[1]), float(anchor_image[0])),
+            angle_rad=float(best_angle), scale=1.0, score=float(best_score),
+            support_to_image=make_mapping(matrix, source=prepared.support_space,
+                                          destination=image_space, kind="similarity"),
+            peak_xy=(int(round(peak_x)), int(round(peak_y))),
+            size_wh=(float(support_width), float(support_height)),
+        ))
+
+    if not placed_any:
+        # The rotated box fits nowhere in the frame: a shape score cannot be
+        # formed at all. Correlation pads the frame up to the support instead,
+        # so it still answers; say so rather than reporting "no match".
+        from dataclasses import replace
+
+        fallback = _two_stage(gray, prepared, options, image_space,
+                              _pyramid_factor(prepared, options))
+        merged = dict(fallback.diagnostics)
+        merged["shape_support_too_large"] = "support_does_not_fit_uses_correlation"
+        merged["algorithm"] = "shape"
+        return replace(fallback, diagnostics=merged)
+
+    selected = suppress(refined, options.max_overlap, options.max_matches or 0)
+    diagnostics.update({
+        "searched_variant_count": searched,
+        "fine_positions": len(refined),
+        "unavailable_variant_count": 0,
+        "search_complete": True,
+    })
+    if not selected:
+        return invalid(image_space, "no_matches", diagnostics)
+    return observed(image_space, MatchSet(matches=tuple(selected)), diagnostics)
+
+
+def _shape_subpixel(gx: Array, gy: Array, model: Any, angle: float,
+                    row: int, col: int) -> Tuple[float, float]:
+    """Refine a shape peak to sub-pixel accuracy with the shared quadratic.
+
+    Args:
+        gx: Gradient ``x`` plane of the full-resolution image.
+        gy: Gradient ``y`` plane of the full-resolution image.
+        model: Full-resolution model.
+        angle: Pose angle of the winning candidate.
+        row: Integer peak row (model box top).
+        col: Integer peak column (model box left).
+
+    Returns:
+        Refined ``(x, y)`` of the model box origin.
+    """
+    from measure.shape_model import rotate_model, score_at
+
+    posed = rotate_model(model, angle)
+    rows = [row - 1, row - 1, row - 1, row, row, row, row + 1, row + 1, row + 1]
+    cols = [col - 1, col, col + 1, col - 1, col, col + 1, col - 1, col, col + 1]
+    if rows[0] < 0 or cols[0] < 0:
+        return float(col), float(row)
+    if (rows[-1] + posed.size_hw[0] > gx.shape[0]
+            or cols[-1] + posed.size_hw[1] > gx.shape[1]):
+        return float(col), float(row)
+    values = score_at(gx, gy, posed, rows, cols).reshape(3, 3)
+    offset_x = subpixel_offset(float(values[1, 0]), float(values[1, 1]),
+                               float(values[1, 2]))
+    offset_y = subpixel_offset(float(values[0, 1]), float(values[1, 1]),
+                               float(values[2, 1]))
+    return float(col) + offset_x, float(row) + offset_y
+
+
 def _decimate_pair(gray: Array, prepared: PreparedSupport, factor: float
                    ) -> Tuple[Array, PreparedSupport]:
     """Low-pass and decimate the search image and the support by ``factor``.
@@ -1119,7 +1391,10 @@ def search_support(
     gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     gray = np.array(gray, dtype=np.float32, copy=True)
     factor = _pyramid_factor(prepared, options)
+    if options.algorithm == "shape":
+        return _shape_search(gray, prepared, options, image_space)
     return _two_stage(gray, prepared, options, image_space, factor)
+
 
 def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
                image_space: Space) -> Observation[MatchSet]:
