@@ -907,6 +907,25 @@ def _decimate_pair(gray: Array, prepared: PreparedSupport, factor: float
     return small_gray, small
 
 
+def _fine_radius_px(prepared: PreparedSupport, options: SearchOptions) -> float:
+    """Return the half-side of a full-resolution refinement window.
+
+    The window must cover the support plus whatever the coarse stage could have
+    been off by, but never more than the search area itself: past that point the
+    "refinement" is a second full-frame correlation per candidate, which costs
+    more than the coarse pass saved.
+
+    Args:
+        prepared: Immutable prepared support (full resolution).
+        options: Search policy carrying the radius floor.
+
+    Returns:
+        Half-side in pixels, at least one.
+    """
+    support_shape = np.asarray(prepared.pixels).shape[:2]
+    return float(max(options.fine_search_radius_px, max(support_shape) * 0.75))
+
+
 def _rescan_neighbourhood(gray: Array, prepared: PreparedSupport,
                           options: SearchOptions, anchor: TemplateMatch,
                           factor: float, angles: List[float], scales: List[float],
@@ -933,7 +952,8 @@ def _rescan_neighbourhood(gray: Array, prepared: PreparedSupport,
     support_shape = np.asarray(prepared.pixels).shape[:2]
     height, width = gray.shape[:2]
     centre_x, centre_y = anchor.center[0] / factor, anchor.center[1] / factor
-    radius = max(options.fine_search_radius_px, max(support_shape) * 0.75)
+    radius = min(_fine_radius_px(prepared, options),
+                 max(1.0, min(height, width) // 2.0))
     left = int(max(0, centre_x - radius))
     top = int(max(0, centre_y - radius))
     right = int(min(width, centre_x + radius))
