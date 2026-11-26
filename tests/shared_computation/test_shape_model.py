@@ -239,3 +239,45 @@ def test_shape_search_falls_back_for_multi_scale():
                             image_space=Space("inspection", "px"))
     assert result.valid
     assert result.diagnostics.get("shape_scale_fallback") == "multi_scale_uses_correlation"
+
+
+# --- Ambiguity: a repeated pattern must not look like a unique answer ---------
+
+
+def _lattice(rows=6, cols=6, size=120):
+    """Return an image where the same target repeats on a regular lattice."""
+    rng = np.random.RandomState(11)
+    cell = cv2.GaussianBlur((rng.rand(size, size) * 255).astype(np.uint8), (5, 5), 1.5)
+    cv2.circle(cell, (size // 2, size // 2), size // 4, 0, -1)
+    cv2.rectangle(cell, (4, 4), (size - 4, size - 4), 255, 2)
+    image = np.zeros((rows * size, cols * size), np.uint8)
+    for row in range(rows):
+        for col in range(cols):
+            image[row * size:(row + 1) * size, col * size:(col + 1) * size] = cell
+    return image, cell
+
+
+def test_repeated_pattern_is_reported_ambiguous():
+    image, cell = _lattice()
+    prepared = _prepared(cell, center=(60.0, 60.0), size=(120.0, 120.0))
+    for algorithm in ("ncc", "shape"):
+        result = _search(image, prepared, algorithm)
+        assert result.valid
+        diagnostics = result.diagnostics
+        assert diagnostics["ambiguous"] is True, (
+            f"{algorithm} called a periodic lattice unique")
+        assert diagnostics["runner_up_score"] == pytest.approx(
+            result.value.matches[0].score, abs=0.1)
+        # The nearest repeat is a whole cell away, which is what makes the
+        # second answer a different target rather than the same one found twice.
+        assert diagnostics["runner_up_distance_px"] == pytest.approx(120.0, abs=1.0)
+
+
+def test_single_target_is_not_reported_ambiguous():
+    reference, scene = _scene()
+    prepared = _prepared(reference)
+    for algorithm in ("ncc", "shape"):
+        result = _search(scene, prepared, algorithm)
+        assert result.valid
+        assert result.diagnostics["ambiguous"] is False
+        assert "runner_up_score" not in result.diagnostics

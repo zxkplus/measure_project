@@ -763,6 +763,68 @@ def suppress(candidates: List[TemplateMatch], max_overlap: float,
 
 
 
+#: Two candidates whose scores are this close, while their centres are far
+#: apart, mean the frame does not determine a unique answer. A periodic pattern
+#: scores every repeat of the target almost equally well, and the reported
+#: position is then one of several valid places rather than *the* place.
+AMBIGUITY_SCORE_MARGIN = 0.05
+
+#: How far apart two candidates count as separate places, as a fraction of the
+#: support's longest side. Closer than this they are one target found twice.
+AMBIGUITY_SEPARATION_RATIO = 0.5
+
+
+def ambiguity_report(candidates: List[TemplateMatch], support_longest: float,
+                     margin: float = AMBIGUITY_SCORE_MARGIN,
+                     separation_ratio: float = AMBIGUITY_SEPARATION_RATIO) -> dict:
+    """Describe whether more than one distinct place matches nearly as well.
+
+    A repeated pattern makes every instance score alike, so the strongest match
+    is one of several equally valid answers and its position carries no
+    information about which instance the caller meant. Reporting that is the
+    difference between "found it" and "found *a* it".
+
+    Args:
+        candidates: Deduplicated candidates, before the match count is applied.
+        support_longest: Longest support side, in image pixels.
+        margin: Score difference still counted as "nearly as well".
+        separation_ratio: Minimum centre separation, as a fraction of
+            ``support_longest``.
+
+    Returns:
+        Diagnostic fields; ``ambiguous`` is ``True`` only when a rival exists.
+    """
+    report: dict = {"ambiguous": False, "distinct_candidates": len(candidates)}
+    if len(candidates) < 2:
+        return report
+    ordered = sorted(candidates, key=lambda match: match.score, reverse=True)
+    best = ordered[0]
+    separation = max(1.0, float(support_longest) * separation_ratio)
+    rivals = []
+    for other in ordered[1:]:
+        if best.score - other.score > margin:
+            continue
+        distance = math.hypot(other.center[0] - best.center[0],
+                              other.center[1] - best.center[1])
+        if distance >= separation:
+            rivals.append((other, distance))
+    if not rivals:
+        return report
+    rival, distance = rivals[0]
+    report.update({
+        "ambiguous": True,
+        "runner_up_score": float(rival.score),
+        "runner_up_distance_px": float(distance),
+        "rival_count": len(rivals),
+    })
+    return report
+
+
+def _support_longest(prepared: PreparedSupport) -> float:
+    """Return the longest support side in pixels."""
+    return float(max(np.asarray(prepared.pixels).shape[:2]))
+
+
 def _coarse_grid(values: List[float], step: float) -> List[float]:
     """Reduce a fine grid to the coarse values spaced at least ``step`` apart."""
     if not values:
@@ -863,7 +925,9 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
         # deduplicated exactly as the two-stage path does.
         accepted = [m for m in coarse.value.matches
                     if m.score >= options.score_threshold - 1e-12]
-        selected = suppress(accepted, options.max_overlap)
+        distinct = suppress(accepted, options.max_overlap)
+        diagnostics.update(ambiguity_report(distinct, _support_longest(prepared)))
+        selected = distinct
         if options.max_matches:
             selected = selected[: options.max_matches]
         if not selected:
@@ -896,7 +960,9 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
         searched += len(local_angles) * len(local_scales)
         refined.extend(found)
 
-    selected = suppress(refined, options.max_overlap)
+    distinct = suppress(refined, options.max_overlap)
+    diagnostics.update(ambiguity_report(distinct, _support_longest(prepared)))
+    selected = distinct
     if options.max_matches:
         selected = selected[: options.max_matches]
     diagnostics.update({
@@ -1139,7 +1205,11 @@ def _shape_search(gray: Array, prepared: PreparedSupport, options: SearchOptions
         merged["algorithm"] = "shape"
         return replace(fallback, diagnostics=merged)
 
-    selected = suppress(refined, options.max_overlap, options.max_matches or 0)
+    distinct = suppress(refined, options.max_overlap)
+    diagnostics.update(ambiguity_report(distinct, _support_longest(prepared)))
+    selected = distinct
+    if options.max_matches:
+        selected = selected[: options.max_matches]
     diagnostics.update({
         "searched_variant_count": searched,
         "fine_positions": len(refined),
