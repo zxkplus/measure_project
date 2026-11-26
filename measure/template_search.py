@@ -93,6 +93,25 @@ class SearchOptions:
     angle_list: Optional[Tuple[float, ...]] = None
     scale_list: Optional[Tuple[float, ...]] = None
     inplace_variants: bool = False
+    # --- Halcon-aligned controls -------------------------------------------
+    #: ``"ncc"`` correlates preprocessed intensity; ``"shape"`` correlates edge
+    #: gradient directions. Both share the pyramid cascade and the pruning.
+    algorithm: str = "ncc"
+    #: Halcon's Greediness: 0 rejects only candidates that provably cannot reach
+    #: the threshold, 1 rejects as soon as the remaining levels cannot help.
+    #: Our correlation cannot be inspected mid-sum, so the bound is applied
+    #: between pyramid levels rather than between model points.
+    greediness: float = 0.0
+    #: When true the level count is derived from the support size and the two
+    #: side limits; when false ``decimate_exponent`` is the level count and the
+    #: historical single-jump behaviour is kept.
+    auto_levels: bool = True
+    #: Coarsest level at which a match must still be verified (Halcon's second
+    #: ``NumLevels`` value). Levels above it only produce candidates.
+    min_verify_level: int = 0
+    #: Shape-only: edge points weaker than this are dropped from the model. A
+    #: zero value selects a percentile of the support's gradient magnitude.
+    min_contrast: float = 0.0
 
     def __post_init__(self) -> None:
         require_finite((self.score_threshold, self.coarse_score_threshold), "search.score")
@@ -121,6 +140,19 @@ class SearchOptions:
             raise contract_error("contract.invalid_parameter",
                                  "fine_candidates must be >= 1 or None",
                                  "search.fine_candidates")
+        if self.algorithm not in ("ncc", "shape"):
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown algorithm {self.algorithm!r}", "search.algorithm")
+        if not (0.0 <= self.greediness <= 1.0):
+            raise contract_error("contract.invalid_parameter",
+                                 "greediness must be in [0, 1]", "search.greediness")
+        if self.min_verify_level < 0:
+            raise contract_error("contract.invalid_parameter",
+                                 "min_verify_level must be >= 0",
+                                 "search.min_verify_level")
+        if self.min_contrast < 0.0:
+            raise contract_error("contract.invalid_parameter",
+                                 "min_contrast must be >= 0", "search.min_contrast")
 
     def resolved_fine_candidates(self) -> Optional[int]:
         """Return how many coarse neighbourhoods the fine stage may refine.
@@ -800,6 +832,9 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
     diagnostics = {
         "requested_variant_count": requested,
         "coarse_poses": len(coarse_angles) * len(coarse_scales),
+        "algorithm": options.algorithm,
+        "pyramid_levels": _resolve_levels(prepared, options),
+        "search_strategy": "two_stage",
     }
     if decimated:
         diagnostics["pyramid_factor"] = float(factor)
@@ -817,6 +852,7 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
             "ncc_evaluations": len(fine_angles) * len(fine_scales),
             "pruned_variant_count": 0,
             "fine_neighborhoods": 0,
+            "search_strategy": "single",
             "unavailable_variant_count": coarse.diagnostics.get(
                 "unavailable_variant_count", 0),
             "search_complete": coarse.diagnostics.get("search_complete", True),
@@ -998,6 +1034,67 @@ def _pyramid_factor(prepared: PreparedSupport, options: SearchOptions) -> float:
     return min(1.0, max(factor, min(1.0, 6.0 / max(1, min(width, height)))))
 
 
+#: No pyramid level may shrink the support below this side. Measured failures
+#: start around a 19 px long side, so the historical 6 px floor (which only
+#: guarded against a degenerate image) is too permissive to build a cascade on.
+MIN_LEVEL_SIDE = 12.0
+
+#: Deepest pyramid the cascade will build. Halcon also caps the level count;
+#: past about five levels a level adds cost without removing candidates.
+MAX_LEVELS = 5
+
+#: Each level keeps this multiple of the requested match count, so a target
+#: that ranks slightly low on a coarse level still survives to the next one.
+PRUNE_FACTOR = 4
+
+
+def _levels_by_min_side(prepared: PreparedSupport,
+                        min_side: float = MIN_LEVEL_SIDE) -> int:
+    """Return how many halvings the support survives without falling apart.
+
+    Args:
+        prepared: Immutable prepared support (full resolution).
+        min_side: Smallest acceptable support side, in pixels.
+
+    Returns:
+        The largest usable level count, at least zero.
+    """
+    shortest = float(min(np.asarray(prepared.pixels).shape[:2]))
+    if shortest <= 0.0:
+        return 0
+    levels = 0
+    side = shortest
+    while levels < MAX_LEVELS and side / 2.0 >= min_side:
+        side /= 2.0
+        levels += 1
+    return levels
+
+
+def _resolve_levels(prepared: PreparedSupport, options: SearchOptions) -> int:
+    """Return the pyramid depth the search should use.
+
+    With ``auto_levels`` the depth is derived from the factor the pyramid
+    options already imply, so a support that needs heavy decimation gets a deep
+    cascade instead of one large jump. Without it, the caller's
+    ``decimate_exponent`` is the depth verbatim, which reproduces the historical
+    single-jump behaviour.
+
+    Args:
+        prepared: Immutable prepared support (full resolution).
+        options: Search policy carrying both pyramid controls.
+
+    Returns:
+        Level count in ``[0, MAX_LEVELS]``; ``0`` means full resolution only.
+    """
+    if not options.auto_levels:
+        return max(0, min(int(options.decimate_exponent), MAX_LEVELS))
+    factor = _pyramid_factor(prepared, options)
+    if factor >= 1.0 - 1e-12:
+        return 0
+    by_factor = int(round(math.log2(1.0 / factor)))
+    return max(0, min(by_factor, _levels_by_min_side(prepared), MAX_LEVELS))
+
+
 def search_support(
     image: Array, prepared: PreparedSupport, options: SearchOptions, *,
     image_space: Space,
@@ -1023,7 +1120,6 @@ def search_support(
     gray = np.array(gray, dtype=np.float32, copy=True)
     factor = _pyramid_factor(prepared, options)
     return _two_stage(gray, prepared, options, image_space, factor)
-
 
 def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
                image_space: Space) -> Observation[MatchSet]:
