@@ -421,6 +421,9 @@ class TemplateSearch(StrictModel):
     # "dense" keeps the request's angle grid; "hierarchical" samples the same
     # window coarsely and refines only around its best pose.
     fine_angle_policy: Literal["dense", "hierarchical"] = "dense"
+    # Halcon's Metric: "use_polarity" requires the part to keep its contrast,
+    # "ignore_global_polarity" also accepts a globally inverted one.
+    metric: Literal["use_polarity", "ignore_global_polarity"] = "use_polarity"
 
     def resolved_fine_policy(self) -> str:
         """Return the effective fine-search policy for this request.
@@ -578,7 +581,7 @@ def _scan(search: np.ndarray, pixels: np.ndarray, options: TemplateSearch,
     # rescans) once for each angle in the grid.
     area = np.ascontiguousarray(search, dtype=np.float32)
     with measure("ncc"):
-        scores = correlate(area, variant, mask)
+        scores = correlate(area, variant, mask, metric=options.metric)
     counter("ncc_evaluations")
     counter("ncc_positions", float(scores.size))
     counter("ncc_template_pixels", float(w * h))

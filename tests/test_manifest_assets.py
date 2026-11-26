@@ -393,3 +393,34 @@ class TestLegacyPyramidSpellings:
         assert point.coarse_template_side == 96
         assert point._pyramid_scale == pytest.approx(min(2 ** -2, 96 / max(point._crop_h,
                                                                           point._crop_w)))
+
+
+class TestMetricRoundTrip:
+    """The Halcon Metric policy survives save/load and defaults safely."""
+
+    def test_saved_manifest_records_the_policy(self, tmp_path: Path):
+        workflow = taught_workflow()
+        workflow._alignment._template_point.metric = "ignore_global_polarity"
+        model_dir = tmp_path / "model"
+        workflow.save(str(model_dir))
+        document = json.loads((model_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        assert document["matching"]["metric"] == "ignore_global_polarity"
+
+    def test_reload_restores_the_policy(self, tmp_path: Path):
+        workflow = taught_workflow()
+        workflow._alignment._template_point.metric = "ignore_global_polarity"
+        model_dir = tmp_path / "model"
+        workflow.save(str(model_dir))
+        restored = MultiTargetWorkflow.load(str(model_dir))
+        assert restored._alignment._template_point.metric == "ignore_global_polarity"
+
+    def test_absent_key_falls_back_to_use_polarity(self, tmp_path: Path):
+        workflow = taught_workflow()
+        model_dir = tmp_path / "model"
+        workflow.save(str(model_dir))
+        path = model_dir / MANIFEST_FILENAME
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["matching"].pop("metric", None)
+        path.write_text(json.dumps(document), encoding="utf-8")
+        restored = MultiTargetWorkflow.load(str(model_dir))
+        assert restored._alignment._template_point.metric == "use_polarity"

@@ -556,9 +556,8 @@ def correlate(search: Array, template: Array, mask: Optional[Array] = None, *,
 
     This is the single place the correlation score is computed; the scanning
     loops call it rather than reaching for ``cv2.matchTemplate`` themselves.
-    The three branches are kept exactly as they were: an unmasked variant and a
-    fully valid masked variant both use the mean-subtracted coefficient, while a
-    genuinely masked variant falls back to the (masked) correlation coefficient.
+    Masked and unmasked variants use the same coefficient, so a mask changes
+    which pixels count but not the scale the score is reported on.
 
     Args:
         search: Search-area pixels.
@@ -576,12 +575,13 @@ def correlate(search: Array, template: Array, mask: Optional[Array] = None, *,
     if mask is None:
         scores = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED)
     else:
-        footprint = np.ascontiguousarray(mask, dtype=np.float32)
-        if float(footprint.sum()) > footprint.size * 0.999:
-            scores = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED)
-        else:
-            scores = cv2.matchTemplate(area, variant, cv2.TM_CCORR_NORMED,
-                                       mask=footprint)
+        # The mean-subtracted coefficient with a mask is the correct NCC: the
+        # mean and the deviation are taken over the valid pixels only. The
+        # masked path used to fall back to the plain correlation coefficient,
+        # which is not normalised the same way, so a masked variant scored on a
+        # different scale than an unmasked one.
+        scores = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED,
+                                   mask=np.ascontiguousarray(mask, dtype=np.float32))
     if metric == "ignore_global_polarity":
         # A globally inverted part correlates with the negated score, so the
         # magnitude accepts both. It must happen before the invalid sentinel

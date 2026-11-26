@@ -24,6 +24,10 @@ from .dialogs import ComposedMeasureDialog
 DEFAULT_COARSE_TEMPLATE_SIDE = 128
 #: Default decimation exponent shown for a model that has not chosen one.
 DEFAULT_DECIMATE_EXPONENT = 1
+
+#: Halcon's Metric default: the part must keep the contrast it was taught with.
+DEFAULT_METRIC = "use_polarity"
+from measure.template_search import METRIC_VALUES
 from measure.preview import (
     PREPROCESSOR_TYPES,
     config_from_values,
@@ -50,6 +54,7 @@ class ToolPanel(ttk.Frame):
         on_angle_range_changed: (value: str) -> None  # '±30', '±45', '±90'
         on_max_matches_changed: (value: int) -> None
         on_pyramid_changed: (decimate: int, max_template_size: int) -> None
+        on_metric_changed: (metric: str) -> None
         on_add_composed: (obj_type: str, label: str, params: dict) -> None
         on_tool_edit: (label: str) -> None
         on_tool_delete: (label: str) -> None
@@ -100,6 +105,7 @@ class ToolPanel(ttk.Frame):
         self.on_max_matches_changed: Optional[Callable] = None
         self.on_overlap_changed: Optional[Callable] = None
         self.on_pyramid_changed: Optional[Callable] = None
+        self.on_metric_changed: Optional[Callable] = None
         self.on_add_composed: Optional[Callable] = None
         self.on_tool_edit: Optional[Callable] = None
         self.on_tool_delete: Optional[Callable] = None
@@ -346,6 +352,23 @@ class ToolPanel(ttk.Frame):
         # Seed the label from the defaults so it cannot claim "未降采样" while
         # the exponent above it asks for a decimated search.
         self.update_pyramid_factor()
+
+        # Halcon's Metric. The tolerant mode accepts a part whose contrast is
+        # globally inverted, at the cost of also accepting the photographic
+        # negative of the taught pattern.
+        metric_row = ttk.Frame(self._template_form)
+        metric_row.pack(fill=tk.X, **pad)
+        ttk.Label(metric_row, text="极性 Metric").pack(side=tk.LEFT)
+        self._metric_var = tk.StringVar(value=DEFAULT_METRIC)
+        metric_combo = ttk.Combobox(
+            metric_row, textvariable=self._metric_var, state="readonly", width=20,
+            values=["use_polarity", "ignore_global_polarity"])
+        metric_combo.pack(side=tk.LEFT, padx=4)
+        metric_combo.bind("<<ComboboxSelected>>",
+                          lambda _event: self._fire(self.on_metric_changed,
+                                                    self.metric()))
+        ttk.Label(metric_row, text="(反相工件选 ignore)",
+                  foreground="gray").pack(side=tk.LEFT)
 
         # ROI display (read-only)
         self._roi_label = ttk.Label(tmpl_frame, text="ROI: (未设置)", foreground="gray")
@@ -726,6 +749,16 @@ class ToolPanel(ttk.Frame):
         """The committed preprocessor config (what the next teach will use)."""
         return dict(self._preproc_committed)
 
+    def metric(self) -> str:
+        """Return the selected Halcon Metric policy."""
+        value = str(self._metric_var.get()).strip()
+        return value if value in METRIC_VALUES else DEFAULT_METRIC
+
+    def set_metric(self, metric: str) -> None:
+        """Restore the Metric widget (project load / model switch)."""
+        value = str(metric or "").strip()
+        self._metric_var.set(value if value in METRIC_VALUES else DEFAULT_METRIC)
+
     def pyramid_config(self) -> tuple:
         """Return ``(decimate_exponent, coarse_template_side)`` from the widgets.
 
@@ -794,7 +827,8 @@ class ToolPanel(ttk.Frame):
                             preprocessor: Optional[Dict[str, Any]] = None,
                             decimate_exponent: Optional[int] = None,
                             coarse_template_side: Optional[int] = None,
-                            template_longest_side: Optional[int] = None):
+                            template_longest_side: Optional[int] = None,
+                            metric: Optional[str] = None):
         """Set matching parameter widgets programmatically (for project restore).
 
         Args:
@@ -813,6 +847,7 @@ class ToolPanel(ttk.Frame):
             coarse_template_side: Longest template side on the coarse level.
             template_longest_side: Current template side, only used to render the
                 actual downsampling ratio next to the widgets.
+            metric: Halcon Metric policy; ``None`` keeps the current selection.
         """
         if preprocessor:
             self.apply_preprocessor_config(dict(preprocessor))
@@ -832,6 +867,8 @@ class ToolPanel(ttk.Frame):
             self.set_pyramid_config(decimate_exponent,
                                     coarse_template_side if coarse_template_side is not None else 128,
                                     template_longest_side)
+        if metric is not None:
+            self.set_metric(metric)
 
     def get_alignment_mode(self) -> str:
         """Return the selected alignment mode key.

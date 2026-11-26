@@ -257,6 +257,7 @@ class TemplateMatchPointDialog(BaseParamDialog):
             "use_subpixel": True,
             "decimate_exponent": 0,
             "coarse_template_side": 128,
+            "metric": "use_polarity",
         }
         if params:
             defaults.update(params)
@@ -302,6 +303,12 @@ class TemplateMatchPointDialog(BaseParamDialog):
 
         self._add_int_entry(main, "模板边长上限 (px)", "coarse_template_side",
                             128, row, 16, 100000); row += 1
+
+        # Halcon's Metric: the tolerant mode also accepts a part whose contrast
+        # is globally inverted, at the cost of accepting its negative too.
+        self._add_combo(main, "极性 Metric", "metric",
+                        ["use_polarity", "ignore_global_polarity"],
+                        "use_polarity", row); row += 1
 
         self._add_buttons(main, row + 1)
 

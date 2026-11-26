@@ -455,7 +455,8 @@ class TemplatePoint:
                  overlap: float = 0.3,
                  decimate_exponent: int = 0,
                  coarse_template_side: int = 128,
-                 fine_candidates: int = DEFAULT_FINE_CANDIDATES):
+                 fine_candidates: int = DEFAULT_FINE_CANDIDATES,
+                 metric: str = "use_polarity"):
         """
         Initialize a template point from a reference image.
 
@@ -517,6 +518,9 @@ class TemplatePoint:
         self.decimate_exponent = int(decimate_exponent)
         self.coarse_template_side = int(coarse_template_side)
         self.fine_candidates = int(fine_candidates)
+        #: Halcon's Metric: require the same contrast, or accept an
+        #: inverted part as well.
+        self.metric = str(metric)
 
         # Crop the template region (clamped to image bounds)
         gray = self._to_gray(reference_image)
@@ -815,6 +819,7 @@ class TemplatePoint:
             max_matches=1,
             max_overlap=float(getattr(self, 'overlap', 0.3)),
             subpixel=self.use_subpixel,
+            metric=str(getattr(self, 'metric', 'use_polarity')),
             coarse_fine=False,
             angle_min_rad=0.0,
             angle_max_rad=0.0,
@@ -897,6 +902,7 @@ class TemplatePoint:
             max_matches=int(max_matches),
             max_overlap=float(getattr(self, 'overlap', 0.3)),
             subpixel=self.use_subpixel,
+            metric=str(getattr(self, 'metric', 'use_polarity')),
             coarse_fine=False,
             angle_min_rad=0.0,
             angle_max_rad=0.0,
@@ -983,6 +989,7 @@ class TemplatePoint:
             max_matches=int(self.max_matches) if multi_target else 1,
             max_overlap=float(getattr(self, "overlap", 0.3)),
             subpixel=self.use_subpixel,
+            metric=str(getattr(self, 'metric', 'use_polarity')),
             coarse_fine=bool(self.coarse_fine),
             coarse_angle_step_rad=float(np.deg2rad(self.coarse_angle_step)),
             coarse_scale_step=float(self.coarse_scale_step),
@@ -1371,6 +1378,7 @@ class TemplatePoint:
         # from_dict bypasses __init__, so every attribute the constructor sets has
         # to be restored here; a missing one only shows up when measure() reads it.
         obj.fine_candidates = int(data.get("fine_candidates", DEFAULT_FINE_CANDIDATES))
+        obj.metric = str(data.get("metric", "use_polarity"))
         obj.set_pyramid(obj.decimate_exponent, obj.coarse_template_side)
 
         return obj
@@ -1427,6 +1435,7 @@ class TemplatePoint:
             "decimate_exponent": self.decimate_exponent,
             "coarse_template_side": self.coarse_template_side,
             "fine_candidates": self.fine_candidates,
+            "metric": self.metric,
         }
 
     @classmethod
@@ -1494,6 +1503,7 @@ class TemplatePoint:
         # from_dict bypasses __init__, so every attribute the constructor sets has
         # to be restored here; a missing one only shows up when measure() reads it.
         obj.fine_candidates = int(data.get("fine_candidates", DEFAULT_FINE_CANDIDATES))
+        obj.metric = str(data.get("metric", "use_polarity"))
         obj.set_pyramid(obj.decimate_exponent, obj.coarse_template_side)
 
         return obj

@@ -363,6 +363,7 @@ class ProjectManager:
                     preprocessor=matching.get("preprocessor"),
                     decimate_exponent=matching.get("decimate_exponent"),
                     coarse_template_side=matching.get("coarse_template_side"),
+                    metric=matching.get("metric"),
                 )
         
             # Restore inspection image if available

@@ -100,9 +100,10 @@ class _RecordingToolPanel:
                             angle_range_half, max_matches, overlap=0.3,
                             angle_step_deg=1.0, preprocessor=None,
                             decimate_exponent=None,
-                            coarse_template_side=None):
+                            coarse_template_side=None, metric=None):
         # Recorded separately so the long-standing 8-tuple stays readable.
         self.last_pyramid = (decimate_exponent, coarse_template_side)
+        self.last_metric = metric
         self.calls.append(("set_matching_params", preprocessor_type,
                            float(score_threshold), float(angle_range_half),
                            int(max_matches), float(overlap), float(angle_step_deg),

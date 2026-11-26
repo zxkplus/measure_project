@@ -1228,6 +1228,7 @@ class MultiTargetWorkflow:
         coarse_angle_step: float = 5.0,
         decimate_exponent: int = 0,
         coarse_template_side: int = 128,
+        metric: str = "use_polarity",
     ):
         """
         Define the template from a rotated bounding box on the reference image.
@@ -1248,6 +1249,9 @@ class MultiTargetWorkflow:
             coarse_angle_step: Step size for coarse angle search.
             decimate_exponent: Pyramid decimation level (0=disabled).
             coarse_template_side: Max template side length after decimation.
+            metric: Halcon Metric policy: ``use_polarity`` requires the part to
+                keep its contrast, ``ignore_global_polarity`` also accepts a
+                globally inverted one.
         """
         self._alignment.teach(
             reference_image, center, size, angle_deg,
@@ -1258,6 +1262,7 @@ class MultiTargetWorkflow:
             coarse_fine=coarse_fine, coarse_angle_step=coarse_angle_step,
             decimate_exponent=decimate_exponent,
             coarse_template_side=coarse_template_side,
+            metric=metric,
         )
 
         # Keep the workflow-level matching cache in sync with what was taught.
@@ -2011,6 +2016,7 @@ class MultiTargetWorkflow:
                 "coarse_angle_step": float(tp.coarse_angle_step),
                 "decimate_exponent": tp.decimate_exponent,
                 "coarse_template_side": tp.coarse_template_side,
+                "metric": getattr(tp, "metric", "use_polarity"),
             }),
             "physical_scale_mm": self._physical_scale_mm,
             "objects": objects,
@@ -2221,6 +2227,7 @@ class MultiTargetWorkflow:
                 coarse_angle_step=float(matching["coarse_angle_step"]),
                 decimate_exponent=int(pyramid_setting(matching, "decimate_exponent", 0)),
                 coarse_template_side=int(pyramid_setting(matching, "coarse_template_side", 128)),
+                metric=str(matching.get("metric", "use_polarity")),
             )
 
         # Translate the manifest's dependency references back to label form.
@@ -2338,6 +2345,7 @@ class MultiTargetWorkflow:
         tp.coarse_template_side = pyramid_setting(meta, "coarse_template_side", 128)
         # __new__ bypasses __init__: every attribute it sets must be restored here.
         tp.fine_candidates = int(meta.get("fine_candidates", DEFAULT_FINE_CANDIDATES))
+        tp.metric = str(meta.get("metric", "use_polarity"))
         # 走 TemplatePoint 的唯一实现，避免第 3 份忽略 decimate 指数的算法
         tp._pyramid_scale = tp._compute_pyramid_scale()
         wf._alignment._template_point = tp
