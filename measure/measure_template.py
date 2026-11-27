@@ -538,7 +538,9 @@ class TemplatePoint:
                  coarse_template_side: int = 128,
                  fine_candidates: int = DEFAULT_FINE_CANDIDATES,
                  metric: str = "use_polarity",
-                 min_verify_level: int = 0):
+                 min_verify_level: int = 0,
+                 algorithm: str = "ncc",
+                 min_contrast: float = 0.0):
         """
         Initialize a template point from a reference image.
 
@@ -606,6 +608,12 @@ class TemplatePoint:
         #: Halcon's second NumLevels value: track candidates down to this pyramid
         #: level instead of full resolution. 0 keeps full-resolution refinement.
         self.min_verify_level = max(0, int(min_verify_level))
+        #: Which matcher searches for the template: ``"ncc"`` correlates
+        #: preprocessed intensity, ``"shape"`` correlates edge directions.
+        self.algorithm = str(algorithm)
+        #: Shape-only contrast floor for edge points; 0 derives one from the
+        #: support's own gradient distribution.
+        self.min_contrast = max(0.0, float(min_contrast))
 
         # Crop the template region (clamped to image bounds)
         gray = self._to_gray(reference_image)
@@ -915,6 +923,8 @@ class TemplatePoint:
             subpixel=self.use_subpixel,
             metric=str(getattr(self, 'metric', 'use_polarity')),
             min_verify_level=int(getattr(self, 'min_verify_level', 0)),
+            algorithm=str(getattr(self, 'algorithm', 'ncc')),
+            min_contrast=float(getattr(self, 'min_contrast', 0.0)),
             coarse_fine=False,
             angle_min_rad=0.0,
             angle_max_rad=0.0,
@@ -1000,6 +1010,8 @@ class TemplatePoint:
             subpixel=self.use_subpixel,
             metric=str(getattr(self, 'metric', 'use_polarity')),
             min_verify_level=int(getattr(self, 'min_verify_level', 0)),
+            algorithm=str(getattr(self, 'algorithm', 'ncc')),
+            min_contrast=float(getattr(self, 'min_contrast', 0.0)),
             coarse_fine=False,
             angle_min_rad=0.0,
             angle_max_rad=0.0,
@@ -1089,6 +1101,8 @@ class TemplatePoint:
             subpixel=self.use_subpixel,
             metric=str(getattr(self, 'metric', 'use_polarity')),
             min_verify_level=int(getattr(self, 'min_verify_level', 0)),
+            algorithm=str(getattr(self, 'algorithm', 'ncc')),
+            min_contrast=float(getattr(self, 'min_contrast', 0.0)),
             coarse_fine=bool(self.coarse_fine),
             coarse_angle_step_rad=float(np.deg2rad(self.coarse_angle_step)),
             coarse_scale_step=float(self.coarse_scale_step),
@@ -1480,6 +1494,8 @@ class TemplatePoint:
         obj.fine_candidates = int(data.get("fine_candidates", DEFAULT_FINE_CANDIDATES))
         obj.metric = str(data.get("metric", "use_polarity"))
         obj.min_verify_level = max(0, int(data.get("min_verify_level", 0)))
+        obj.algorithm = str(data.get("algorithm", "ncc"))
+        obj.min_contrast = max(0.0, float(data.get("min_contrast", 0.0)))
         obj.set_pyramid(obj.decimate_exponent, obj.coarse_template_side)
 
         return obj
@@ -1538,6 +1554,8 @@ class TemplatePoint:
             "fine_candidates": self.fine_candidates,
             "metric": self.metric,
             "min_verify_level": self.min_verify_level,
+            "algorithm": self.algorithm,
+            "min_contrast": self.min_contrast,
         }
 
     @classmethod
@@ -1607,6 +1625,8 @@ class TemplatePoint:
         obj.fine_candidates = int(data.get("fine_candidates", DEFAULT_FINE_CANDIDATES))
         obj.metric = str(data.get("metric", "use_polarity"))
         obj.min_verify_level = max(0, int(data.get("min_verify_level", 0)))
+        obj.algorithm = str(data.get("algorithm", "ncc"))
+        obj.min_contrast = max(0.0, float(data.get("min_contrast", 0.0)))
         obj.set_pyramid(obj.decimate_exponent, obj.coarse_template_side)
 
         return obj

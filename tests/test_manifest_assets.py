@@ -424,3 +424,48 @@ class TestMetricRoundTrip:
         path.write_text(json.dumps(document), encoding="utf-8")
         restored = MultiTargetWorkflow.load(str(model_dir))
         assert restored._alignment._template_point.metric == "use_polarity"
+
+
+class TestAlgorithmSelection:
+    """The matcher choice survives save/load and actually changes the search."""
+
+    def test_saved_manifest_records_the_algorithm(self, tmp_path: Path):
+        workflow = taught_workflow()
+        workflow._alignment._template_point.algorithm = "shape"
+        model_dir = tmp_path / "model"
+        workflow.save(str(model_dir))
+        document = json.loads((model_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        assert document["matching"]["algorithm"] == "shape"
+
+    def test_reload_restores_the_algorithm(self, tmp_path: Path):
+        workflow = taught_workflow()
+        workflow._alignment._template_point.algorithm = "shape"
+        model_dir = tmp_path / "model"
+        workflow.save(str(model_dir))
+        restored = MultiTargetWorkflow.load(str(model_dir))
+        assert restored._alignment._template_point.algorithm == "shape"
+
+    def test_absent_key_falls_back_to_correlation(self, tmp_path: Path):
+        workflow = taught_workflow()
+        model_dir = tmp_path / "model"
+        workflow.save(str(model_dir))
+        path = model_dir / MANIFEST_FILENAME
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["matching"].pop("algorithm", None)
+        path.write_text(json.dumps(document), encoding="utf-8")
+        restored = MultiTargetWorkflow.load(str(model_dir))
+        assert restored._alignment._template_point.algorithm == "ncc"
+
+    def test_the_attribute_actually_switches_the_engine_strategy(self):
+        workflow = taught_workflow()
+        point = workflow._alignment._template_point
+        image = make_inspection(make_reference(), [_reference_placement()])
+
+        point.algorithm = "ncc"
+        correlated = point.measure(image)
+        point.algorithm = "shape"
+        shaped = point.measure(image)
+
+        assert correlated["diagnostics"]["search_strategy"] != shaped["diagnostics"][
+            "search_strategy"]
+        assert shaped["diagnostics"]["search_strategy"].startswith("shape")

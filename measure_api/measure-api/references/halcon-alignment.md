@@ -28,6 +28,7 @@
 | 层数第二值 | `NumLevels = [start, track_to]` | `min_verify_level` | **未暴露**（v2 有自己的编排，未实现该机制）| `min_verify_level`（GUI「验证层」）|
 | **对比度极性** | **`Metric`** | **`metric`** | **`metric`** | **`metric`** |
 | 贪婪度 | `Greediness`（仅 `find_shape_model`）| `greediness`（shape 专用）| 未暴露 | 未暴露 |
+| **匹配算法** | 独立算子（`find_ncc_model` / `find_shape_model`）| **`algorithm`**（`ncc`/`shape`）| 未暴露 | **`algorithm`**（GUI「匹配算法」）|
 
 > `pyramid_decimate` / `pyramid_max_template_size` 是历史拼写，仍兼容读取；见
 > [coarse-search-renaming.md](coarse-search-renaming.md)。

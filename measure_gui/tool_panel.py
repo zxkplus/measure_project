@@ -28,6 +28,10 @@ DEFAULT_DECIMATE_EXPONENT = 1
 #: Halcon's Metric default: the part must keep the contrast it was taught with.
 DEFAULT_METRIC = "use_polarity"
 
+#: The matchers the engine offers; correlation stays the default.
+DEFAULT_ALGORITHM = "ncc"
+ALGORITHM_VALUES = ("ncc", "shape")
+
 #: Refine down to full resolution by default; a positive value trades
 #: accuracy for time by stopping at that pyramid level.
 DEFAULT_VERIFY_LEVEL = 0
@@ -60,6 +64,7 @@ class ToolPanel(ttk.Frame):
         on_pyramid_changed: (decimate: int, max_template_size: int) -> None
         on_metric_changed: (metric: str) -> None
         on_verify_level_changed: (level: int) -> None
+        on_algorithm_changed: (algorithm: str) -> None
         on_add_composed: (obj_type: str, label: str, params: dict) -> None
         on_tool_edit: (label: str) -> None
         on_tool_delete: (label: str) -> None
@@ -112,6 +117,7 @@ class ToolPanel(ttk.Frame):
         self.on_pyramid_changed: Optional[Callable] = None
         self.on_metric_changed: Optional[Callable] = None
         self.on_verify_level_changed: Optional[Callable] = None
+        self.on_algorithm_changed: Optional[Callable] = None
         self.on_add_composed: Optional[Callable] = None
         self.on_tool_edit: Optional[Callable] = None
         self.on_tool_delete: Optional[Callable] = None
@@ -358,6 +364,24 @@ class ToolPanel(ttk.Frame):
         # Seed the label from the defaults so it cannot claim "未降采样" while
         # the exponent above it asks for a decimated search.
         self.update_pyramid_factor()
+
+        # Which matcher runs. Correlation scores preprocessed intensity; shape
+        # scores edge directions, which is far cheaper when the template nearly
+        # fills the frame but does not support multi-scale or sub-pixel border
+        # cases the same way.
+        algorithm_row = ttk.Frame(self._template_form)
+        algorithm_row.pack(fill=tk.X, **pad)
+        ttk.Label(algorithm_row, text="匹配算法 Algorithm").pack(side=tk.LEFT)
+        self._algorithm_var = tk.StringVar(value=DEFAULT_ALGORITHM)
+        algorithm_combo = ttk.Combobox(
+            algorithm_row, textvariable=self._algorithm_var, state="readonly",
+            width=8, values=list(ALGORITHM_VALUES))
+        algorithm_combo.pack(side=tk.LEFT, padx=4)
+        algorithm_combo.bind("<<ComboboxSelected>>",
+                             lambda _event: self._fire(self.on_algorithm_changed,
+                                                       self.algorithm()))
+        ttk.Label(algorithm_row, text="(ncc=灰度相关, shape=边缘方向)",
+                  foreground="gray").pack(side=tk.LEFT)
 
         # Halcon's Metric. The tolerant mode accepts a part whose contrast is
         # globally inverted, at the cost of also accepting the photographic
@@ -774,6 +798,16 @@ class ToolPanel(ttk.Frame):
         """The committed preprocessor config (what the next teach will use)."""
         return dict(self._preproc_committed)
 
+    def algorithm(self) -> str:
+        """Return the selected matcher: ``ncc`` or ``shape``."""
+        value = str(self._algorithm_var.get()).strip()
+        return value if value in ALGORITHM_VALUES else DEFAULT_ALGORITHM
+
+    def set_algorithm(self, algorithm: str) -> None:
+        """Restore the algorithm selector (project load / model switch)."""
+        value = str(algorithm or "").strip()
+        self._algorithm_var.set(value if value in ALGORITHM_VALUES else DEFAULT_ALGORITHM)
+
     def verify_level(self) -> int:
         """Return how deep the refinement tracks (0 = full resolution)."""
         try:
@@ -869,7 +903,8 @@ class ToolPanel(ttk.Frame):
                             coarse_template_side: Optional[int] = None,
                             template_longest_side: Optional[int] = None,
                             metric: Optional[str] = None,
-                            min_verify_level: Optional[int] = None):
+                            min_verify_level: Optional[int] = None,
+                            algorithm: Optional[str] = None):
         """Set matching parameter widgets programmatically (for project restore).
 
         Args:
@@ -891,6 +926,7 @@ class ToolPanel(ttk.Frame):
             metric: Halcon Metric policy; ``None`` keeps the current selection.
             min_verify_level: How deep refinement tracks; ``None`` keeps the
                 current widget value.
+            algorithm: Matcher to run; ``None`` keeps the current selection.
         """
         if preprocessor:
             self.apply_preprocessor_config(dict(preprocessor))
@@ -914,6 +950,8 @@ class ToolPanel(ttk.Frame):
             self.set_metric(metric)
         if min_verify_level is not None:
             self.set_verify_level(min_verify_level)
+        if algorithm is not None:
+            self.set_algorithm(algorithm)
 
     def get_alignment_mode(self) -> str:
         """Return the selected alignment mode key.

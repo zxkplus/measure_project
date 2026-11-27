@@ -745,6 +745,8 @@ class TemplatePointObject(MeasureObject):
         tp.fine_candidates = int(data.get("fine_candidates", DEFAULT_FINE_CANDIDATES))
         tp.metric = str(data.get("metric", "use_polarity"))
         tp.min_verify_level = max(0, int(data.get("min_verify_level", 0)))
+        tp.algorithm = str(data.get("algorithm", "ncc"))
+        tp.min_contrast = max(0.0, float(data.get("min_contrast", 0.0)))
         tp._pyramid_scale = data.get("pyramid_scale", 1.0)
 
         obj._template_point = tp

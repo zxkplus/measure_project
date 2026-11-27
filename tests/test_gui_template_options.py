@@ -207,3 +207,21 @@ def test_verify_level_round_trips_and_clamps(panel):
     assert panel.verify_level() == 2
     panel.set_verify_level(-5)
     assert panel.verify_level() == 0
+
+
+@gui_only
+def test_algorithm_defaults_to_correlation(panel):
+    """Shape is opt-in; an untouched panel must keep running NCC."""
+    assert panel.algorithm() == "ncc"
+
+
+@gui_only
+def test_algorithm_round_trips(panel):
+    panel.set_algorithm("shape")
+    assert panel.algorithm() == "shape"
+
+
+@gui_only
+def test_unknown_algorithm_falls_back(panel):
+    panel.set_algorithm("surf")
+    assert panel.algorithm() == "ncc"

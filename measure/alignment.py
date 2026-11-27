@@ -211,6 +211,8 @@ class AlignmentStrategy:
         coarse_template_side: int = 128,
         metric: str = "use_polarity",
         min_verify_level: int = 0,
+        algorithm: str = "ncc",
+        min_contrast: float = 0.0,
     ):
         """Store the reference geometry and create the parent template.
 
@@ -249,6 +251,8 @@ class AlignmentStrategy:
             coarse_template_side=coarse_template_side,
             metric=metric,
             min_verify_level=min_verify_level,
+            algorithm=algorithm,
+            min_contrast=min_contrast,
         )
 
         self._angle_range = angle_range

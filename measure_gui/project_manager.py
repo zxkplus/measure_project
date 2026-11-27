@@ -365,6 +365,7 @@ class ProjectManager:
                     coarse_template_side=matching.get("coarse_template_side"),
                     metric=matching.get("metric"),
                     min_verify_level=matching.get("min_verify_level"),
+                    algorithm=matching.get("algorithm"),
                 )
         
             # Restore inspection image if available

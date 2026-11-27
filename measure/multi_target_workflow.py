@@ -1230,6 +1230,8 @@ class MultiTargetWorkflow:
         coarse_template_side: int = 128,
         metric: str = "use_polarity",
         min_verify_level: int = 0,
+        algorithm: str = "ncc",
+        min_contrast: float = 0.0,
     ):
         """
         Define the template from a rotated bounding box on the reference image.
@@ -1265,6 +1267,8 @@ class MultiTargetWorkflow:
             coarse_template_side=coarse_template_side,
             metric=metric,
             min_verify_level=min_verify_level,
+            algorithm=algorithm,
+            min_contrast=min_contrast,
         )
 
         # Keep the workflow-level matching cache in sync with what was taught.
@@ -2020,6 +2024,8 @@ class MultiTargetWorkflow:
                 "coarse_template_side": tp.coarse_template_side,
                 "metric": getattr(tp, "metric", "use_polarity"),
                 "min_verify_level": getattr(tp, "min_verify_level", 0),
+                "algorithm": getattr(tp, "algorithm", "ncc"),
+                "min_contrast": getattr(tp, "min_contrast", 0.0),
             }),
             "physical_scale_mm": self._physical_scale_mm,
             "objects": objects,
@@ -2232,6 +2238,8 @@ class MultiTargetWorkflow:
                 coarse_template_side=int(pyramid_setting(matching, "coarse_template_side", 128)),
                 metric=str(matching.get("metric", "use_polarity")),
                 min_verify_level=max(0, int(matching.get("min_verify_level", 0))),
+                algorithm=str(matching.get("algorithm", "ncc")),
+                min_contrast=max(0.0, float(matching.get("min_contrast", 0.0))),
             )
 
         # Translate the manifest's dependency references back to label form.
@@ -2351,6 +2359,8 @@ class MultiTargetWorkflow:
         tp.fine_candidates = int(meta.get("fine_candidates", DEFAULT_FINE_CANDIDATES))
         tp.metric = str(meta.get("metric", "use_polarity"))
         tp.min_verify_level = max(0, int(meta.get("min_verify_level", 0)))
+        tp.algorithm = str(meta.get("algorithm", "ncc"))
+        tp.min_contrast = max(0.0, float(meta.get("min_contrast", 0.0)))
         # 走 TemplatePoint 的唯一实现，避免第 3 份忽略 decimate 指数的算法
         tp._pyramid_scale = tp._compute_pyramid_scale()
         wf._alignment._template_point = tp
