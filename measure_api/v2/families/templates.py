@@ -21,7 +21,7 @@ from measure.rectify import ResampleOptions, patch_source_corners, warp_mapped
 from measure.template_search import (
     SearchOptions, correlate, decimate_matrix, decimate_pixels, has_texture,
     PreparedSupport, keep_disjoint, peaks, refine_peak_xy, render_variant,
-    rotated_box_overlap, variant_size,
+    rotated_box_overlap, search_support, variant_size,
 )
 from measure.template_search import _pyramid_factor as engine_factor
 from measure_api.v2.errors import ServiceError
@@ -424,6 +424,14 @@ class TemplateSearch(StrictModel):
     # Halcon's Metric: "use_polarity" requires the part to keep its contrast,
     # "ignore_global_polarity" also accepts a globally inverted one.
     metric: Literal["use_polarity", "ignore_global_polarity"] = "use_polarity"
+    # Which matcher runs. "ncc" correlates preprocessed intensity; "shape"
+    # correlates edge gradient directions, which is much cheaper when the
+    # support nearly fills the frame. The two report scores on different scales,
+    # so a threshold calibrated for one does not transfer to the other.
+    algorithm: Literal["ncc", "shape"] = "ncc"
+    # Shape-only: gradient magnitude below which a pixel is not an edge point.
+    # 0 derives the floor from the support's own magnitude distribution.
+    min_contrast: float = Field(default=0.0, ge=0, le=255)
 
     def resolved_fine_policy(self) -> str:
         """Return the effective fine-search policy for this request.
@@ -895,6 +903,138 @@ def request_pyramid_factor(pixels: np.ndarray, options: TemplateSearch) -> float
     return engine_factor(probe, engine_options)
 
 
+def _shape_match(pixels: np.ndarray, metadata: TemplateMetadata, search: np.ndarray,
+                 options: TemplateSearch, region: SearchRegion,
+                 image_ref: FileReference, template: FileReference,
+                 factor: float) -> TemplateMatchResult:
+    """Locate the support with the engine's edge-direction search.
+
+    The correlation path keeps its own orchestration; the edge-direction path has
+    no equivalent here, so it delegates to the engine, which owns both the edge
+    model and the two-level search. Everything crossing the boundary is
+    translated: degrees to radians on the way in, support-to-inspection mappings
+    and pixel-centre coordinates on the way out.
+
+    Args:
+        pixels: Rectified support pixels.
+        metadata: Support provenance, anchor and preprocessing description.
+        search: Preprocessed search area (the request's region crop).
+        options: Request search controls, in degrees.
+        region: Region of the inspection image the search area was cut from.
+        image_ref: Inspection image reference for the result.
+        template: Template reference for the result.
+        factor: Decimation factor already implied by the pyramid controls.
+
+    Returns:
+        Matches in this API's schema, or an invalid result with the engine's
+        reason when nothing was found.
+    """
+    import cv2
+
+    engine_space = Space("inspection", "px")
+    engine_support_space = Space("support", "px")
+    # The shape model is built from gradient directions, which are defined on
+    # one plane; a colour support has no single answer here.
+    support_pixels = pixels if pixels.ndim == 2 else cv2.cvtColor(pixels, cv2.COLOR_BGR2GRAY)
+    search_pixels = search if search.ndim == 2 else cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
+    prepared = PreparedSupport(
+        pixels=np.ascontiguousarray(support_pixels, dtype=np.float32),
+        valid_mask=np.ones(support_pixels.shape[:2], dtype=bool),
+        anchor_support=(float(metadata.anchor.x), float(metadata.anchor.y)),
+        support_to_reference=None,
+        reference_space=None,
+        support_space=engine_support_space,
+        mask=None,
+        origin="pixel_center",
+    )
+    engine_options = SearchOptions(
+        score_threshold=float(options.score_threshold),
+        max_matches=int(options.max_matches),
+        max_overlap=float(options.overlap),
+        subpixel=bool(options.subpixel),
+        coarse_fine=bool(options.coarse_fine),
+        coarse_angle_step_rad=float(np.deg2rad(options.coarse_angle_step)),
+        coarse_scale_step=float(options.coarse_scale_step),
+        angle_min_rad=float(np.deg2rad(options.angle_min)),
+        angle_max_rad=float(np.deg2rad(options.angle_max)),
+        angle_step_rad=float(np.deg2rad(options.angle_step)),
+        scale_min=float(options.scale_min),
+        scale_max=float(options.scale_max),
+        scale_step=float(options.scale_step),
+        decimate_exponent=int(options.pyramid_levels),
+        coarse_template_side=int(options.pyramid_max_template_size),
+        fine_candidates=options.fine_candidates,
+        fine_search_radius_px=float(options.fine_search_expand_px),
+        algorithm="shape",
+        min_contrast=float(options.min_contrast),
+        metric=str(options.metric),
+    )
+    found = search_support(np.ascontiguousarray(search_pixels), prepared,
+                           engine_options, image_space=engine_space)
+    ignored: List[str] = []
+    if options.resolved_fine_policy() != "neighborhood":
+        ignored.append("fine_search_policy")
+    if options.fine_angle_policy != "dense":
+        ignored.append("fine_angle_policy")
+    diagnostics = {
+        "pyramid_scale": float(factor),
+        "preprocessing": metadata.preprocessing.type,
+        "metric_frame": "inspection",
+        "normalization_recovers_size": True,
+        "algorithm": "shape",
+        "search_plan": {
+            "resample": "shape",
+            "coarse_poses": int(found.diagnostics.get("coarse_poses", 0) or 0),
+            "fine_poses_per_neighborhood": 0,
+            "neighborhoods_available": int(found.diagnostics.get("fine_positions", 0) or 0),
+            "neighborhoods_refined": int(found.diagnostics.get("fine_positions", 0) or 0),
+            "fine_candidates": options.fine_candidates,
+            "fine_angle_policy": options.fine_angle_policy,
+            "threads": 1,
+            "ignored_fields": ignored,
+        },
+        "fine_search": {
+            "policy": "neighborhood",
+            "neighborhood_radius": None,
+            "expand_px": options.fine_search_expand_px,
+            "windows": [],
+            "skipped_poses": [],
+            "bounded_outside": False,
+        },
+        "verify_level": int(found.diagnostics.get("verify_level", 0) or 0),
+        "unavailable_variant_count": int(
+            found.diagnostics.get("unavailable_variant_count", 0) or 0),
+        "ambiguous": bool(found.diagnostics.get("ambiguous", False)),
+    }
+    for key in ("rival_count", "runner_up_score", "runner_up_distance_px",
+                "shape_scale_fallback", "shape_support_too_large"):
+        if key in found.diagnostics:
+            diagnostics[key] = found.diagnostics[key]
+    if not found.valid or found.value is None:
+        return TemplateMatchResult(
+            valid=False, reason=found.reason or "no_match", image=image_ref,
+            template=template, matches=[], diagnostics=diagnostics)
+    matches = []
+    for index, match in enumerate(found.value.matches):
+        matrix = np.array(match.support_to_image.matrix, dtype=np.float64)
+        matrix[:2, 2] += [region.x, region.y]
+        full = matrix @ np.array(metadata.source_to_support.matrix, dtype=np.float64)
+        anchor = full @ [metadata.anchor.x, metadata.anchor.y, 1.0]
+        matches.append(TemplateMatch(
+            target_id=str(index),
+            center=Point(x=float(match.center[0] + region.x),
+                         y=float(match.center[1] + region.y)),
+            anchor=Point(x=float(anchor[0]), y=float(anchor[1])),
+            angle_degrees=float(np.rad2deg(match.angle_rad)),
+            scale=float(match.scale), score=float(match.score),
+            mapping=coordinate_mapping(full, "reference", "inspection"),
+            support_mapping=coordinate_mapping(matrix, "support", "inspection"),
+        ))
+    return TemplateMatchResult(
+        valid=bool(matches), reason=None if matches else "no_match", image=image_ref,
+        template=template, matches=matches, diagnostics=diagnostics)
+
+
 def match_template(
     request: TemplateMatchRequest, context: CalculationContext,
 ) -> TemplateMatchResult:
@@ -921,6 +1061,9 @@ def match_template(
         raise ServiceError("template.channels_mismatch", "Template and image channels must agree")
     h, w = pixels.shape[:2]
     factor = request_pyramid_factor(pixels, options)
+    if options.algorithm == "shape":
+        return _shape_match(pixels, metadata, search, options, region,
+                            image_ref, template, factor)
     coarse_pixels = pixels
     coarse_search = search
     support_map = np.eye(3)
