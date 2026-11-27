@@ -784,6 +784,15 @@ class TemplatePoint:
         # Tag the result with ROI clipping diagnostics (peak pinned to the
         # search-region border) before returning it.
         self._attach_search_diagnostics(result, search_region, r1, c1, search_img)
+        # The engine's own sampling report -- which strategy ran, how many poses
+        # were skipped, whether a rival place matched as well -- sits beside the
+        # ROI clipping fields rather than replacing them. Without this the
+        # ambiguity signal existed only inside the engine.
+        engine = getattr(self, '_engine_diagnostics', None)
+        if engine:
+            merged = dict(engine)
+            merged.update(result.get('diagnostics') or {})
+            result['diagnostics'] = merged
         self.result = result
 
         # Detailed timing breakdown
@@ -910,6 +919,7 @@ class TemplatePoint:
             scale_step=1.0,
         )
         found = search_support(search_img, prepared, options, image_space=space)
+        self._engine_diagnostics = dict(found.diagnostics or {})
         matches = found.value.matches if found.valid and found.value is not None else ()
         if not matches:
             return {
@@ -994,6 +1004,7 @@ class TemplatePoint:
         )
         found = search_support(search_img, self._shared_support(), options,
                                image_space=space)
+        self._engine_diagnostics = dict(found.diagnostics or {})
         if not found.valid or found.value is None:
             return []
         matches = []
@@ -1087,6 +1098,7 @@ class TemplatePoint:
         )
         found = search_support(search_img, self._shared_support(), options,
                                image_space=space)
+        self._engine_diagnostics = dict(found.diagnostics or {})
         if not found.valid or found.value is None:
             return []
         matches = []
