@@ -25,7 +25,7 @@
 | 角度步长 | `AngleStep` | `angle_step_rad` | `angle_step` | `angle_step` |
 | 尺度 | `ScaleMin/Max/Step` | `scale_*` | `scale_*` | （GUI 未暴露）|
 | 金字塔层数 | `NumLevels` | `decimate_exponent` + `coarse_template_side` | `pyramid_levels` + `pyramid_max_template_size` | 同 v1 |
-| 层数第二值 | `NumLevels = [start, track_to]` | `min_verify_level` | **未暴露**（v2 有自己的编排，未实现该机制）| `min_verify_level` |
+| 层数第二值 | `NumLevels = [start, track_to]` | `min_verify_level` | **未暴露**（v2 有自己的编排，未实现该机制）| `min_verify_level`（GUI「验证层」）|
 | **对比度极性** | **`Metric`** | **`metric`** | **`metric`** | **`metric`** |
 | 贪婪度 | `Greediness`（仅 `find_shape_model`）| `greediness`（shape 专用）| 未暴露 | 未暴露 |
 

@@ -364,6 +364,7 @@ class ProjectManager:
                     decimate_exponent=matching.get("decimate_exponent"),
                     coarse_template_side=matching.get("coarse_template_side"),
                     metric=matching.get("metric"),
+                    min_verify_level=matching.get("min_verify_level"),
                 )
         
             # Restore inspection image if available

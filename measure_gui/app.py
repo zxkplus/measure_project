@@ -303,6 +303,7 @@ class MeasureApp:
         self.tool_panel.on_overlap_changed = self._on_overlap_changed
         self.tool_panel.on_pyramid_changed = self._on_pyramid_changed
         self.tool_panel.on_metric_changed = self._on_metric_changed
+        self.tool_panel.on_verify_level_changed = self._on_verify_level_changed
         self.tool_panel.on_add_composed = self._on_add_composed
         self.tool_panel.on_tool_edit = self._on_tool_edit
         self.tool_panel.on_tool_delete = self._on_tool_delete
@@ -1853,6 +1854,12 @@ class MeasureApp:
         """The taught template point of the active strategy, if any."""
         alignment = getattr(self._workflow, "_alignment", None)
         return getattr(alignment, "template_point", None)
+
+    def _on_verify_level_changed(self, level: int):
+        """Apply the refinement depth to the taught template."""
+        point = self._current_template_point()
+        if point is not None:
+            point.min_verify_level = max(0, int(level))
 
     def _on_metric_changed(self, metric: str):
         """Apply the Halcon Metric policy to the taught template."""

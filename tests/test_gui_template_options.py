@@ -171,3 +171,39 @@ def test_restore_keeps_legacy_callers_working(panel):
     """A caller that omits the pyramid fields keeps the panel defaults."""
     panel.set_matching_params("raw", 0.5, 15.0, 1, overlap=0.3, angle_step_deg=1.0)
     assert panel.pyramid_config() == (1, 128)
+
+
+# ----------------------------------------------------------------------
+# Halcon-aligned controls: Metric and the verification level
+# ----------------------------------------------------------------------
+
+@gui_only
+def test_metric_defaults_to_use_polarity(panel):
+    """The strict policy is the default; tolerance is opt-in."""
+    assert panel.metric() == "use_polarity"
+
+
+@gui_only
+def test_metric_round_trips(panel):
+    panel.set_metric("ignore_global_polarity")
+    assert panel.metric() == "ignore_global_polarity"
+
+
+@gui_only
+def test_unknown_metric_falls_back_instead_of_being_stored(panel):
+    panel.set_metric("ignore_polarity")
+    assert panel.metric() == "use_polarity"
+
+
+@gui_only
+def test_verify_level_defaults_to_full_resolution(panel):
+    """0 keeps the historical behaviour, so nothing changes unless asked."""
+    assert panel.verify_level() == 0
+
+
+@gui_only
+def test_verify_level_round_trips_and_clamps(panel):
+    panel.set_verify_level(2)
+    assert panel.verify_level() == 2
+    panel.set_verify_level(-5)
+    assert panel.verify_level() == 0

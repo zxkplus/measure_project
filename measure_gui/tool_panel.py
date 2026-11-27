@@ -27,6 +27,10 @@ DEFAULT_DECIMATE_EXPONENT = 1
 
 #: Halcon's Metric default: the part must keep the contrast it was taught with.
 DEFAULT_METRIC = "use_polarity"
+
+#: Refine down to full resolution by default; a positive value trades
+#: accuracy for time by stopping at that pyramid level.
+DEFAULT_VERIFY_LEVEL = 0
 from measure.template_search import METRIC_VALUES
 from measure.preview import (
     PREPROCESSOR_TYPES,
@@ -55,6 +59,7 @@ class ToolPanel(ttk.Frame):
         on_max_matches_changed: (value: int) -> None
         on_pyramid_changed: (decimate: int, max_template_size: int) -> None
         on_metric_changed: (metric: str) -> None
+        on_verify_level_changed: (level: int) -> None
         on_add_composed: (obj_type: str, label: str, params: dict) -> None
         on_tool_edit: (label: str) -> None
         on_tool_delete: (label: str) -> None
@@ -106,6 +111,7 @@ class ToolPanel(ttk.Frame):
         self.on_overlap_changed: Optional[Callable] = None
         self.on_pyramid_changed: Optional[Callable] = None
         self.on_metric_changed: Optional[Callable] = None
+        self.on_verify_level_changed: Optional[Callable] = None
         self.on_add_composed: Optional[Callable] = None
         self.on_tool_edit: Optional[Callable] = None
         self.on_tool_delete: Optional[Callable] = None
@@ -369,6 +375,25 @@ class ToolPanel(ttk.Frame):
                                                     self.metric()))
         ttk.Label(metric_row, text="(反相工件选 ignore)",
                   foreground="gray").pack(side=tk.LEFT)
+
+        # Halcon's NumLevels second value: stop refining above full resolution.
+        # Every level skipped roughly halves the refinement cost and doubles its
+        # error, so 0 (full resolution) stays the default.
+        verify_row = ttk.Frame(self._template_form)
+        verify_row.pack(fill=tk.X, **pad)
+        ttk.Label(verify_row, text="验证层 NumLevels 下限").pack(side=tk.LEFT)
+        self._verify_level_var = tk.StringVar(value=str(DEFAULT_VERIFY_LEVEL))
+        verify_entry = ttk.Entry(
+            verify_row, textvariable=self._verify_level_var, width=4)
+        verify_entry.pack(side=tk.LEFT, padx=4)
+        ttk.Label(verify_row, text="(0=追到原分辨率, n=只到第 n 层)",
+                  foreground="gray").pack(side=tk.LEFT)
+        verify_entry.bind("<Return>",
+                          lambda _event: self._fire(self.on_verify_level_changed,
+                                                    self.verify_level()))
+        verify_entry.bind("<FocusOut>",
+                          lambda _event: self._fire(self.on_verify_level_changed,
+                                                    self.verify_level()))
 
         # ROI display (read-only)
         self._roi_label = ttk.Label(tmpl_frame, text="ROI: (未设置)", foreground="gray")
@@ -749,6 +774,21 @@ class ToolPanel(ttk.Frame):
         """The committed preprocessor config (what the next teach will use)."""
         return dict(self._preproc_committed)
 
+    def verify_level(self) -> int:
+        """Return how deep the refinement tracks (0 = full resolution)."""
+        try:
+            return max(0, int(float(self._verify_level_var.get())))
+        except (TypeError, ValueError):
+            return DEFAULT_VERIFY_LEVEL
+
+    def set_verify_level(self, level: int) -> None:
+        """Restore the verification-level widget (project load)."""
+        try:
+            value = max(0, int(level))
+        except (TypeError, ValueError):
+            value = DEFAULT_VERIFY_LEVEL
+        self._verify_level_var.set(str(value))
+
     def metric(self) -> str:
         """Return the selected Halcon Metric policy."""
         value = str(self._metric_var.get()).strip()
@@ -828,7 +868,8 @@ class ToolPanel(ttk.Frame):
                             decimate_exponent: Optional[int] = None,
                             coarse_template_side: Optional[int] = None,
                             template_longest_side: Optional[int] = None,
-                            metric: Optional[str] = None):
+                            metric: Optional[str] = None,
+                            min_verify_level: Optional[int] = None):
         """Set matching parameter widgets programmatically (for project restore).
 
         Args:
@@ -848,6 +889,8 @@ class ToolPanel(ttk.Frame):
             template_longest_side: Current template side, only used to render the
                 actual downsampling ratio next to the widgets.
             metric: Halcon Metric policy; ``None`` keeps the current selection.
+            min_verify_level: How deep refinement tracks; ``None`` keeps the
+                current widget value.
         """
         if preprocessor:
             self.apply_preprocessor_config(dict(preprocessor))
@@ -869,6 +912,8 @@ class ToolPanel(ttk.Frame):
                                     template_longest_side)
         if metric is not None:
             self.set_metric(metric)
+        if min_verify_level is not None:
+            self.set_verify_level(min_verify_level)
 
     def get_alignment_mode(self) -> str:
         """Return the selected alignment mode key.
