@@ -1016,6 +1016,7 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
 
     refined: List[TemplateMatch] = []
     searched = 0
+    refine_stats: dict = {}
     for anchor in neighbourhoods:
         local_angles = ([a for a in fine_angles
                          if abs(a - anchor.angle_rad) <= options.coarse_angle_step_rad + 1e-12]
@@ -1032,12 +1033,14 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
                                          prepared, image_space)
             found = _rescan_neighbourhood(refine_gray, refine_support, options,
                                           anchor_here, 1.0,
-                                          local_angles, local_scales, image_space)
+                                          local_angles, local_scales, image_space,
+                                          refine_stats)
             found = [_rescale_match(match, 1.0 / verify_factor, prepared, image_space)
                      for match in found]
         else:
             found = _rescan_neighbourhood(gray, prepared, options, anchor, factor,
-                                          local_angles, local_scales, image_space)
+                                          local_angles, local_scales, image_space,
+                                          refine_stats)
         searched += len(local_angles) * len(local_scales)
         refined.extend(found)
 
@@ -1051,7 +1054,9 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
         "ncc_evaluations": searched,
         "pruned_variant_count": len(coarse.value.matches),
         "fine_neighborhoods": len(neighbourhoods),
-        "unavailable_variant_count": 0,
+        "unavailable_variant_count": int(
+            coarse.diagnostics.get("unavailable_variant_count", 0) or 0)
+            + int(refine_stats.get("unavailable", 0)),
         "search_complete": True,
     })
     if not selected:
@@ -1311,7 +1316,7 @@ def _shape_search(gray: Array, prepared: PreparedSupport, options: SearchOptions
     diagnostics.update({
         "searched_variant_count": searched,
         "fine_positions": len(refined),
-        "unavailable_variant_count": 0,
+        "unavailable_variant_count": int(unavailable_angles),
         "search_complete": True,
     })
     if not selected:
@@ -1440,7 +1445,8 @@ def _rescale_match(match: TemplateMatch, scale: float,
 def _rescan_neighbourhood(gray: Array, prepared: PreparedSupport,
                           options: SearchOptions, anchor: TemplateMatch,
                           factor: float, angles: List[float], scales: List[float],
-                          image_space: Space) -> List[TemplateMatch]:
+                          image_space: Space,
+                          stats: Optional[dict] = None) -> List[TemplateMatch]:
     """Rescan one coarse neighbourhood at full resolution.
 
     The window is centred on the coarse match mapped back to full resolution and
@@ -1488,6 +1494,9 @@ def _rescan_neighbourhood(gray: Array, prepared: PreparedSupport,
         coarse_fine=False, angle_list=tuple(angles), scale_list=tuple(scales),
         metric=options.metric,
     ), image_space)
+    if stats is not None:
+        stats["unavailable"] = stats.get("unavailable", 0) + int(
+            local.diagnostics.get("unavailable_variant_count", 0) or 0)
     if not local.valid or local.value is None:
         return []
     shifted: List[TemplateMatch] = []
