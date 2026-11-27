@@ -1143,7 +1143,11 @@ def _shape_search(gray: Array, prepared: PreparedSupport, options: SearchOptions
                           float(prepared.anchor_support[1]))
     levels = max(1, _resolve_levels(prepared, options))
     factor = 2.0 ** -levels
-    coarse_gray, coarse_support = _decimate_pair(gray, prepared, factor)
+    # Edge directions come from gradients taken after this step, so the
+    # coarse pair must not be pre-blurred: smoothing first measurably
+    # degrades the coarse peak that seeds every refinement.
+    coarse_gray, coarse_support = _decimate_pair(gray, prepared, factor,
+                                                 smooth=False)
     coarse_anchor = (anchor_x * factor, anchor_y * factor)
     coarse_obs = build_shape_model(
         np.asarray(coarse_support.pixels), prepared.support_space,
@@ -1357,19 +1361,36 @@ def _shape_subpixel(gx: Array, gy: Array, model: Any, angle: float,
     return float(col) + offset_x, float(row) + offset_y
 
 
-def _decimate_pair(gray: Array, prepared: PreparedSupport, factor: float
-                   ) -> Tuple[Array, PreparedSupport]:
+def _decimate_pair(gray: Array, prepared: PreparedSupport, factor: float, *,
+                   smooth: bool = True) -> Tuple[Array, PreparedSupport]:
     """Low-pass and decimate the search image and the support by ``factor``.
 
     Args:
         gray: Full-resolution ``float32`` inspection image.
         prepared: Full-resolution prepared support.
         factor: Decimation factor in ``(0, 1)``.
+        smooth: Low-pass before sampling. Correlation needs it (INTER_AREA alone
+            aliases a high-frequency support badly enough to lose the peak), but
+            the edge-direction path derives gradients afterwards and loses coarse
+            direction precision when the input is blurred first; its caller passes
+            ``False`` and keeps the plain area average, which is its own 2x2 box.
 
     Returns:
         ``(small_gray, small_support)`` on the coarse grid.
     """
     support = np.asarray(prepared.pixels, dtype=np.float32)
+    # Low-pass before sampling. Plain INTER_AREA aliases the phase of a
+    # high-frequency support: the v2 acceptance corpus measured the correlation
+    # peak fall from 0.65 to 0.27 without this pass, and coarse detection then
+    # failed. The blur is applied here rather than through ``decimate_pixels``
+    # because that helper also shifts the sampling grid by half a pixel, which is
+    # correct for its pixel-centre callers but changes the phase this search has
+    # always used -- the edge-direction path samples gradients and is far more
+    # sensitive to that than correlation is.
+    if smooth:
+        sigma = 0.5 / float(factor)
+        support = cv2.GaussianBlur(support, (0, 0), sigma)
+        gray = cv2.GaussianBlur(gray, (0, 0), sigma)
     small_support = cv2.resize(support, None, fx=factor, fy=factor,
                                interpolation=cv2.INTER_AREA)
     small_gray = cv2.resize(gray, None, fx=factor, fy=factor,
