@@ -605,14 +605,17 @@ def correlate(search: Array, template: Array, mask: Optional[Array] = None, *,
     """
     area = np.ascontiguousarray(search, dtype=np.float32)
     variant = np.ascontiguousarray(template, dtype=np.float32)
-    if mask is None:
+    if mask is None or bool(np.asarray(mask).all()):
+        # An entirely valid mask is ordinary NCC. OpenCV's masked path computes
+        # the same score to within ~1e-6 but takes about four times as long, and
+        # ``render_variant`` hands back a full mask for any unrotated support.
         scores = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED)
     else:
         # The mean-subtracted coefficient with a mask is the correct NCC: the
-        # mean and the deviation are taken over the valid pixels only. The
-        # masked path used to fall back to the plain correlation coefficient,
-        # which is not normalised the same way, so a masked variant scored on a
-        # different scale than an unmasked one.
+        # mean and the deviation are taken over the valid pixels only. The masked
+        # path used to fall back to the plain correlation coefficient, which is
+        # not normalised the same way, so a masked variant scored on a different
+        # scale than an unmasked one.
         scores = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED,
                                    mask=np.ascontiguousarray(mask, dtype=np.float32))
     if metric == "ignore_global_polarity":

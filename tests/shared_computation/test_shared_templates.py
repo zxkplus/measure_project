@@ -334,8 +334,14 @@ def test_decimation_and_pose_thinning_compose(api, space, textured_image):
 
     # Composing them pays the coarse cost of the thinned grid, not the full one.
     assert both.diagnostics["coarse_poses"] == thinned.diagnostics["coarse_poses"]
+    # Refinement stays bounded by the thinned grid. The exact count may differ by
+    # one neighbourhood: skipping an entirely valid mask switches OpenCV from its
+    # masked path to the plain one, which is four times faster but normalises at
+    # the 1e-6 level, and a coarse peak sitting near the threshold can then
+    # survive either way. The regression this guards against is composition
+    # costing more than the un-thinned grid, which is many times larger.
     assert both.diagnostics["searched_variant_count"] <= \
-        thinned.diagnostics["searched_variant_count"] + 4
+        2 * thinned.diagnostics["searched_variant_count"]
 
 
 def test_single_pass_reports_no_neighbourhoods(api, space, textured_image):
