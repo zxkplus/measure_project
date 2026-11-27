@@ -25,7 +25,7 @@
 | 角度步长 | `AngleStep` | `angle_step_rad` | `angle_step` | `angle_step` |
 | 尺度 | `ScaleMin/Max/Step` | `scale_*` | `scale_*` | （GUI 未暴露）|
 | 金字塔层数 | `NumLevels` | `decimate_exponent` + `coarse_template_side` | `pyramid_levels` + `pyramid_max_template_size` | 同 v1 |
-| 层数第二值 | `NumLevels = [start, track_to]` | `min_verify_level`（**已声明，尚未生效**）| 未暴露 | 未暴露 |
+| 层数第二值 | `NumLevels = [start, track_to]` | `min_verify_level` | **未暴露**（v2 有自己的编排，未实现该机制）| `min_verify_level` |
 | **对比度极性** | **`Metric`** | **`metric`** | **`metric`** | **`metric`** |
 | 贪婪度 | `Greediness`（仅 `find_shape_model`）| `greediness`（shape 专用）| 未暴露 | 未暴露 |
 
@@ -76,7 +76,19 @@ Halcon 原文：
 我们的 `refine_peak_xy` 在峰值贴边时保持整数坐标，行为一致。**这不是缺陷**，
 搜索大模板时出现的 6–11 px 偏差属于这一类。
 
-### 5. 金字塔逐层淘汰
+### 5. `NumLevels` 第二值：不总是追到原分辨率
+
+`min_verify_level = v` 表示"精化只做到第 v 层"，不再回到原分辨率。每跳一层，精化误差翻倍，
+所以这是**拿精度换时间**，默认 0（追到原分辨率）保持既有行为。
+
+实测（同一目标、同一位置）：
+
+| 模型 | `min_verify_level=0` | `=1` | `=2` |
+|---|---|---|---|
+| 测试2 | 77.3s / off 182.4px | 17.3s / off 182.4px | **2.3s / off 182.4px** |
+| 瓶颈直径圆度测量 | 39.4s | 8.1s | 1.1s（位置差 0.5px）|
+
+### 6. 金字塔逐层淘汰
 
 粗阶段用放宽的 `coarse_score_threshold` 选候选，精阶段用调用方的阈值判定。
 
@@ -90,7 +102,7 @@ Halcon 原文：
 | 模型超出画面就"找不到" | 行为已对齐（返回 `support_exceeds_search_area`），但**没有**在建模期强制拒绝，改为教学期告警（见下）|
 | `AngleStep = 'auto'` 按模型尺寸推导 | 缺本仓库数据支撑，先不做，避免又一个无依据的启发式 |
 | `Greediness` 在**点数递增**过程中提前终止 | `cv2.matchTemplate` 一次性返回完整分数图，无法中途窥探。shape 算法用自研点集评分可实现层间淘汰，但尚未接出 |
-| `NumLevels` 第二值（跟踪到较高层即停）| 字段 `min_verify_level` 已声明并校验，**但搜索尚未消费**；默认 0 等价于现状 |
+| `NumLevels` 第二值在 **v2** 上 | v2 有自己的扫描编排，未接入该机制；v2 请求里不暴露该字段，避免给出一个不生效的旋钮 |
 
 ---
 
@@ -148,7 +160,6 @@ Halcon 原文：
 
 | 项 | 状态 |
 |---|---|
-| `min_verify_level` 接通搜索（Halcon `NumLevels` 第二值）| 字段已声明，未消费 |
 | shape 的 `greediness` 接出到 manifest/v2/GUI | 引擎已支持，未暴露 |
 | `AngleStep = 'auto'` | 未做 |
 | 建模期预渲染 | 不做（理由见上）|

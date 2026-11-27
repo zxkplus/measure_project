@@ -744,6 +744,7 @@ class TemplatePointObject(MeasureObject):
         tp.coarse_template_side = pyramid_setting(data, "coarse_template_side", 128)
         tp.fine_candidates = int(data.get("fine_candidates", DEFAULT_FINE_CANDIDATES))
         tp.metric = str(data.get("metric", "use_polarity"))
+        tp.min_verify_level = max(0, int(data.get("min_verify_level", 0)))
         tp._pyramid_scale = data.get("pyramid_scale", 1.0)
 
         obj._template_point = tp

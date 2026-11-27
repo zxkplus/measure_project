@@ -537,7 +537,8 @@ class TemplatePoint:
                  decimate_exponent: int = 0,
                  coarse_template_side: int = 128,
                  fine_candidates: int = DEFAULT_FINE_CANDIDATES,
-                 metric: str = "use_polarity"):
+                 metric: str = "use_polarity",
+                 min_verify_level: int = 0):
         """
         Initialize a template point from a reference image.
 
@@ -602,6 +603,9 @@ class TemplatePoint:
         #: Halcon's Metric: require the same contrast, or accept an
         #: inverted part as well.
         self.metric = str(metric)
+        #: Halcon's second NumLevels value: track candidates down to this pyramid
+        #: level instead of full resolution. 0 keeps full-resolution refinement.
+        self.min_verify_level = max(0, int(min_verify_level))
 
         # Crop the template region (clamped to image bounds)
         gray = self._to_gray(reference_image)
@@ -910,6 +914,7 @@ class TemplatePoint:
             max_overlap=float(getattr(self, 'overlap', 0.3)),
             subpixel=self.use_subpixel,
             metric=str(getattr(self, 'metric', 'use_polarity')),
+            min_verify_level=int(getattr(self, 'min_verify_level', 0)),
             coarse_fine=False,
             angle_min_rad=0.0,
             angle_max_rad=0.0,
@@ -994,6 +999,7 @@ class TemplatePoint:
             max_overlap=float(getattr(self, 'overlap', 0.3)),
             subpixel=self.use_subpixel,
             metric=str(getattr(self, 'metric', 'use_polarity')),
+            min_verify_level=int(getattr(self, 'min_verify_level', 0)),
             coarse_fine=False,
             angle_min_rad=0.0,
             angle_max_rad=0.0,
@@ -1082,6 +1088,7 @@ class TemplatePoint:
             max_overlap=float(getattr(self, "overlap", 0.3)),
             subpixel=self.use_subpixel,
             metric=str(getattr(self, 'metric', 'use_polarity')),
+            min_verify_level=int(getattr(self, 'min_verify_level', 0)),
             coarse_fine=bool(self.coarse_fine),
             coarse_angle_step_rad=float(np.deg2rad(self.coarse_angle_step)),
             coarse_scale_step=float(self.coarse_scale_step),
@@ -1472,6 +1479,7 @@ class TemplatePoint:
         # to be restored here; a missing one only shows up when measure() reads it.
         obj.fine_candidates = int(data.get("fine_candidates", DEFAULT_FINE_CANDIDATES))
         obj.metric = str(data.get("metric", "use_polarity"))
+        obj.min_verify_level = max(0, int(data.get("min_verify_level", 0)))
         obj.set_pyramid(obj.decimate_exponent, obj.coarse_template_side)
 
         return obj
@@ -1529,6 +1537,7 @@ class TemplatePoint:
             "coarse_template_side": self.coarse_template_side,
             "fine_candidates": self.fine_candidates,
             "metric": self.metric,
+            "min_verify_level": self.min_verify_level,
         }
 
     @classmethod
@@ -1597,6 +1606,7 @@ class TemplatePoint:
         # to be restored here; a missing one only shows up when measure() reads it.
         obj.fine_candidates = int(data.get("fine_candidates", DEFAULT_FINE_CANDIDATES))
         obj.metric = str(data.get("metric", "use_polarity"))
+        obj.min_verify_level = max(0, int(data.get("min_verify_level", 0)))
         obj.set_pyramid(obj.decimate_exponent, obj.coarse_template_side)
 
         return obj

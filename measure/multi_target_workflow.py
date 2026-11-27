@@ -1229,6 +1229,7 @@ class MultiTargetWorkflow:
         decimate_exponent: int = 0,
         coarse_template_side: int = 128,
         metric: str = "use_polarity",
+        min_verify_level: int = 0,
     ):
         """
         Define the template from a rotated bounding box on the reference image.
@@ -1263,6 +1264,7 @@ class MultiTargetWorkflow:
             decimate_exponent=decimate_exponent,
             coarse_template_side=coarse_template_side,
             metric=metric,
+            min_verify_level=min_verify_level,
         )
 
         # Keep the workflow-level matching cache in sync with what was taught.
@@ -2017,6 +2019,7 @@ class MultiTargetWorkflow:
                 "decimate_exponent": tp.decimate_exponent,
                 "coarse_template_side": tp.coarse_template_side,
                 "metric": getattr(tp, "metric", "use_polarity"),
+                "min_verify_level": getattr(tp, "min_verify_level", 0),
             }),
             "physical_scale_mm": self._physical_scale_mm,
             "objects": objects,
@@ -2228,6 +2231,7 @@ class MultiTargetWorkflow:
                 decimate_exponent=int(pyramid_setting(matching, "decimate_exponent", 0)),
                 coarse_template_side=int(pyramid_setting(matching, "coarse_template_side", 128)),
                 metric=str(matching.get("metric", "use_polarity")),
+                min_verify_level=max(0, int(matching.get("min_verify_level", 0))),
             )
 
         # Translate the manifest's dependency references back to label form.
@@ -2346,6 +2350,7 @@ class MultiTargetWorkflow:
         # __new__ bypasses __init__: every attribute it sets must be restored here.
         tp.fine_candidates = int(meta.get("fine_candidates", DEFAULT_FINE_CANDIDATES))
         tp.metric = str(meta.get("metric", "use_polarity"))
+        tp.min_verify_level = max(0, int(meta.get("min_verify_level", 0)))
         # 走 TemplatePoint 的唯一实现，避免第 3 份忽略 decimate 指数的算法
         tp._pyramid_scale = tp._compute_pyramid_scale()
         wf._alignment._template_point = tp

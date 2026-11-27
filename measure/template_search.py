@@ -1002,6 +1002,18 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
     neighbourhoods = suppress(coarse.value.matches, options.max_overlap,
                               options.resolved_fine_candidates() or 0)
 
+    # Halcon's second NumLevels value: track the candidates down to this level
+    # instead of all the way to full resolution. Each level skipped multiplies
+    # the refinement's error by two, so this is an accuracy-for-time trade and
+    # the default (0) keeps the historical full-resolution refinement.
+    verify_level = min(max(0, int(options.min_verify_level)),
+                       _levels_by_min_side(prepared))
+    verify_factor = 2.0 ** -verify_level if verify_level else 1.0
+    refine_gray, refine_support = gray, prepared
+    if verify_level:
+        refine_gray, refine_support = _decimate_pair(gray, prepared, verify_factor)
+    diagnostics["verify_level"] = verify_level
+
     refined: List[TemplateMatch] = []
     searched = 0
     for anchor in neighbourhoods:
@@ -1013,8 +1025,19 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
                         if options.coarse_fine else [anchor.scale])
         if not local_angles or not local_scales:
             continue
-        found = _rescan_neighbourhood(gray, prepared, options, anchor, factor,
-                                      local_angles, local_scales, image_space)
+        if verify_level:
+            # The candidate lives in the coarse frame; move it into the verify
+            # frame, refine there, then move the result back to full resolution.
+            anchor_here = _rescale_match(anchor, verify_factor / factor,
+                                         prepared, image_space)
+            found = _rescan_neighbourhood(refine_gray, refine_support, options,
+                                          anchor_here, 1.0,
+                                          local_angles, local_scales, image_space)
+            found = [_rescale_match(match, 1.0 / verify_factor, prepared, image_space)
+                     for match in found]
+        else:
+            found = _rescan_neighbourhood(gray, prepared, options, anchor, factor,
+                                          local_angles, local_scales, image_space)
         searched += len(local_angles) * len(local_scales)
         refined.extend(found)
 
@@ -1377,6 +1400,41 @@ def _fine_radius_px(prepared: PreparedSupport, options: SearchOptions) -> float:
     """
     support_shape = np.asarray(prepared.pixels).shape[:2]
     return float(max(options.fine_search_radius_px, max(support_shape) * 0.75))
+
+
+def _rescale_match(match: TemplateMatch, scale: float,
+                   prepared: PreparedSupport, image_space: Space) -> TemplateMatch:
+    """Re-express a match in a frame scaled by ``scale``.
+
+    Used to hand a coarse candidate to a finer or coarser pyramid level: scaling
+    both the linear part and the translation moves the whole pose, while the
+    rotation and the scale of the support are unchanged because a frame change
+    is a similarity.
+
+    Args:
+        match: Match in the source frame.
+        scale: Target-frame coordinates per source-frame coordinate.
+        prepared: Support the match was produced from.
+        image_space: Space of the image the source frame belongs to.
+
+    Returns:
+        The same match in the target frame.
+    """
+    matrix = np.array(match.support_to_image.matrix, dtype=np.float64)
+    matrix[0:2, :] *= scale
+    peak = None
+    if match.peak_xy is not None:
+        peak = (int(round(match.peak_xy[0] * scale)),
+                int(round(match.peak_xy[1] * scale)))
+    return TemplateMatch(
+        center=(match.center[0] * scale, match.center[1] * scale),
+        anchor=(match.anchor[0] * scale, match.anchor[1] * scale),
+        angle_rad=match.angle_rad, scale=match.scale, score=match.score,
+        support_to_image=make_mapping(matrix, source=prepared.support_space,
+                                      destination=image_space, kind="similarity"),
+        peak_xy=peak,
+        size_wh=(match.size_wh[0] * scale, match.size_wh[1] * scale),
+    )
 
 
 def _rescan_neighbourhood(gray: Array, prepared: PreparedSupport,
