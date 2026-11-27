@@ -123,7 +123,10 @@ manifest 的 `matching` 段、v2 的 `TemplateSearch`、GUI 三处同名可用�
   单趟路径上；阈值不需要重标。
 - v2 的 `fine_search.windows` / `neighborhood_radius` / `pyramid_scale` 现在报告引擎
   **实际使用**的窗口和比例，不再由接口层按自己的公式推算——数值可能和上一版不同，
-  但它们描述的是真实行为。
+  但它们描述的是真实行为。三个细节：
+  - `neighborhood_radius` 现在是**浮点数**（`0.5 × 半对角线 + expand` 带小数），上一版是取整的；
+  - 窗口宽度是 `ceil(2 × radius)`，比上一版的 `2 × radius + 1` 可能**窄 1 px**（定位结果不受影响）；
+  - shape 搜索的 `search_plan.threads` 恒为 `1`——它按角度串行，不参与位姿并行。
 
 ---
 

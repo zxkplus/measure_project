@@ -664,7 +664,10 @@ def _engine_diagnostics(found, options: TemplateSearch, *, algorithm: str,
             report.get("fine_neighborhoods", fine_positions) or 0),
         "fine_candidates": options.fine_candidates,
         "fine_angle_policy": options.fine_angle_policy,
-        "threads": search_threads(),
+        # The edge-direction search evaluates poses sequentially, so reporting
+        # the configured pose-thread count there would claim parallelism that
+        # does not happen.
+        "threads": 1 if algorithm == "shape" else search_threads(),
         "ignored_fields": list(ignored),
     }
     diagnostics = {
