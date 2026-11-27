@@ -18,6 +18,24 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 
 from .dialogs import ComposedMeasureDialog
+
+#: Default cap on the coarse stage's template side, in pixels. Mirrors the
+#: engine default so a model saved without the field is shown as it will run.
+DEFAULT_COARSE_TEMPLATE_SIDE = 128
+#: Default decimation exponent shown for a model that has not chosen one.
+DEFAULT_DECIMATE_EXPONENT = 1
+
+#: Halcon's Metric default: the part must keep the contrast it was taught with.
+DEFAULT_METRIC = "use_polarity"
+
+#: The matchers the engine offers; correlation stays the default.
+DEFAULT_ALGORITHM = "ncc"
+ALGORITHM_VALUES = ("ncc", "shape")
+
+#: Refine down to full resolution by default; a positive value trades
+#: accuracy for time by stopping at that pyramid level.
+DEFAULT_VERIFY_LEVEL = 0
+from measure.template_search import METRIC_VALUES
 from measure.preview import (
     PREPROCESSOR_TYPES,
     config_from_values,
@@ -44,6 +62,9 @@ class ToolPanel(ttk.Frame):
         on_angle_range_changed: (value: str) -> None  # '±30', '±45', '±90'
         on_max_matches_changed: (value: int) -> None
         on_pyramid_changed: (decimate: int, max_template_size: int) -> None
+        on_metric_changed: (metric: str) -> None
+        on_verify_level_changed: (level: int) -> None
+        on_algorithm_changed: (algorithm: str) -> None
         on_add_composed: (obj_type: str, label: str, params: dict) -> None
         on_tool_edit: (label: str) -> None
         on_tool_delete: (label: str) -> None
@@ -94,6 +115,9 @@ class ToolPanel(ttk.Frame):
         self.on_max_matches_changed: Optional[Callable] = None
         self.on_overlap_changed: Optional[Callable] = None
         self.on_pyramid_changed: Optional[Callable] = None
+        self.on_metric_changed: Optional[Callable] = None
+        self.on_verify_level_changed: Optional[Callable] = None
+        self.on_algorithm_changed: Optional[Callable] = None
         self.on_add_composed: Optional[Callable] = None
         self.on_tool_edit: Optional[Callable] = None
         self.on_tool_delete: Optional[Callable] = None
@@ -309,18 +333,24 @@ class ToolPanel(ttk.Frame):
         # the level alone would let the coarse template grow with the support.
         # Both paths (this panel and the shared engine) compute it identically.
         ttk.Label(self._template_form, text="金字塔粗筛").pack(anchor=tk.W, **pad)
-        self._pyramid_enabled_var = tk.BooleanVar(value=True)
-        pyramid_check = ttk.Checkbutton(
-            self._template_form, text="启用（粗搜在降采样图上做）",
-            variable=self._pyramid_enabled_var,
-            command=self._fire_pyramid,
-        )
-        pyramid_check.pack(anchor=tk.W, **pad)
+        # A number, not a checkbox: models in service are taught with
+        # decimate 2 and 3, and a checkbox could only ever show them as "on",
+        # running 4x/8x while the operator saw a tick.
+        pyramid_level_row = ttk.Frame(self._template_form)
+        pyramid_level_row.pack(fill=tk.X, **pad)
+        ttk.Label(pyramid_level_row, text="降采样指数").pack(side=tk.LEFT)
+        self._pyramid_decimate_var = tk.StringVar(value="1")
+        pyramid_level_entry = ttk.Entry(
+            pyramid_level_row, textvariable=self._pyramid_decimate_var, width=4)
+        pyramid_level_entry.pack(side=tk.LEFT, padx=4)
+        ttk.Label(pyramid_level_row, text="(0=关闭, n=缩小 2ⁿ 倍)").pack(side=tk.LEFT)
+        pyramid_level_entry.bind("<Return>", lambda _event: self._fire_pyramid())
+        pyramid_level_entry.bind("<FocusOut>", lambda _event: self._fire_pyramid())
 
         pyramid_size_row = ttk.Frame(self._template_form)
         pyramid_size_row.pack(fill=tk.X, **pad)
         ttk.Label(pyramid_size_row, text="模板边长上限").pack(side=tk.LEFT)
-        self._pyramid_size_var = tk.StringVar(value="400")
+        self._pyramid_size_var = tk.StringVar(value=str(DEFAULT_COARSE_TEMPLATE_SIDE))
         pyramid_size_entry = ttk.Entry(
             pyramid_size_row, textvariable=self._pyramid_size_var, width=6)
         pyramid_size_entry.pack(side=tk.LEFT, padx=4)
@@ -329,8 +359,65 @@ class ToolPanel(ttk.Frame):
         pyramid_size_entry.bind("<FocusOut>", lambda _event: self._fire_pyramid())
 
         self._pyramid_factor_label = ttk.Label(
-            self._template_form, text="实际比例: 1.00× (未降采样)", foreground="gray")
+            self._template_form, foreground="gray")
         self._pyramid_factor_label.pack(anchor=tk.W, **pad)
+        # Seed the label from the defaults so it cannot claim "未降采样" while
+        # the exponent above it asks for a decimated search.
+        self.update_pyramid_factor()
+
+        # Which matcher runs. Correlation scores preprocessed intensity; shape
+        # scores edge directions, which is far cheaper when the template nearly
+        # fills the frame but does not support multi-scale or sub-pixel border
+        # cases the same way.
+        algorithm_row = ttk.Frame(self._template_form)
+        algorithm_row.pack(fill=tk.X, **pad)
+        ttk.Label(algorithm_row, text="匹配算法 Algorithm").pack(side=tk.LEFT)
+        self._algorithm_var = tk.StringVar(value=DEFAULT_ALGORITHM)
+        algorithm_combo = ttk.Combobox(
+            algorithm_row, textvariable=self._algorithm_var, state="readonly",
+            width=8, values=list(ALGORITHM_VALUES))
+        algorithm_combo.pack(side=tk.LEFT, padx=4)
+        algorithm_combo.bind("<<ComboboxSelected>>",
+                             lambda _event: self._fire(self.on_algorithm_changed,
+                                                       self.algorithm()))
+        ttk.Label(algorithm_row, text="(ncc=灰度相关, shape=边缘方向)",
+                  foreground="gray").pack(side=tk.LEFT)
+
+        # Halcon's Metric. The tolerant mode accepts a part whose contrast is
+        # globally inverted, at the cost of also accepting the photographic
+        # negative of the taught pattern.
+        metric_row = ttk.Frame(self._template_form)
+        metric_row.pack(fill=tk.X, **pad)
+        ttk.Label(metric_row, text="极性 Metric").pack(side=tk.LEFT)
+        self._metric_var = tk.StringVar(value=DEFAULT_METRIC)
+        metric_combo = ttk.Combobox(
+            metric_row, textvariable=self._metric_var, state="readonly", width=20,
+            values=["use_polarity", "ignore_global_polarity"])
+        metric_combo.pack(side=tk.LEFT, padx=4)
+        metric_combo.bind("<<ComboboxSelected>>",
+                          lambda _event: self._fire(self.on_metric_changed,
+                                                    self.metric()))
+        ttk.Label(metric_row, text="(反相工件选 ignore)",
+                  foreground="gray").pack(side=tk.LEFT)
+
+        # Halcon's NumLevels second value: stop refining above full resolution.
+        # Every level skipped roughly halves the refinement cost and doubles its
+        # error, so 0 (full resolution) stays the default.
+        verify_row = ttk.Frame(self._template_form)
+        verify_row.pack(fill=tk.X, **pad)
+        ttk.Label(verify_row, text="验证层 NumLevels 下限").pack(side=tk.LEFT)
+        self._verify_level_var = tk.StringVar(value=str(DEFAULT_VERIFY_LEVEL))
+        verify_entry = ttk.Entry(
+            verify_row, textvariable=self._verify_level_var, width=4)
+        verify_entry.pack(side=tk.LEFT, padx=4)
+        ttk.Label(verify_row, text="(0=追到原分辨率, n=只到第 n 层)",
+                  foreground="gray").pack(side=tk.LEFT)
+        verify_entry.bind("<Return>",
+                          lambda _event: self._fire(self.on_verify_level_changed,
+                                                    self.verify_level()))
+        verify_entry.bind("<FocusOut>",
+                          lambda _event: self._fire(self.on_verify_level_changed,
+                                                    self.verify_level()))
 
         # ROI display (read-only)
         self._roi_label = ttk.Label(tmpl_frame, text="ROI: (未设置)", foreground="gray")
@@ -711,26 +798,95 @@ class ToolPanel(ttk.Frame):
         """The committed preprocessor config (what the next teach will use)."""
         return dict(self._preproc_committed)
 
-    def pyramid_config(self) -> tuple:
-        """Return ``(decimate, max_template_size)`` from the current widgets.
+    def matching_kwargs(self) -> dict:
+        """Return every matching setting the teach call needs, as keyword args.
 
-        ``decimate`` is 1/0 (the engine only uses it as an on/off switch) and
-        the ratio comes from ``max_template_size``.  A malformed or non-positive
-        size falls back to 400 px instead of silently disabling the pyramid.
+        Teaching used to pick the widgets apart one by one at the call site, so a
+        newly added control was shown to the operator and then silently ignored:
+        a model taught with "shape" selected was saved with the default "ncc"
+        and ran correlation forever. Building the whole set in one place means a
+        new control only has to be added here.
+
+        Returns:
+            Keyword arguments accepted by
+            ``MultiTargetWorkflow.teach_template``.
         """
-        enabled = bool(self._pyramid_enabled_var.get())
+        decimate, max_side = self.pyramid_config()
+        return {
+            "match_score_threshold": float(self._score_var.get()),
+            "angle_step": float(self._angle_step_var.get()),
+            "max_matches": int(self._max_matches_var.get()),
+            "overlap": float(self._overlap_var.get()),
+            "decimate_exponent": int(decimate),
+            "coarse_template_side": int(max_side),
+            "algorithm": self.algorithm(),
+            "metric": self.metric(),
+            "min_verify_level": self.verify_level(),
+        }
+
+    def algorithm(self) -> str:
+        """Return the selected matcher: ``ncc`` or ``shape``."""
+        value = str(self._algorithm_var.get()).strip()
+        return value if value in ALGORITHM_VALUES else DEFAULT_ALGORITHM
+
+    def set_algorithm(self, algorithm: str) -> None:
+        """Restore the algorithm selector (project load / model switch)."""
+        value = str(algorithm or "").strip()
+        self._algorithm_var.set(value if value in ALGORITHM_VALUES else DEFAULT_ALGORITHM)
+
+    def verify_level(self) -> int:
+        """Return how deep the refinement tracks (0 = full resolution)."""
+        try:
+            return max(0, int(float(self._verify_level_var.get())))
+        except (TypeError, ValueError):
+            return DEFAULT_VERIFY_LEVEL
+
+    def set_verify_level(self, level: int) -> None:
+        """Restore the verification-level widget (project load)."""
+        try:
+            value = max(0, int(level))
+        except (TypeError, ValueError):
+            value = DEFAULT_VERIFY_LEVEL
+        self._verify_level_var.set(str(value))
+
+    def metric(self) -> str:
+        """Return the selected Halcon Metric policy."""
+        value = str(self._metric_var.get()).strip()
+        return value if value in METRIC_VALUES else DEFAULT_METRIC
+
+    def set_metric(self, metric: str) -> None:
+        """Restore the Metric widget (project load / model switch)."""
+        value = str(metric or "").strip()
+        self._metric_var.set(value if value in METRIC_VALUES else DEFAULT_METRIC)
+
+    def pyramid_config(self) -> tuple:
+        """Return ``(decimate_exponent, coarse_template_side)`` from the widgets.
+
+        ``decimate_exponent`` is the real exponent the engine applies: 0 turns
+        the coarse pyramid off, ``n`` targets ``2**-n`` resolution. It is a
+        number rather than a flag because taught models use 2 and 3, which a
+        checkbox could not express.
+
+        A blank or malformed field falls back to the engine default instead of
+        silently disabling the pyramid; a negative exponent clamps to 0.
+        """
+        try:
+            decimate = int(float(self._pyramid_decimate_var.get()))
+        except (TypeError, ValueError):
+            decimate = DEFAULT_DECIMATE_EXPONENT
+        decimate = max(0, decimate)
         try:
             size = int(float(self._pyramid_size_var.get()))
         except (TypeError, ValueError):
-            size = 400
+            size = DEFAULT_COARSE_TEMPLATE_SIDE
         if size <= 0:
-            size = 400
-        return (1 if enabled else 0, size)
+            size = DEFAULT_COARSE_TEMPLATE_SIDE
+        return (decimate, size)
 
     def set_pyramid_config(self, decimate: int, max_template_size: int,
                            template_longest_side: Optional[int] = None) -> None:
         """Restore the pyramid widgets (project load / model switch)."""
-        self._pyramid_enabled_var.set(bool(int(decimate)))
+        self._pyramid_decimate_var.set(str(int(decimate)))
         self._pyramid_size_var.set(str(int(max_template_size)))
         self.update_pyramid_factor(template_longest_side)
 
@@ -739,17 +895,21 @@ class ToolPanel(ttk.Frame):
 
         Args:
             template_longest_side: Longest side of the current template. Without
-                it only the size cap can be shown, because the ratio is
-                ``min(1, cap / side)``.
+                it only the bounds can be shown, because the ratio depends on
+                the support size.
         """
         decimate, size = self.pyramid_config()
         if not decimate:
             text = "实际比例: 1.00× (未降采样)"
         elif template_longest_side and template_longest_side > 0:
-            factor = min(1.0, size / float(template_longest_side))
+            # Same rule the engine applies: the more aggressive of the exponent
+            # and the side cap. Showing the cap alone would report 1.00x for a
+            # small support that the exponent does decimate.
+            factor = min(2.0 ** -decimate, size / float(template_longest_side))
+            factor = min(1.0, max(factor, min(1.0, 6.0 / float(template_longest_side))))
             text = f"实际比例: {factor:.2f}×"
         else:
-            text = f"实际比例: ≤1.00× (上限 {size}px)"
+            text = f"实际比例: ≤{2.0 ** -decimate:.2f}× (上限 {size}px)"
         self._pyramid_factor_label.config(text=text)
 
     def _fire_pyramid(self) -> None:
@@ -767,7 +927,10 @@ class ToolPanel(ttk.Frame):
                             preprocessor: Optional[Dict[str, Any]] = None,
                             decimate_exponent: Optional[int] = None,
                             coarse_template_side: Optional[int] = None,
-                            template_longest_side: Optional[int] = None):
+                            template_longest_side: Optional[int] = None,
+                            metric: Optional[str] = None,
+                            min_verify_level: Optional[int] = None,
+                            algorithm: Optional[str] = None):
         """Set matching parameter widgets programmatically (for project restore).
 
         Args:
@@ -786,6 +949,10 @@ class ToolPanel(ttk.Frame):
             coarse_template_side: Longest template side on the coarse level.
             template_longest_side: Current template side, only used to render the
                 actual downsampling ratio next to the widgets.
+            metric: Halcon Metric policy; ``None`` keeps the current selection.
+            min_verify_level: How deep refinement tracks; ``None`` keeps the
+                current widget value.
+            algorithm: Matcher to run; ``None`` keeps the current selection.
         """
         if preprocessor:
             self.apply_preprocessor_config(dict(preprocessor))
@@ -805,6 +972,12 @@ class ToolPanel(ttk.Frame):
             self.set_pyramid_config(decimate_exponent,
                                     coarse_template_side if coarse_template_side is not None else 128,
                                     template_longest_side)
+        if metric is not None:
+            self.set_metric(metric)
+        if min_verify_level is not None:
+            self.set_verify_level(min_verify_level)
+        if algorithm is not None:
+            self.set_algorithm(algorithm)
 
     def get_alignment_mode(self) -> str:
         """Return the selected alignment mode key.

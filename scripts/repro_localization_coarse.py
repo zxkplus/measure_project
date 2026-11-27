@@ -58,7 +58,9 @@ if str(REPO_ROOT) not in sys.path:
 from fastapi.testclient import TestClient  # noqa: E402
 
 from measure_api.v2.app import create_app  # noqa: E402
-from measure_api.v2.families.templates import _decimate, _variant  # noqa: E402
+from measure.template_search import (  # noqa: E402
+    decimate_pixels, render_variant, variant_size,
+)
 from measure_api.v2.models import ServiceSettings  # noqa: E402
 from measure_api.v2.versions import runtime_identity  # noqa: E402
 
@@ -353,11 +355,16 @@ def ncc_curve(pixels: np.ndarray, search: np.ndarray,
     area = np.ascontiguousarray(search, dtype=np.float32)
     scores = []
     for angle in angles:
-        variant, mask, _, _ = _variant(pixels, float(angle), 1.0,
-                                       (search.shape[1], search.shape[0]))
-        if variant is None:
+        radians = float(np.deg2rad(angle))
+        width, height = variant_size(pixels, radians, 1.0, origin="pixel_center")
+        if width > search.shape[1] or height > search.shape[0]:
             scores.append(float("nan"))
             continue
+        rendered = render_variant(np.asarray(pixels, dtype=np.float32), radians, 1.0,
+                                  origin="pixel_center")
+        variant = rendered.pixels
+        mask = (np.ones(variant.shape[:2], np.uint8) if rendered.mask is None
+                else rendered.mask)
         correlation = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED,
                                         mask=None if np.all(mask) else mask)
         correlation[~np.isfinite(correlation)] = -1
@@ -388,7 +395,9 @@ def measure_curves(package: Package, exchange_root: Path,
                  float(package.search.get("pyramid_max_template_size", 400))
                  / max(pixels.shape))
     factor = min(1.0, max(factor, min(1.0, 6.0 / min(pixels.shape))))
-    coarse_pixels, coarse_search, _, _, _ = _decimate(pixels, image, factor, None)
+    sigma = 0.5 / factor
+    coarse_pixels, _ = decimate_pixels(pixels, factor, sigma=sigma)
+    coarse_search, _ = decimate_pixels(image, factor, sigma=sigma)
 
     center = replay["center"]
     radius = 265

@@ -74,6 +74,7 @@ from measure.measure_template import (
     TemplatePoint,
     ThresholdPreprocessor,
     _PREPROCESSOR_REGISTRY,
+    DEFAULT_FINE_CANDIDATES,
     pyramid_setting,
     _deserialize_preprocessor,
 )
@@ -1227,6 +1228,10 @@ class MultiTargetWorkflow:
         coarse_angle_step: float = 5.0,
         decimate_exponent: int = 0,
         coarse_template_side: int = 128,
+        metric: str = "use_polarity",
+        min_verify_level: int = 0,
+        algorithm: str = "ncc",
+        min_contrast: float = 0.0,
     ):
         """
         Define the template from a rotated bounding box on the reference image.
@@ -1247,6 +1252,9 @@ class MultiTargetWorkflow:
             coarse_angle_step: Step size for coarse angle search.
             decimate_exponent: Pyramid decimation level (0=disabled).
             coarse_template_side: Max template side length after decimation.
+            metric: Halcon Metric policy: ``use_polarity`` requires the part to
+                keep its contrast, ``ignore_global_polarity`` also accepts a
+                globally inverted one.
         """
         self._alignment.teach(
             reference_image, center, size, angle_deg,
@@ -1257,6 +1265,10 @@ class MultiTargetWorkflow:
             coarse_fine=coarse_fine, coarse_angle_step=coarse_angle_step,
             decimate_exponent=decimate_exponent,
             coarse_template_side=coarse_template_side,
+            metric=metric,
+            min_verify_level=min_verify_level,
+            algorithm=algorithm,
+            min_contrast=min_contrast,
         )
 
         # Keep the workflow-level matching cache in sync with what was taught.
@@ -1327,6 +1339,12 @@ class MultiTargetWorkflow:
                     multi_target=False,
                     decimate_exponent=decimate_exponent,
                     coarse_template_side=_pms,
+                    # The tool's own matcher settings. Without these the tool
+                    # silently ran correlation with strict polarity no matter
+                    # what the dialog showed.
+                    algorithm=str(params.get("algorithm", "ncc")),
+                    metric=str(params.get("metric", "use_polarity")),
+                    min_verify_level=max(0, int(params.get("min_verify_level", 0))),
                 )
                 self._template_match_points[label] = tp
 
@@ -2010,6 +2028,10 @@ class MultiTargetWorkflow:
                 "coarse_angle_step": float(tp.coarse_angle_step),
                 "decimate_exponent": tp.decimate_exponent,
                 "coarse_template_side": tp.coarse_template_side,
+                "metric": getattr(tp, "metric", "use_polarity"),
+                "min_verify_level": getattr(tp, "min_verify_level", 0),
+                "algorithm": getattr(tp, "algorithm", "ncc"),
+                "min_contrast": getattr(tp, "min_contrast", 0.0),
             }),
             "physical_scale_mm": self._physical_scale_mm,
             "objects": objects,
@@ -2220,6 +2242,10 @@ class MultiTargetWorkflow:
                 coarse_angle_step=float(matching["coarse_angle_step"]),
                 decimate_exponent=int(pyramid_setting(matching, "decimate_exponent", 0)),
                 coarse_template_side=int(pyramid_setting(matching, "coarse_template_side", 128)),
+                metric=str(matching.get("metric", "use_polarity")),
+                min_verify_level=max(0, int(matching.get("min_verify_level", 0))),
+                algorithm=str(matching.get("algorithm", "ncc")),
+                min_contrast=max(0.0, float(matching.get("min_contrast", 0.0))),
             )
 
         # Translate the manifest's dependency references back to label form.
@@ -2335,6 +2361,12 @@ class MultiTargetWorkflow:
         # 初始化 pyramid 相关属性
         tp.decimate_exponent = pyramid_setting(meta, "decimate_exponent", 0)
         tp.coarse_template_side = pyramid_setting(meta, "coarse_template_side", 128)
+        # __new__ bypasses __init__: every attribute it sets must be restored here.
+        tp.fine_candidates = int(meta.get("fine_candidates", DEFAULT_FINE_CANDIDATES))
+        tp.metric = str(meta.get("metric", "use_polarity"))
+        tp.min_verify_level = max(0, int(meta.get("min_verify_level", 0)))
+        tp.algorithm = str(meta.get("algorithm", "ncc"))
+        tp.min_contrast = max(0.0, float(meta.get("min_contrast", 0.0)))
         # 走 TemplatePoint 的唯一实现，避免第 3 份忽略 decimate 指数的算法
         tp._pyramid_scale = tp._compute_pyramid_scale()
         wf._alignment._template_point = tp

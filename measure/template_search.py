@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
 
@@ -68,6 +69,39 @@ class SupportSpec:
             object.__setattr__(self, "mask", np.array(mask, dtype=bool, copy=True))
 
 
+#: Pose variants share the search window and differ only in the support's
+#: rotation, so evaluating them concurrently is a pure speed-up: the recorded
+#: matches are identical at any thread count. Single-threaded compute workers
+#: gain roughly 4.8x at 16 pose threads on a rotation search.
+DEFAULT_SEARCH_THREADS = 16
+MAX_SEARCH_THREADS = 64
+
+#: Upper bound on the working set the concurrent pose evaluation may hold.
+POSE_GRID_MEMORY_BYTES = 768 * 1024 * 1024
+
+
+def search_threads() -> int:
+    """Return how many pose variants one search may evaluate concurrently.
+
+    Returns:
+        ``MEASURE_TEMPLATE_SEARCH_THREADS`` when it parses, bounded to
+        ``1..MAX_SEARCH_THREADS``; otherwise the default lowered to the CPU
+        count, never below one.
+    """
+    configured = os.getenv("MEASURE_TEMPLATE_SEARCH_THREADS", "").strip()
+    if configured:
+        try:
+            return max(1, min(int(configured), MAX_SEARCH_THREADS))
+        except ValueError:
+            pass  # An unusable value is treated as unconfigured.
+    machines = os.cpu_count() or MAX_SEARCH_THREADS
+    return max(1, min(DEFAULT_SEARCH_THREADS, machines))
+
+
+#: The polarity policies Halcon's ``Metric`` offers.
+METRIC_VALUES = ("use_polarity", "ignore_global_polarity")
+
+
 @dataclass(frozen=True)
 class SearchOptions:
     """NCC localization policy; angles are clockwise radians, scales dimensionless."""
@@ -93,6 +127,38 @@ class SearchOptions:
     angle_list: Optional[Tuple[float, ...]] = None
     scale_list: Optional[Tuple[float, ...]] = None
     inplace_variants: bool = False
+    # --- Halcon-aligned controls -------------------------------------------
+    #: ``"ncc"`` correlates preprocessed intensity; ``"shape"`` correlates edge
+    #: gradient directions. Both share the pyramid cascade and the pruning.
+    algorithm: str = "ncc"
+    #: Halcon's Greediness: 0 rejects only candidates that provably cannot reach
+    #: the threshold, 1 rejects as soon as the remaining levels cannot help.
+    #: Our correlation cannot be inspected mid-sum, so the bound is applied
+    #: between pyramid levels rather than between model points.
+    greediness: float = 0.0
+    #: When true the level count is derived from the support size and the two
+    #: side limits; when false ``decimate_exponent`` is the level count and the
+    #: historical single-jump behaviour is kept.
+    auto_levels: bool = True
+    #: Coarsest level at which a match must still be verified (Halcon's second
+    #: ``NumLevels`` value). Levels above it only produce candidates.
+    min_verify_level: int = 0
+    #: Shape-only: edge points weaker than this are dropped from the model. A
+    #: zero value selects a percentile of the support's gradient magnitude.
+    min_contrast: float = 0.0
+    #: Pose-evaluation threads; 0 asks the engine to decide from the environment
+    #: and the CPU count. Results do not depend on this value.
+    search_threads: int = 0
+    #: Halcon's Metric: ``use_polarity`` requires the part to keep its contrast,
+    #: ``ignore_global_polarity`` also accepts a globally inverted one. The
+    #: latter is a score magnitude, so it accepts the photographic negative too
+    #: and therefore trades some discrimination for that tolerance.
+    metric: str = "use_polarity"
+
+    @property
+    def polarity_invariant(self) -> bool:
+        """Return whether a globally inverted part should still match."""
+        return self.metric == "ignore_global_polarity"
 
     def __post_init__(self) -> None:
         require_finite((self.score_threshold, self.coarse_score_threshold), "search.score")
@@ -121,6 +187,22 @@ class SearchOptions:
             raise contract_error("contract.invalid_parameter",
                                  "fine_candidates must be >= 1 or None",
                                  "search.fine_candidates")
+        if self.algorithm not in ("ncc", "shape"):
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown algorithm {self.algorithm!r}", "search.algorithm")
+        if not (0.0 <= self.greediness <= 1.0):
+            raise contract_error("contract.invalid_parameter",
+                                 "greediness must be in [0, 1]", "search.greediness")
+        if self.min_verify_level < 0:
+            raise contract_error("contract.invalid_parameter",
+                                 "min_verify_level must be >= 0",
+                                 "search.min_verify_level")
+        if self.min_contrast < 0.0:
+            raise contract_error("contract.invalid_parameter",
+                                 "min_contrast must be >= 0", "search.min_contrast")
+        if self.metric not in METRIC_VALUES:
+            raise contract_error("contract.invalid_parameter",
+                                 f"unknown metric {self.metric!r}", "search.metric")
 
     def resolved_fine_candidates(self) -> Optional[int]:
         """Return how many coarse neighbourhoods the fine stage may refine.
@@ -501,13 +583,21 @@ def decimate_pixels(image: Array, factor: float, *, sigma: float
     return coarse, matrix
 
 
-def correlate(search: Array, template: Array, mask: Optional[Array] = None) -> Array:
+def correlate(search: Array, template: Array, mask: Optional[Array] = None, *,
+              metric: str = "use_polarity") -> Array:
     """Return the normalised cross-correlation score map of one template.
+
+    This is the single place the correlation score is computed; the scanning
+    loops call it rather than reaching for ``cv2.matchTemplate`` themselves.
+    Masked and unmasked variants use the same coefficient, so a mask changes
+    which pixels count but not the scale the score is reported on.
 
     Args:
         search: Search-area pixels.
         template: Rendered variant pixels.
         mask: Optional variant footprint mask; ``None`` uses ordinary NCC.
+        metric: ``use_polarity`` keeps the sign, ``ignore_global_polarity``
+            takes the magnitude so a globally inverted part still scores.
 
     Returns:
         A score map with every non-finite value replaced by ``-1``, so masked
@@ -515,11 +605,25 @@ def correlate(search: Array, template: Array, mask: Optional[Array] = None) -> A
     """
     area = np.ascontiguousarray(search, dtype=np.float32)
     variant = np.ascontiguousarray(template, dtype=np.float32)
-    if mask is None:
+    if mask is None or bool(np.asarray(mask).all()):
+        # An entirely valid mask is ordinary NCC. OpenCV's masked path computes
+        # the same score to within ~1e-6 but takes about four times as long, and
+        # ``render_variant`` hands back a full mask for any unrotated support.
         scores = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED)
     else:
+        # The mean-subtracted coefficient with a mask is the correct NCC: the
+        # mean and the deviation are taken over the valid pixels only. The masked
+        # path used to fall back to the plain correlation coefficient, which is
+        # not normalised the same way, so a masked variant scored on a different
+        # scale than an unmasked one.
         scores = cv2.matchTemplate(area, variant, cv2.TM_CCOEFF_NORMED,
                                    mask=np.ascontiguousarray(mask, dtype=np.float32))
+    if metric == "ignore_global_polarity":
+        # A globally inverted part correlates with the negated score, so the
+        # magnitude accepts both. It must happen before the invalid sentinel
+        # below, otherwise the -1 that marks a non-finite score becomes a 1 and
+        # turns an unusable region into a perfect match.
+        scores = np.abs(scores)
     return np.nan_to_num(scores, nan=-1.0, posinf=-1.0, neginf=-1.0)
 
 
@@ -627,7 +731,13 @@ def peaks(scores: Array, threshold: float, limit: int = 0,
         if xs.size == 0:
             return []
         values = finite[ys, xs]
-        order = np.argsort(-values)
+        # A flat score plateau (periodic or synthetic parts) ties exactly, so the
+        # order must not depend on the sort algorithm: a stable sort keeps the
+        # raster order ``nonzero`` produced, which makes the top-left cell win —
+        # the same choice ``peak_argmax`` and ``minMaxLoc`` make. An unstable
+        # sort returned an arbitrary cell of the plateau and moved the reported
+        # centre by whole pixels between callers.
+        order = np.argsort(-values, kind="stable")
         if limit and order.size > limit:
             order = order[:limit]
         return [(float(xs[i]), float(ys[i]), float(values[i])) for i in order]
@@ -731,14 +841,96 @@ def suppress(candidates: List[TemplateMatch], max_overlap: float,
 
 
 
+#: Two candidates whose scores are this close, while their centres are far
+#: apart, mean the frame does not determine a unique answer. A periodic pattern
+#: scores every repeat of the target almost equally well, and the reported
+#: position is then one of several valid places rather than *the* place.
+AMBIGUITY_SCORE_MARGIN = 0.05
+
+#: How far apart two candidates count as separate places, as a fraction of the
+#: support's longest side. Closer than this they are one target found twice.
+AMBIGUITY_SEPARATION_RATIO = 0.5
+
+
+def ambiguity_report(candidates: List[TemplateMatch], support_longest: float,
+                     margin: float = AMBIGUITY_SCORE_MARGIN,
+                     separation_ratio: float = AMBIGUITY_SEPARATION_RATIO) -> dict:
+    """Describe whether more than one distinct place matches nearly as well.
+
+    A repeated pattern makes every instance score alike, so the strongest match
+    is one of several equally valid answers and its position carries no
+    information about which instance the caller meant. Reporting that is the
+    difference between "found it" and "found *a* it".
+
+    Args:
+        candidates: Deduplicated candidates, before the match count is applied.
+        support_longest: Longest support side, in image pixels.
+        margin: Score difference still counted as "nearly as well".
+        separation_ratio: Minimum centre separation, as a fraction of
+            ``support_longest``.
+
+    Returns:
+        Diagnostic fields; ``ambiguous`` is ``True`` only when a rival exists.
+    """
+    report: dict = {"ambiguous": False, "distinct_candidates": len(candidates)}
+    if len(candidates) < 2:
+        return report
+    ordered = sorted(candidates, key=lambda match: match.score, reverse=True)
+    best = ordered[0]
+    separation = max(1.0, float(support_longest) * separation_ratio)
+    rivals = []
+    for other in ordered[1:]:
+        if best.score - other.score > margin:
+            continue
+        distance = math.hypot(other.center[0] - best.center[0],
+                              other.center[1] - best.center[1])
+        if distance >= separation:
+            rivals.append((other, distance))
+    if not rivals:
+        return report
+    rival, distance = rivals[0]
+    report.update({
+        "ambiguous": True,
+        "runner_up_score": float(rival.score),
+        "runner_up_distance_px": float(distance),
+        "rival_count": len(rivals),
+    })
+    return report
+
+
+def _support_longest(prepared: PreparedSupport) -> float:
+    """Return the longest support side in pixels."""
+    return float(max(np.asarray(prepared.pixels).shape[:2]))
+
+
 def _coarse_grid(values: List[float], step: float) -> List[float]:
-    """Reduce a fine grid to the coarse values spaced at least ``step`` apart."""
+    """Reduce a fine grid to the coarse values spaced at least ``step`` apart.
+
+    The thinning is phased on the value closest to zero rather than on the first
+    entry. Zero rotation is the cheapest pose to fit -- a support as wide as the
+    frame fits only there -- and a grid whose phase happened to skip it left such
+    a model with no usable pose at all, so the whole search failed for a reason
+    that had nothing to do with the image.
+
+    Args:
+        values: Fine grid, ascending.
+        step: Minimum spacing of the coarse values.
+
+    Returns:
+        The coarse subset, still ascending and still containing both ends.
+    """
     if not values:
         return []
-    coarse = [values[0]]
-    for value in values[1:]:
-        if abs(value - coarse[-1]) >= step - 1e-12:
-            coarse.append(value)
+    anchor = min(range(len(values)), key=lambda index: abs(values[index]))
+    coarse = [values[anchor]]
+    for index in range(anchor - 1, -1, -1):
+        if coarse[0] - values[index] >= step - 1e-12:
+            coarse.insert(0, values[index])
+    for index in range(anchor + 1, len(values)):
+        if values[index] - coarse[-1] >= step - 1e-12:
+            coarse.append(values[index])
+    if coarse[0] != values[0]:
+        coarse.insert(0, values[0])
     if coarse[-1] != values[-1]:
         coarse.append(values[-1])
     return coarse
@@ -791,32 +983,43 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
     else:
         coarse_angles, coarse_scales = fine_angles, fine_scales
 
+    # When there is no second pass this one is the answer, so it must refine the
+    # peaks the caller asked for; a pass that only seeds neighbourhoods stays at
+    # integer peaks because the refinement below will subpixel them anyway.
+    single_pass = not decimated and not options.coarse_fine
     coarse = _scan_once(scan_gray, scan_support, SearchOptions(
         score_threshold=min(options.score_threshold, options.coarse_score_threshold),
-        max_matches=0, max_overlap=options.max_overlap, subpixel=False,
+        max_matches=0, max_overlap=options.max_overlap,
+        subpixel=bool(options.subpixel) if single_pass else False,
         coarse_fine=False, angle_list=tuple(coarse_angles),
-        scale_list=tuple(coarse_scales),
+        scale_list=tuple(coarse_scales), metric=options.metric,
     ), image_space)
     diagnostics = {
         "requested_variant_count": requested,
         "coarse_poses": len(coarse_angles) * len(coarse_scales),
+        "algorithm": options.algorithm,
+        "pyramid_levels": _resolve_levels(prepared, options),
+        "search_strategy": "two_stage",
     }
     if decimated:
         diagnostics["pyramid_factor"] = float(factor)
     if not coarse.valid or coarse.value is None:
         diagnostics.update({"searched_variant_count": 0, "pruned_variant_count": 0,
-                            "unavailable_variant_count": 0, "search_complete": True})
-        return invalid(image_space, "no_matches", diagnostics)
+                            "unavailable_variant_count": coarse.diagnostics.get(
+                                "unavailable_variant_count", 0),
+                            "search_complete": True})
+        return invalid(image_space, coarse.reason or "no_matches", diagnostics)
 
-    if not decimated and not options.coarse_fine:
+    if single_pass:
         # One pass already covered the whole requested grid at full resolution,
-        # so the coarse matches are final: rescanning them would repeat every
-        # correlation for a subpixel refinement that pass did not ask for.
+        # and it ran with the caller's own refinement, so its matches are final:
+        # rescanning them would repeat every correlation for nothing.
         diagnostics.update({
             "searched_variant_count": len(fine_angles) * len(fine_scales),
             "ncc_evaluations": len(fine_angles) * len(fine_scales),
             "pruned_variant_count": 0,
             "fine_neighborhoods": 0,
+            "search_strategy": "single",
             "unavailable_variant_count": coarse.diagnostics.get(
                 "unavailable_variant_count", 0),
             "search_complete": coarse.diagnostics.get("search_complete", True),
@@ -827,7 +1030,9 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
         # deduplicated exactly as the two-stage path does.
         accepted = [m for m in coarse.value.matches
                     if m.score >= options.score_threshold - 1e-12]
-        selected = suppress(accepted, options.max_overlap)
+        distinct = suppress(accepted, options.max_overlap)
+        diagnostics.update(ambiguity_report(distinct, _support_longest(prepared)))
+        selected = distinct
         if options.max_matches:
             selected = selected[: options.max_matches]
         if not selected:
@@ -841,11 +1046,29 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
     # every neighbourhood the coarse stage kept; fine_candidates (or the
     # MEASURE_TEMPLATE_FINE_CANDIDATES environment variable) bounds it for a
     # symmetric part where near-equal peaks each cost a full rescan.
-    neighbourhoods = suppress(coarse.value.matches, options.max_overlap,
-                              options.resolved_fine_candidates() or 0)
+    # The greedy selection is order-stable, so capping the finished list and
+    # stopping the loop at the cap keep the same prefix; taking the prefix here
+    # lets the diagnostics report both the available and the refined count.
+    available = suppress(coarse.value.matches, options.max_overlap)
+    fine_limit = options.resolved_fine_candidates()
+    neighbourhoods = available[:fine_limit] if fine_limit else available
+    diagnostics["fine_neighborhoods_available"] = len(available)
+
+    # Halcon's second NumLevels value: track the candidates down to this level
+    # instead of all the way to full resolution. Each level skipped multiplies
+    # the refinement's error by two, so this is an accuracy-for-time trade and
+    # the default (0) keeps the historical full-resolution refinement.
+    verify_level = min(max(0, int(options.min_verify_level)),
+                       _levels_by_min_side(prepared))
+    verify_factor = 2.0 ** -verify_level if verify_level else 1.0
+    refine_gray, refine_support = gray, prepared
+    if verify_level:
+        refine_gray, refine_support = _decimate_pair(gray, prepared, verify_factor)
+    diagnostics["verify_level"] = verify_level
 
     refined: List[TemplateMatch] = []
     searched = 0
+    refine_stats: dict = {}
     for anchor in neighbourhoods:
         local_angles = ([a for a in fine_angles
                          if abs(a - anchor.angle_rad) <= options.coarse_angle_step_rad + 1e-12]
@@ -855,12 +1078,28 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
                         if options.coarse_fine else [anchor.scale])
         if not local_angles or not local_scales:
             continue
-        found = _rescan_neighbourhood(gray, prepared, options, anchor, factor,
-                                      local_angles, local_scales, image_space)
+        diagnostics["fine_poses_per_neighborhood"] = len(local_angles) * len(local_scales)
+        if verify_level:
+            # The candidate lives in the coarse frame; move it into the verify
+            # frame, refine there, then move the result back to full resolution.
+            anchor_here = _rescale_match(anchor, verify_factor / factor,
+                                         prepared, image_space)
+            found = _rescan_neighbourhood(refine_gray, refine_support, options,
+                                          anchor_here, 1.0,
+                                          local_angles, local_scales, image_space,
+                                          refine_stats)
+            found = [_rescale_match(match, 1.0 / verify_factor, prepared, image_space)
+                     for match in found]
+        else:
+            found = _rescan_neighbourhood(gray, prepared, options, anchor, factor,
+                                          local_angles, local_scales, image_space,
+                                          refine_stats)
         searched += len(local_angles) * len(local_scales)
         refined.extend(found)
 
-    selected = suppress(refined, options.max_overlap)
+    distinct = suppress(refined, options.max_overlap)
+    diagnostics.update(ambiguity_report(distinct, _support_longest(prepared)))
+    selected = distinct
     if options.max_matches:
         selected = selected[: options.max_matches]
     diagnostics.update({
@@ -868,7 +1107,279 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
         "ncc_evaluations": searched,
         "pruned_variant_count": len(coarse.value.matches),
         "fine_neighborhoods": len(neighbourhoods),
-        "unavailable_variant_count": 0,
+        "unavailable_variant_count": int(
+            coarse.diagnostics.get("unavailable_variant_count", 0) or 0)
+            + int(refine_stats.get("unavailable", 0)),
+        "search_complete": True,
+    })
+    # Only the full-resolution refinement picks the windows, and only it can say
+    # how large they were; a verify-level rescan happens in a decimated frame.
+    if not verify_level:
+        diagnostics["fine_search_radius"] = _fine_radius_px(prepared, options)
+        diagnostics["fine_windows"] = list(refine_stats.get("windows", ()))
+        diagnostics["bounded_outside"] = bool(refine_stats.get("bounded_outside", False))
+    if not selected:
+        return invalid(image_space, "no_matches", diagnostics)
+    return observed(image_space, MatchSet(matches=tuple(selected)), diagnostics)
+
+
+def _shape_pose_matrix(angle_rad: float, scale: float,
+                       anchor_support: Tuple[float, float],
+                       anchor_image: Tuple[float, float]) -> np.ndarray:
+    """Return the support-to-image similarity matrix for one shape pose.
+
+    The linear part uses the same convention as ``_variant_geometry``, so a
+    shape pose and a correlated pose mean the same rotation. The translation is
+    solved from the anchor rather than re-derived from a rendered box, because
+    the shape model's box tightly bounds its points and therefore is not the
+    variant box.
+
+    Args:
+        angle_rad: Clockwise pose angle in radians.
+        scale: Dimensionless pose scale.
+        anchor_support: Anchor position in support coordinates, ``(x, y)``.
+        anchor_image: Where that anchor lands in the image, ``(x, y)``.
+
+    Returns:
+        A 3x3 homogeneous similarity matrix.
+    """
+    alpha = scale * math.cos(angle_rad)
+    beta = scale * math.sin(angle_rad)
+    anchor_x, anchor_y = anchor_support
+    image_x, image_y = anchor_image
+    return np.array([
+        [alpha, -beta, image_x - (alpha * anchor_x - beta * anchor_y)],
+        [beta, alpha, image_y - (beta * anchor_x + alpha * anchor_y)],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float64)
+
+
+def _shape_search(gray: Array, prepared: PreparedSupport, options: SearchOptions,
+                  image_space: Space) -> Observation[MatchSet]:
+    """Locate a support by edge direction instead of intensity correlation.
+
+    A coarse pass scores a decimated copy over the whole frame, the way Halcon's
+    top pyramid level does, and each surviving peak is then refined at full
+    resolution against the complete point set. The scoring cost is
+    ``points * positions`` rather than ``image_area * support_area``, which is
+    what makes a support that nearly fills the frame affordable.
+
+    Args:
+        gray: Full-resolution ``float32`` inspection image.
+        prepared: Immutable prepared support.
+        options: Search policy; only unit scale is supported for shape.
+        image_space: Space of the inspection image.
+
+    Returns:
+        Selected matches, or ``no_matches`` when nothing exceeds the threshold.
+    """
+    from measure.shape_model import (build_shape_model, gradient_planes,
+                                     rotate_model, score_at, score_map)
+
+    fine_angles = options.angles()
+    fine_scales = options.scales()
+    diagnostics: dict = {
+        "algorithm": "shape",
+        "search_strategy": "shape_two_level",
+        "requested_variant_count": len(fine_angles) * len(fine_scales),
+        "ncc_evaluations": 0,
+    }
+    if len(fine_scales) > 1:
+        # Multi-scale shape search is not implemented; correlation already
+        # covers it, and silently ignoring the scale range would be a wrong
+        # answer rather than a slower one.
+        from dataclasses import replace
+
+        fallback = _two_stage(gray, prepared, options, image_space,
+                              _pyramid_factor(prepared, options))
+        merged = dict(fallback.diagnostics)
+        merged["shape_scale_fallback"] = "multi_scale_uses_correlation"
+        merged["algorithm"] = "shape"
+        return replace(fallback, diagnostics=merged)
+
+    support_height, support_width = np.asarray(prepared.pixels).shape[:2]
+    anchor_x, anchor_y = (float(prepared.anchor_support[0]),
+                          float(prepared.anchor_support[1]))
+    levels = max(1, _resolve_levels(prepared, options))
+    factor = 2.0 ** -levels
+    # Edge directions come from gradients taken after this step, so the
+    # coarse pair must not be pre-blurred: smoothing first measurably
+    # degrades the coarse peak that seeds every refinement.
+    coarse_gray, coarse_support = _decimate_pair(gray, prepared, factor,
+                                                 smooth=False)
+    coarse_anchor = (anchor_x * factor, anchor_y * factor)
+    coarse_obs = build_shape_model(
+        np.asarray(coarse_support.pixels), prepared.support_space,
+        anchor=(coarse_anchor[1], coarse_anchor[0]),
+        min_contrast=options.min_contrast, level=levels)
+    if not coarse_obs.valid:
+        diagnostics["shape_points"] = 0
+        return invalid(image_space, coarse_obs.reason or "template_no_texture",
+                       diagnostics)
+    coarse_model = coarse_obs.value
+    diagnostics["shape_points"] = coarse_model.count
+    diagnostics["coarse_level"] = levels
+
+    coarse_gx, coarse_gy = gradient_planes(coarse_gray)
+    coarse_limit = min(options.score_threshold, options.coarse_score_threshold)
+    limit_per_angle = 8 * max(options.max_matches, 8)
+    coarse_angles = _coarse_grid(fine_angles, options.coarse_angle_step_rad) or list(fine_angles)
+    found: List[Tuple[float, float, float, float]] = []
+    searched_angles = 0
+    unavailable_angles = 0
+    for angle in coarse_angles:
+        posed = rotate_model(coarse_model, angle)
+        height, width = posed.size_hw
+        if height > coarse_gray.shape[0] or width > coarse_gray.shape[1]:
+            # The rotated box leaves the frame: the support must fit whole, so
+            # this angle simply cannot be scored.
+            unavailable_angles += 1
+            continue
+        scores = score_map(coarse_gx, coarse_gy, posed,
+                           polarity_invariant=options.polarity_invariant)
+        searched_angles += 1
+        # Record the anchor, not the box origin: the box is tight around the
+        # points, so its origin depends on the angle's bounding box while the
+        # anchor's image position does not.
+        for x, y, score in peaks(scores, coarse_limit, limit=limit_per_angle):
+            found.append((float(score), float(angle),
+                          float(y) + posed.anchor_y, float(x) + posed.anchor_x))
+    searched = searched_angles
+    if not found:
+        diagnostics.update({"searched_variant_count": searched, "coarse_peaks": 0,
+                            "unavailable_variant_count": unavailable_angles,
+                            "search_complete": True})
+        reason = ("support_exceeds_search_area"
+                  if searched_angles == 0 and unavailable_angles
+                  else "no_matches")
+        return invalid(image_space, reason, diagnostics)
+
+    found.sort(reverse=True)
+    budget = (limit_per_angle if options.max_matches == 0
+              else max(1, options.max_matches) * PRUNE_FACTOR)
+    diagnostics["coarse_peaks"] = len(found)
+
+    full_obs = build_shape_model(
+        np.asarray(prepared.pixels), prepared.support_space,
+        mask=None if prepared.mask is None else prepared.mask,
+        anchor=(anchor_y, anchor_x),
+        min_contrast=options.min_contrast, level=0)
+    if not full_obs.valid:
+        return invalid(image_space, full_obs.reason or "template_no_texture",
+                       diagnostics)
+    full_model = full_obs.value
+    image_gx, image_gy = gradient_planes(gray)
+
+    # The coarse peak is only accurate to about one coarse pixel, so the
+    # refinement window must cover that at full resolution, doubled for
+    # slack, and never so wide that the per-position cost dominates.
+    radius = max(4, min(24, int(round(1.0 / factor)) * 2 + 2))
+    refined: List[TemplateMatch] = []
+    placed_any = False
+    for _score, coarse_angle, coarse_anchor_row, coarse_anchor_col in found[:budget]:
+        anchor_row = coarse_anchor_row / factor
+        anchor_col = coarse_anchor_col / factor
+        posed = rotate_model(full_model, coarse_angle)
+        base_row = int(round(anchor_row - posed.anchor_y))
+        base_col = int(round(anchor_col - posed.anchor_x))
+        rows: List[int] = []
+        cols: List[int] = []
+        for delta_row in range(-radius, radius + 1):
+            for delta_col in range(-radius, radius + 1):
+                row = base_row + delta_row
+                col = base_col + delta_col
+                if (row >= 0 and col >= 0
+                        and row + posed.size_hw[0] <= gray.shape[0]
+                        and col + posed.size_hw[1] <= gray.shape[1]):
+                    rows.append(row)
+                    cols.append(col)
+        if not rows:
+            continue
+        placed_any = True
+        scores = score_at(image_gx, image_gy, posed, rows, cols,
+                          polarity_invariant=options.polarity_invariant)
+        best = int(np.argmax(scores))
+        best_anchor = (rows[best] + posed.anchor_y, cols[best] + posed.anchor_x)
+        searched += 1
+
+        # With the position settled, the angle neighbourhood is cheap: one
+        # evaluation per angle instead of one per angle-position pair.
+        local_angles = ([a for a in fine_angles
+                         if abs(a - coarse_angle) <= options.coarse_angle_step_rad + 1e-12]
+                        or [coarse_angle])
+        best_angle = coarse_angle
+        best_score = float(scores[best])
+        best_row = rows[best]
+        best_col = cols[best]
+        for angle in local_angles:
+            if angle == coarse_angle:
+                continue
+            candidate = rotate_model(full_model, angle)
+            row = int(round(best_anchor[0] - candidate.anchor_y))
+            col = int(round(best_anchor[1] - candidate.anchor_x))
+            if not (row >= 0 and col >= 0
+                    and row + candidate.size_hw[0] <= gray.shape[0]
+                    and col + candidate.size_hw[1] <= gray.shape[1]):
+                continue
+            extra = score_at(image_gx, image_gy, candidate, [row], [col],
+                             polarity_invariant=options.polarity_invariant)
+            searched += 1
+            if float(extra[0]) > best_score:
+                best_score = float(extra[0])
+                best_angle = angle
+                best_row = row
+                best_col = col
+        if best_score < coarse_limit:
+            continue
+        peak_x, peak_y = float(best_col), float(best_row)
+        if options.subpixel:
+            peak_x, peak_y = _shape_subpixel(image_gx, image_gy, full_model,
+                                             best_angle, best_row, best_col)
+        anchor_image = (peak_y + rotate_model(full_model, best_angle).anchor_y,
+                        peak_x + rotate_model(full_model, best_angle).anchor_x)
+        matrix = _shape_pose_matrix(best_angle, 1.0, (anchor_x, anchor_y),
+                                    (anchor_image[1], anchor_image[0]))
+        if prepared.origin == "pixel_center":
+            centre_x, centre_y = (support_width - 1) / 2.0, (support_height - 1) / 2.0
+        else:
+            centre_x, centre_y = support_width / 2.0, support_height / 2.0
+        centre = matrix @ np.array([centre_x, centre_y, 1.0], dtype=np.float64)
+        refined.append(TemplateMatch(
+            center=(float(centre[0]), float(centre[1])),
+            anchor=(float(anchor_image[1]), float(anchor_image[0])),
+            angle_rad=float(best_angle), scale=1.0, score=float(best_score),
+            support_to_image=make_mapping(matrix, source=prepared.support_space,
+                                          destination=image_space, kind="similarity"),
+            peak_xy=(int(round(peak_x)), int(round(peak_y))),
+            size_wh=(float(support_width), float(support_height)),
+        ))
+
+    if not placed_any:
+        # The rotated box fits nowhere in the frame: a shape score cannot be
+        # formed at all. Correlation pads the frame up to the support instead,
+        # so it still answers; say so rather than reporting "no match".
+        from dataclasses import replace
+
+        fallback = _two_stage(gray, prepared, options, image_space,
+                              _pyramid_factor(prepared, options))
+        merged = dict(fallback.diagnostics)
+        merged["shape_support_too_large"] = "support_does_not_fit_uses_correlation"
+        merged["algorithm"] = "shape"
+        return replace(fallback, diagnostics=merged)
+
+    # The refinement gated on the relaxed coarse threshold so a candidate could
+    # be re-examined; the caller's threshold decides what is reported.
+    accepted = [match for match in refined
+                if match.score >= options.score_threshold - 1e-12]
+    distinct = suppress(accepted, options.max_overlap)
+    diagnostics.update(ambiguity_report(distinct, _support_longest(prepared)))
+    selected = distinct
+    if options.max_matches:
+        selected = selected[: options.max_matches]
+    diagnostics.update({
+        "searched_variant_count": searched,
+        "fine_positions": len(refined),
+        "unavailable_variant_count": int(unavailable_angles),
         "search_complete": True,
     })
     if not selected:
@@ -876,19 +1387,69 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
     return observed(image_space, MatchSet(matches=tuple(selected)), diagnostics)
 
 
-def _decimate_pair(gray: Array, prepared: PreparedSupport, factor: float
-                   ) -> Tuple[Array, PreparedSupport]:
+def _shape_subpixel(gx: Array, gy: Array, model: Any, angle: float,
+                    row: int, col: int) -> Tuple[float, float]:
+    """Refine a shape peak to sub-pixel accuracy with the shared quadratic.
+
+    Args:
+        gx: Gradient ``x`` plane of the full-resolution image.
+        gy: Gradient ``y`` plane of the full-resolution image.
+        model: Full-resolution model.
+        angle: Pose angle of the winning candidate.
+        row: Integer peak row (model box top).
+        col: Integer peak column (model box left).
+
+    Returns:
+        Refined ``(x, y)`` of the model box origin.
+    """
+    from measure.shape_model import rotate_model, score_at
+
+    posed = rotate_model(model, angle)
+    rows = [row - 1, row - 1, row - 1, row, row, row, row + 1, row + 1, row + 1]
+    cols = [col - 1, col, col + 1, col - 1, col, col + 1, col - 1, col, col + 1]
+    if rows[0] < 0 or cols[0] < 0:
+        return float(col), float(row)
+    if (rows[-1] + posed.size_hw[0] > gx.shape[0]
+            or cols[-1] + posed.size_hw[1] > gx.shape[1]):
+        return float(col), float(row)
+    values = score_at(gx, gy, posed, rows, cols).reshape(3, 3)
+    offset_x = subpixel_offset(float(values[1, 0]), float(values[1, 1]),
+                               float(values[1, 2]))
+    offset_y = subpixel_offset(float(values[0, 1]), float(values[1, 1]),
+                               float(values[2, 1]))
+    return float(col) + offset_x, float(row) + offset_y
+
+
+def _decimate_pair(gray: Array, prepared: PreparedSupport, factor: float, *,
+                   smooth: bool = True) -> Tuple[Array, PreparedSupport]:
     """Low-pass and decimate the search image and the support by ``factor``.
 
     Args:
         gray: Full-resolution ``float32`` inspection image.
         prepared: Full-resolution prepared support.
         factor: Decimation factor in ``(0, 1)``.
+        smooth: Low-pass before sampling. Correlation needs it (INTER_AREA alone
+            aliases a high-frequency support badly enough to lose the peak), but
+            the edge-direction path derives gradients afterwards and loses coarse
+            direction precision when the input is blurred first; its caller passes
+            ``False`` and keeps the plain area average, which is its own 2x2 box.
 
     Returns:
         ``(small_gray, small_support)`` on the coarse grid.
     """
     support = np.asarray(prepared.pixels, dtype=np.float32)
+    # Low-pass before sampling. Plain INTER_AREA aliases the phase of a
+    # high-frequency support: the v2 acceptance corpus measured the correlation
+    # peak fall from 0.65 to 0.27 without this pass, and coarse detection then
+    # failed. The blur is applied here rather than through ``decimate_pixels``
+    # because that helper also shifts the sampling grid by half a pixel, which is
+    # correct for its pixel-centre callers but changes the phase this search has
+    # always used -- the edge-direction path samples gradients and is far more
+    # sensitive to that than correlation is.
+    if smooth:
+        sigma = 0.5 / float(factor)
+        support = cv2.GaussianBlur(support, (0, 0), sigma)
+        gray = cv2.GaussianBlur(gray, (0, 0), sigma)
     small_support = cv2.resize(support, None, fx=factor, fy=factor,
                                interpolation=cv2.INTER_AREA)
     small_gray = cv2.resize(gray, None, fx=factor, fy=factor,
@@ -907,10 +1468,78 @@ def _decimate_pair(gray: Array, prepared: PreparedSupport, factor: float
     return small_gray, small
 
 
+def _fine_radius_px(prepared: PreparedSupport, options: SearchOptions) -> float:
+    """Return the half-side of a full-resolution refinement window.
+
+    Two terms, because the window has to satisfy two independent constraints:
+
+    * **half the support diagonal** so the rotated support fits whole. A centred
+      box reaches ``diagonal / 2`` from its centre under *any* rotation, so this
+      is the exact requirement, not an approximation of the longest side.
+    * **``fine_search_radius_px``** for how wrong the coarse centre may be: half
+      a coarse pixel plus the rotation/translation coupling of a thinned pose
+      grid.
+
+    They add. Taking the maximum of the two instead — as this did — leaves a
+    small support unable to absorb any coarse error at all: a 32x24 support got
+    a 24 px radius where it needs 20 px of its own extent *plus* the margin, so
+    a coarse candidate one pixel early found nothing in its window.
+
+    The radius is clipped to the search area by the caller, so asking for more
+    than the frame never costs a second full-frame scan per candidate.
+
+    Args:
+        prepared: Immutable prepared support (full resolution).
+        options: Search policy carrying the coarse-error margin.
+
+    Returns:
+        Half-side in pixels, at least one.
+    """
+    height, width = np.asarray(prepared.pixels).shape[:2]
+    extent = 0.5 * math.hypot(float(width), float(height))
+    return float(max(1.0, extent + float(options.fine_search_radius_px)))
+
+
+def _rescale_match(match: TemplateMatch, scale: float,
+                   prepared: PreparedSupport, image_space: Space) -> TemplateMatch:
+    """Re-express a match in a frame scaled by ``scale``.
+
+    Used to hand a coarse candidate to a finer or coarser pyramid level: scaling
+    both the linear part and the translation moves the whole pose, while the
+    rotation and the scale of the support are unchanged because a frame change
+    is a similarity.
+
+    Args:
+        match: Match in the source frame.
+        scale: Target-frame coordinates per source-frame coordinate.
+        prepared: Support the match was produced from.
+        image_space: Space of the image the source frame belongs to.
+
+    Returns:
+        The same match in the target frame.
+    """
+    matrix = np.array(match.support_to_image.matrix, dtype=np.float64)
+    matrix[0:2, :] *= scale
+    peak = None
+    if match.peak_xy is not None:
+        peak = (int(round(match.peak_xy[0] * scale)),
+                int(round(match.peak_xy[1] * scale)))
+    return TemplateMatch(
+        center=(match.center[0] * scale, match.center[1] * scale),
+        anchor=(match.anchor[0] * scale, match.anchor[1] * scale),
+        angle_rad=match.angle_rad, scale=match.scale, score=match.score,
+        support_to_image=make_mapping(matrix, source=prepared.support_space,
+                                      destination=image_space, kind="similarity"),
+        peak_xy=peak,
+        size_wh=(match.size_wh[0] * scale, match.size_wh[1] * scale),
+    )
+
+
 def _rescan_neighbourhood(gray: Array, prepared: PreparedSupport,
                           options: SearchOptions, anchor: TemplateMatch,
                           factor: float, angles: List[float], scales: List[float],
-                          image_space: Space) -> List[TemplateMatch]:
+                          image_space: Space,
+                          stats: Optional[dict] = None) -> List[TemplateMatch]:
     """Rescan one coarse neighbourhood at full resolution.
 
     The window is centred on the coarse match mapped back to full resolution and
@@ -933,11 +1562,22 @@ def _rescan_neighbourhood(gray: Array, prepared: PreparedSupport,
     support_shape = np.asarray(prepared.pixels).shape[:2]
     height, width = gray.shape[:2]
     centre_x, centre_y = anchor.center[0] / factor, anchor.center[1] / factor
-    radius = max(options.fine_search_radius_px, max(support_shape) * 0.75)
-    left = int(max(0, centre_x - radius))
-    top = int(max(0, centre_y - radius))
-    right = int(min(width, centre_x + radius))
-    bottom = int(min(height, centre_y + radius))
+    # The window is clipped to the search area below, so it never needs an extra
+    # cap. A cap is in fact harmful: anything below the support's own extent
+    # leaves the support unable to fit the window, and a support larger than the
+    # frame is no longer padded, so the refinement would find nothing at all.
+    radius = _fine_radius_px(prepared, options)
+    # The window must be able to hold the support whole, because the search no
+    # longer pads. When the candidate sits near a border, clipping would shrink
+    # the window below the support; slide it instead of shrinking it. The
+    # support fits the frame (checked before scanning), so a window of at least
+    # the support's size always exists.
+    span_x = min(width, max(int(math.ceil(2.0 * radius)), int(support_shape[1])))
+    span_y = min(height, max(int(math.ceil(2.0 * radius)), int(support_shape[0])))
+    left = int(min(max(0, round(centre_x - span_x / 2.0)), width - span_x))
+    top = int(min(max(0, round(centre_y - span_y / 2.0)), height - span_y))
+    right = min(width, left + span_x)
+    bottom = min(height, top + span_y)
     window = gray[top:bottom, left:right]
     if window.size == 0:
         return []
@@ -945,7 +1585,21 @@ def _rescan_neighbourhood(gray: Array, prepared: PreparedSupport,
         score_threshold=options.score_threshold, max_matches=0,
         max_overlap=options.max_overlap, subpixel=options.subpixel,
         coarse_fine=False, angle_list=tuple(angles), scale_list=tuple(scales),
+        metric=options.metric,
     ), image_space)
+    if stats is not None:
+        stats["unavailable"] = stats.get("unavailable", 0) + int(
+            local.diagnostics.get("unavailable_variant_count", 0) or 0)
+        # The window is decided here, so this is the only place that can report
+        # what the refinement actually did. Callers that publish a search plan
+        # read it rather than re-deriving a size they did not choose.
+        stats.setdefault("windows", []).append({
+            "angle": float(anchor.angle_rad),
+            "x": int(left), "y": int(top),
+            "width": int(right - left), "height": int(bottom - top),
+        })
+        if left == 0 or top == 0 or right == width or bottom == height:
+            stats["bounded_outside"] = True
     if not local.valid or local.value is None:
         return []
     shifted: List[TemplateMatch] = []
@@ -978,6 +1632,67 @@ def _pyramid_factor(prepared: PreparedSupport, options: SearchOptions) -> float:
     return min(1.0, max(factor, min(1.0, 6.0 / max(1, min(width, height)))))
 
 
+#: No pyramid level may shrink the support below this side. Measured failures
+#: start around a 19 px long side, so the historical 6 px floor (which only
+#: guarded against a degenerate image) is too permissive to build a cascade on.
+MIN_LEVEL_SIDE = 12.0
+
+#: Deepest pyramid the cascade will build. Halcon also caps the level count;
+#: past about five levels a level adds cost without removing candidates.
+MAX_LEVELS = 5
+
+#: Each level keeps this multiple of the requested match count, so a target
+#: that ranks slightly low on a coarse level still survives to the next one.
+PRUNE_FACTOR = 4
+
+
+def _levels_by_min_side(prepared: PreparedSupport,
+                        min_side: float = MIN_LEVEL_SIDE) -> int:
+    """Return how many halvings the support survives without falling apart.
+
+    Args:
+        prepared: Immutable prepared support (full resolution).
+        min_side: Smallest acceptable support side, in pixels.
+
+    Returns:
+        The largest usable level count, at least zero.
+    """
+    shortest = float(min(np.asarray(prepared.pixels).shape[:2]))
+    if shortest <= 0.0:
+        return 0
+    levels = 0
+    side = shortest
+    while levels < MAX_LEVELS and side / 2.0 >= min_side:
+        side /= 2.0
+        levels += 1
+    return levels
+
+
+def _resolve_levels(prepared: PreparedSupport, options: SearchOptions) -> int:
+    """Return the pyramid depth the search should use.
+
+    With ``auto_levels`` the depth is derived from the factor the pyramid
+    options already imply, so a support that needs heavy decimation gets a deep
+    cascade instead of one large jump. Without it, the caller's
+    ``decimate_exponent`` is the depth verbatim, which reproduces the historical
+    single-jump behaviour.
+
+    Args:
+        prepared: Immutable prepared support (full resolution).
+        options: Search policy carrying both pyramid controls.
+
+    Returns:
+        Level count in ``[0, MAX_LEVELS]``; ``0`` means full resolution only.
+    """
+    if not options.auto_levels:
+        return max(0, min(int(options.decimate_exponent), MAX_LEVELS))
+    factor = _pyramid_factor(prepared, options)
+    if factor >= 1.0 - 1e-12:
+        return 0
+    by_factor = int(round(math.log2(1.0 / factor)))
+    return max(0, min(by_factor, _levels_by_min_side(prepared), MAX_LEVELS))
+
+
 def search_support(
     image: Array, prepared: PreparedSupport, options: SearchOptions, *,
     image_space: Space,
@@ -1001,7 +1716,18 @@ def search_support(
                              "image must be uint8 or float32", "image")
     gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     gray = np.array(gray, dtype=np.float32, copy=True)
+    # Halcon requires the model to lie completely inside the search area. Saying
+    # so before scanning beats returning a "no match" the caller would read as
+    # "the part is missing".
+    support_height, support_width = np.asarray(prepared.pixels).shape[:2]
+    if support_height > gray.shape[0] or support_width > gray.shape[1]:
+        return invalid(image_space, "support_exceeds_search_area", {
+            "support_hw": (int(support_height), int(support_width)),
+            "search_hw": (int(gray.shape[0]), int(gray.shape[1])),
+        })
     factor = _pyramid_factor(prepared, options)
+    if options.algorithm == "shape":
+        return _shape_search(gray, prepared, options, image_space)
     return _two_stage(gray, prepared, options, image_space, factor)
 
 
@@ -1017,65 +1743,98 @@ def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
     unavailable = 0
     candidates: List[TemplateMatch] = []
 
-    # Every variant may be larger than the image; pad instead of dropping it.
-    largest = int(math.ceil(max(support_width, support_height)
-                            * max(scales) * math.sqrt(2.0))) + 2
-    pad = max(0, largest - min(gray.shape[:2]))
-    padded = cv2.copyMakeBorder(gray, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0.0)
+    # The support must lie completely inside the search area, exactly as Halcon
+    # requires: a variant larger than the frame is dropped rather than padded,
+    # because a padded correlation scores against invented zeros and reports a
+    # confidence the image never supported.
+    support_array = np.asarray(template, dtype=np.float32)
 
-    for angle in angles:
-        for scale in scales:
-            rendered = render_variant(
-                np.asarray(template, dtype=np.float32), angle, scale,
-                None if prepared.mask is None else prepared.mask,
-                inplace=options.inplace_variants, origin=prepared.origin)
-            variant = rendered.pixels
-            variant_mask = rendered.mask
-            variant_height, variant_width = variant.shape[:2]
-            if variant_height > padded.shape[0] or variant_width > padded.shape[1]:
-                unavailable += 1
+    def evaluate(angle: float, scale: float):
+        """Score one pose; return ``(matches, skipped)`` for that pose alone."""
+        rendered = render_variant(
+            support_array, angle, scale,
+            None if prepared.mask is None else prepared.mask,
+            inplace=options.inplace_variants, origin=prepared.origin)
+        variant = rendered.pixels
+        variant_mask = rendered.mask
+        offset_x = offset_y = 0
+        if variant_mask is not None:
+            # A masked support is mostly empty: trim the variant to the bounding
+            # box of its valid pixels. Correlation ignores masked pixels anyway,
+            # so the score is unchanged, but the footprint that has to fit the
+            # frame is the content rather than the box. Without this a 45 degree
+            # masked support is dropped for a bounding box far larger than
+            # anything it actually contains (the historical D07 defect).
+            rows, cols = np.nonzero(variant_mask)
+            if rows.size:
+                top, left = int(rows.min()), int(cols.min())
+                bottom, right = int(rows.max()) + 1, int(cols.max()) + 1
+                if (top or left or bottom != variant.shape[0]
+                        or right != variant.shape[1]):
+                    variant = variant[top:bottom, left:right]
+                    variant_mask = variant_mask[top:bottom, left:right]
+                    offset_y, offset_x = top, left
+        variant_height, variant_width = variant.shape[:2]
+        if variant_height > gray.shape[0] or variant_width > gray.shape[1]:
+            return [], 1
+        scores = correlate(gray, variant, variant_mask, metric=options.metric)
+        if options.max_matches == 1:
+            _, best, _, best_loc = cv2.minMaxLoc(scores)
+            found = [(best_loc[0], best_loc[1], float(best))] if best >= options.score_threshold else []
+        else:
+            found = peaks(scores, options.score_threshold,
+                          limit=8 * max(options.max_matches, 8))
+        matches: List[TemplateMatch] = []
+        for x, y, score in found:
+            # A correlation coefficient outside [-1, 1] is float32 accumulation
+            # noise, so the refinement reads the same clipped value the peak
+            # finder would have reported. Feeding the raw sample instead shifts
+            # the quadratic vertex by milli-pixels on a near-flat peak.
+            centre = min(1.0, max(-1.0, float(score)))
+            peak_x, peak_y = (refine_peak_xy(scores, x, y, centre=centre)
+                              if options.subpixel else (float(x), float(y)))
+            center_x = peak_x + rendered.center[0] - offset_x
+            center_y = peak_y + rendered.center[1] - offset_y
+            if not (0.0 <= center_x <= gray.shape[1] - 1
+                    and 0.0 <= center_y <= gray.shape[0] - 1):
                 continue
-            if variant_mask is not None and float(variant_mask.sum()) > len(variant_mask.flat) * 0.999:
-                scores = cv2.matchTemplate(padded, variant, cv2.TM_CCOEFF_NORMED)
-            elif variant_mask is not None:
-                scores = cv2.matchTemplate(padded, variant, cv2.TM_CCORR_NORMED,
-                                           mask=variant_mask)
-            else:
-                scores = cv2.matchTemplate(padded, variant, cv2.TM_CCOEFF_NORMED)
-            scores = np.nan_to_num(scores, nan=-1.0, posinf=-1.0, neginf=-1.0)
+            # Reuse the render matrix, shifted to this peak: the reported pose is
+            # then exact by construction instead of re-derived.
+            pose = rendered.matrix.copy()
+            pose[0, 2] += peak_x - offset_x
+            pose[1, 2] += peak_y - offset_y
+            anchor = pose @ np.array([prepared.anchor_support[0],
+                                      prepared.anchor_support[1], 1.0],
+                                     dtype=np.float64)
+            mapping = make_mapping(pose, source=prepared.support_space,
+                                   destination=image_space, kind="similarity")
+            matches.append(TemplateMatch(
+                center=(float(center_x), float(center_y)),
+                anchor=(float(anchor[0]), float(anchor[1])),
+                angle_rad=float(angle), scale=float(scale), score=float(score),
+                support_to_image=mapping, peak_xy=(int(x), int(y)),
+                size_wh=(float(variant_width), float(variant_height)),
+            ))
+        return matches, 0
+
+    pose_grid = [(angle, scale) for angle in angles for scale in scales]
+    workers = int(options.search_threads) if options.search_threads else search_threads()
+    if workers > 1 and len(pose_grid) > 1:
+        working_set = int(gray.nbytes) + int(support_array.nbytes)
+        if working_set > 0:
+            workers = max(1, min(workers, POSE_GRID_MEMORY_BYTES // working_set))
+    if workers > 1 and len(pose_grid) > 1:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="pose-grid") as pool:
+            # ``map`` keeps the input order, so the merged result never depends
+            # on which pose happened to finish first.
+            results = list(pool.map(lambda pose: evaluate(*pose), pose_grid))
+    else:
+        results = [evaluate(angle, scale) for angle, scale in pose_grid]
+    for pose_matches, skipped in results:
+        candidates.extend(pose_matches)
+        unavailable += skipped
+        if not skipped:
             searched += 1
-            if options.max_matches == 1:
-                _, best, _, best_loc = cv2.minMaxLoc(scores)
-                found = [(best_loc[0], best_loc[1], float(best))] if best >= options.score_threshold else []
-            else:
-                found = peaks(scores, options.score_threshold,
-                              limit=8 * max(options.max_matches, 8))
-            for x, y, score in found:
-                peak_x, peak_y = (refine_peak_xy(scores, x, y) if options.subpixel
-                                  else (float(x), float(y)))
-                center_x = peak_x + rendered.center[0] - pad
-                center_y = peak_y + rendered.center[1] - pad
-                if not (0.0 <= center_x <= gray.shape[1] - 1
-                        and 0.0 <= center_y <= gray.shape[0] - 1):
-                    continue
-                # Reuse the render matrix, shifted to this peak: the reported
-                # pose is then exact by construction instead of re-derived.
-                pose = rendered.matrix.copy()
-                pose[0, 2] += peak_x - pad
-                pose[1, 2] += peak_y - pad
-                anchor = pose @ np.array([prepared.anchor_support[0],
-                                          prepared.anchor_support[1], 1.0],
-                                         dtype=np.float64)
-                mapping = make_mapping(pose,
-                                       source=prepared.support_space,
-                                       destination=image_space, kind="similarity")
-                candidates.append(TemplateMatch(
-                    center=(float(center_x), float(center_y)),
-                    anchor=(float(anchor[0]), float(anchor[1])),
-                    angle_rad=float(angle), scale=float(scale), score=float(score),
-                    support_to_image=mapping, peak_xy=(int(x), int(y)),
-                    size_wh=(float(variant_width), float(variant_height)),
-                ))
     diagnostics = {
         "requested_variant_count": requested,
         "searched_variant_count": searched,
@@ -1087,6 +1846,11 @@ def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
         "search_complete": searched + unavailable == requested,
     }
     if not candidates:
+        if unavailable and searched == 0:
+            # Nothing could be evaluated at all: every pose was larger than the
+            # search area. Saying "no match" would blame the image for a model
+            # that can never fit.
+            return invalid(image_space, "support_exceeds_search_area", diagnostics)
         return invalid(image_space, "no_matches", diagnostics)
     selected = suppress(candidates, options.max_overlap)
     if options.max_matches:

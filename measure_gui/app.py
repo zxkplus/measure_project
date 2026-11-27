@@ -45,6 +45,7 @@ from .preprocessor_preview import PreprocessorPreviewDialog
 from .result_panel import ResultPanel
 from .template_view import TemplateTool, TemplateView
 from .tool_panel import ToolPanel
+from measure.measure_template import check_support_fits_search_area
 from measure.rectify import crop_and_straighten
 
 _SIDE_LABELS = {"left": "左侧", "right": "右侧", "top": "上侧", "bottom": "下侧"}
@@ -301,6 +302,9 @@ class MeasureApp:
         self.tool_panel.on_max_matches_changed = self._on_max_matches_changed
         self.tool_panel.on_overlap_changed = self._on_overlap_changed
         self.tool_panel.on_pyramid_changed = self._on_pyramid_changed
+        self.tool_panel.on_metric_changed = self._on_metric_changed
+        self.tool_panel.on_verify_level_changed = self._on_verify_level_changed
+        self.tool_panel.on_algorithm_changed = self._on_algorithm_changed
         self.tool_panel.on_add_composed = self._on_add_composed
         self.tool_panel.on_tool_edit = self._on_tool_edit
         self.tool_panel.on_tool_delete = self._on_tool_delete
@@ -458,6 +462,7 @@ class MeasureApp:
             messagebox.showwarning("提示", "请先创建/加载模型")
             return
         self._warn_template_roi("保存")
+        self._warn_template_fit("保存")
 
         # Determine project directory
         if self._current_project_dir and os.path.isdir(self._current_project_dir):
@@ -489,6 +494,7 @@ class MeasureApp:
             messagebox.showwarning("提示", "请先创建/加载模型")
             return
         self._warn_template_roi("保存")
+        self._warn_template_fit("保存")
 
         project_dir = filedialog.askdirectory(
             parent=self.root,
@@ -692,6 +698,7 @@ class MeasureApp:
             return
 
         self._warn_template_roi("运行")
+        self._warn_template_fit("运行")
 
         try:
             self.tool_panel.set_progress(True)
@@ -1395,14 +1402,6 @@ class MeasureApp:
             self.tool_panel.set_obb_status(
                 "模型未载入：请选择模型文件并点击「载入模型并自检」", False)
 
-    def _parse_pyramid(self) -> tuple:
-        """Return ``(decimate, max_template_size)`` from the tool panel.
-
-        The engine only treats ``decimate`` as an on/off switch; the actual
-        downsampling ratio is ``min(1, max_template_size / longest_side)``.
-        """
-        return self.tool_panel.pyramid_config()
-
     # ------------------------------------------------------------------
     # Template creation
     # ------------------------------------------------------------------
@@ -1490,22 +1489,18 @@ class MeasureApp:
             strategy = SingleBoxAlignment()
         self._workflow._alignment = strategy
 
-        decimate_exponent, pyramid_max_size = self._parse_pyramid()
         self._workflow.teach_template(
             self._reference_image,
             center=(center_row, center_col),
             size=(height, width),
             angle_deg=angle_deg,
             preprocessor=preprocessor,
-            match_score_threshold=self.tool_panel._score_var.get(),
             angle_range=angle_range,
-            angle_step=self.tool_panel._angle_step_var.get(),
-            max_matches=self.tool_panel._max_matches_var.get(),
-            overlap=self.tool_panel._overlap_var.get(),
             coarse_fine=True,
             coarse_angle_step=5.0,
-            decimate_exponent=decimate_exponent,
-            coarse_template_side=pyramid_max_size,
+            # Every matching setting comes from one source, so a control cannot
+            # be shown to the operator and then dropped on the way to the model.
+            **self.tool_panel.matching_kwargs(),
         )
         self.tool_panel.update_pyramid_factor(max(height, width))
 
@@ -1515,6 +1510,16 @@ class MeasureApp:
                 strategy.add_control_point(
                     f"cp_{i}", float(r), float(c))
             strategy.build_all_control_point_templates()
+            # Control points build their own TemplatePoints, so the matcher
+            # settings have to be applied to each of them explicitly.
+            settings = self.tool_panel.matching_kwargs()
+            for point in getattr(strategy, "_control_points", []):
+                template_point = getattr(point, "template_point", None)
+                if template_point is None:
+                    continue
+                template_point.algorithm = settings["algorithm"]
+                template_point.metric = settings["metric"]
+                template_point.min_verify_level = settings["min_verify_level"]
 
         # Update template view
         self.template_view.load_template(self._workflow.template_image)
@@ -1849,6 +1854,28 @@ class MeasureApp:
         alignment = getattr(self._workflow, "_alignment", None)
         return getattr(alignment, "template_point", None)
 
+    def _on_algorithm_changed(self, algorithm: str):
+        """Switch the matcher on the taught template.
+
+        No re-teach is needed: the search reads the attribute when it runs, so
+        switching only affects the next measurement.
+        """
+        point = self._current_template_point()
+        if point is not None:
+            point.algorithm = str(algorithm)
+
+    def _on_verify_level_changed(self, level: int):
+        """Apply the refinement depth to the taught template."""
+        point = self._current_template_point()
+        if point is not None:
+            point.min_verify_level = max(0, int(level))
+
+    def _on_metric_changed(self, metric: str):
+        """Apply the Halcon Metric policy to the taught template."""
+        point = self._current_template_point()
+        if point is not None:
+            point.metric = str(metric)
+
     def _on_pyramid_changed(self, decimate: int, max_template_size: int):
         """Apply pyramid settings to the taught template and refresh the ratio."""
         point = self._current_template_point()
@@ -1867,6 +1894,43 @@ class MeasureApp:
             self._get_roi_state(),
             float(point.click_col), float(point.click_row),
             float(point.template_size),
+        )
+
+    def _template_fit_warnings(self):
+        """Fit issues between the taught template and the frame it is searched on.
+
+        The search never pads: a pose whose footprint leaves the frame is
+        skipped. A template as wide as the frame therefore matches at zero
+        rotation only, which is invisible until a part arrives rotated.
+        """
+        point = self._current_template_point()
+        if point is None or self._reference_image is None:
+            return []
+        frame = self._inspection_image if self._inspection_image is not None else (
+            self._reference_image)
+        return check_support_fits_search_area(
+            (float(frame.shape[0]), float(frame.shape[1])),
+            (float(point.edge_template.shape[0]), float(point.edge_template.shape[1])),
+            (float(np.deg2rad(point.angle_range[0])),
+             float(np.deg2rad(point.angle_range[1]))),
+        )
+
+    def _warn_template_fit(self, action: str) -> None:
+        """Warn when the template cannot be searched over the requested angles."""
+        issues = self._template_fit_warnings()
+        if not issues:
+            self._fit_warning_signature = None
+            return
+        signature = tuple(sorted((issue["kind"], issue["limb"]) for issue in issues))
+        if signature == getattr(self, "_fit_warning_signature", None):
+            return
+        self._fit_warning_signature = signature
+        detail = "\n".join(f"· {issue['message']}" for issue in issues)
+        messagebox.showwarning(
+            "模板装不进图像",
+            f"{action}前检查到模板与搜索范围不匹配：\n{detail}\n\n"
+            "引擎不会对超出画面的位姿做补零匹配，这些角度会被直接跳过，"
+            "旋转件可能因此找不到。请减小模板尺寸，或缩小角度搜索范围。",
         )
 
     def _warn_template_roi(self, action: str) -> None:

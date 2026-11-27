@@ -86,3 +86,31 @@ def test_validity_follows_the_reported_score():
     point.match_score_threshold = 0.95
     result = point.measure(reference)
     assert result["valid"] == (result["match_score"] >= point.match_score_threshold)
+
+
+def test_engine_diagnostics_reach_the_reported_result():
+    """A caller must be able to see what the engine decided, not only the score.
+
+    The ambiguity signal in particular is useless if it stays inside the engine:
+    a repeated pattern reports a perfectly valid match at one of several equally
+    good places.
+    """
+    import cv2
+    import numpy as np
+
+    from measure.measure_template import TemplatePoint
+
+    reference = np.zeros((240, 240), np.uint8)
+    rng = np.random.RandomState(11)
+    cell = cv2.GaussianBlur((rng.rand(80, 80) * 255).astype(np.uint8), (5, 5), 1.5)
+    cv2.circle(cell, (40, 40), 18, 0, -1)
+    for row in range(3):
+        for col in range(3):
+            reference[row * 80:(row + 1) * 80, col * 80:(col + 1) * 80] = cell
+
+    point = TemplatePoint(reference, click_row=40.0, click_col=40.0, template_size=80)
+    result = point.measure(reference)
+    diagnostics = result.get('diagnostics') or {}
+    assert diagnostics.get('ambiguous') is True
+    assert diagnostics.get('rival_count', 0) >= 1
+    assert 'search_strategy' in diagnostics

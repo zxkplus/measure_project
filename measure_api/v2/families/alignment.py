@@ -447,7 +447,9 @@ def align_controls(
         Corrected alignment, marked rigid fallback, or invalid refinement.
     """
     from measure_api.v2.preprocessing import apply_preprocessing
-    from measure_api.v2.families.templates import TemplateSearch, _scan, load_template
+    from measure_api.v2.families.templates import (
+        TemplateSearch, load_template, locate_support,
+    )
 
     initial = validated_matrix(request.initial_mapping, similarity=True)
     image, source = context.files.read_image(request.image)
@@ -468,12 +470,18 @@ def align_controls(
                 "template.channels_mismatch", "Control and inspection channels differ",
             )
         search = TemplateSearch(score_threshold=control.score_threshold, max_matches=1)
-        candidates = _scan(local, pixels, search, 0, 1, origin=(x0, y0))
+        found, _, _ = locate_support(pixels, metadata, local, search)
         observation = ControlObservation(
             index=index, valid=False, reference_point=control.reference_point,
         )
-        if candidates:
-            score, _, _, matrix = max(candidates, key=lambda item: item[0])
+        if found.value is not None and found.value.matches:
+            match = max(found.value.matches, key=lambda item: item.score)
+            score = float(match.score)
+            # The control is located inside its own crop, so the pose has to be
+            # moved into the aligned-image frame before the anchor is read from it.
+            matrix = np.array(match.support_to_image.matrix, dtype=np.float64)
+            matrix[0, 2] += x0
+            matrix[1, 2] += y0
             anchor = np.array(metadata.source_to_support.matrix) @ [
                 metadata.anchor.x, metadata.anchor.y, 1,
             ]

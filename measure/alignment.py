@@ -209,6 +209,10 @@ class AlignmentStrategy:
         coarse_angle_step: float = 5.0,
         decimate_exponent: int = 0,
         coarse_template_side: int = 128,
+        metric: str = "use_polarity",
+        min_verify_level: int = 0,
+        algorithm: str = "ncc",
+        min_contrast: float = 0.0,
     ):
         """Store the reference geometry and create the parent template.
 
@@ -245,6 +249,10 @@ class AlignmentStrategy:
             overlap=overlap,
             decimate_exponent=decimate_exponent,
             coarse_template_side=coarse_template_side,
+            metric=metric,
+            min_verify_level=min_verify_level,
+            algorithm=algorithm,
+            min_contrast=min_contrast,
         )
 
         self._angle_range = angle_range

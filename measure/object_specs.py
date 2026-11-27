@@ -116,6 +116,9 @@ def _make_template_match_point(label: str, **p) -> TemplateMatchPointObject:
         angle_range_half=p.get("angle_range_half", 15.0),
         angle_step=p.get("angle_step", 1.0),
         use_subpixel=p.get("use_subpixel", True),
+        algorithm=p.get("algorithm", "ncc"),
+        metric=p.get("metric", "use_polarity"),
+        min_verify_level=p.get("min_verify_level", 0),
         _template_point=p.get("_template_point", None),
     )
 
@@ -241,7 +244,9 @@ _SPECS: Tuple[ObjectSpec, ...] = (
         {"template_size": 40, "preprocessor_type": "raw",
          "match_score_threshold": 0.5, "angle_range_half": 15.0,
          "angle_step": 1.0, "use_subpixel": True,
-         "decimate_exponent": 0, "coarse_template_side": 128},
+         "decimate_exponent": 0, "coarse_template_side": 128,
+         "algorithm": "ncc", "metric": "use_polarity",
+         "min_verify_level": 0},
         (), "point",
     ),
     ObjectSpec(

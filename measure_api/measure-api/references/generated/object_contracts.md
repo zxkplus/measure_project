@@ -15,7 +15,7 @@ GUI, API v1 and API v2. If a type is not listed here it does not exist.
 | `EdgePoint` | point | `row`, `col`, `angle`, `length1`, `length2` | `sigma`(1), `threshold`(30), `interpolation`("linear") |
 | `FitCircle` | circle | `center`, `radius`, `measure_length1`, `measure_length2` | `radius_min`(null), `radius_max`(null), `num_measures`(12), `sigma`(1), `threshold`(30), `transition`("all"), `selection`("nearest"), `start_phi`(0), `end_phi`(6.283185) |
 | `FitLine` | line | `start`, `end`, `measure_length1`, `measure_length2` | `num_measures`(10), `sigma`(1), `threshold`(30), `transition`("all") |
-| `TemplateMatchPoint` | point | `row`, `col` | `template_size`(40), `preprocessor_type`("raw"), `match_score_threshold`(0.5), `angle_range_half`(15), `angle_step`(1), `use_subpixel`(true), `decimate_exponent`(0), `coarse_template_side`(128) |
+| `TemplateMatchPoint` | point | `row`, `col` | `template_size`(40), `preprocessor_type`("raw"), `match_score_threshold`(0.5), `angle_range_half`(15), `angle_step`(1), `use_subpixel`(true), `decimate_exponent`(0), `coarse_template_side`(128), `algorithm`("ncc"), `metric`("use_polarity"), `min_verify_level`(0) |
 
 ## Composed types
 
@@ -60,7 +60,7 @@ endpoints and deliberately omits the centre.
 | `FitLine` | `start`, `end`, `measure_length1`, `measure_length2`, `num_measures`, `sigma`, `threshold`, `transition` |
 | `PointCircleDistance` | `point_label`, `circle_label` |
 | `PointLineDistance` | `point_label`, `line_label` |
-| `TemplateMatchPoint` | `row`, `col`, `template_size`, `preprocessor_type`, `match_score_threshold`, `angle_range_half`, `angle_step`, `use_subpixel`, `decimate_exponent`, `coarse_template_side` |
+| `TemplateMatchPoint` | `row`, `col`, `template_size`, `preprocessor_type`, `match_score_threshold`, `angle_range_half`, `angle_step`, `use_subpixel`, `decimate_exponent`, `coarse_template_side`, `algorithm`, `metric`, `min_verify_level` |
 | `TwoLinesAngle` | `line_a_label`, `line_b_label` |
 | `TwoPointsDistance` | `point_a_label`, `point_b_label` |
 | `TwoPointsLine` | `point_a_label`, `point_b_label` |

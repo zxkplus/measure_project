@@ -234,7 +234,10 @@ def test_rotated_teaching_support_composes_reference_mapping_without_anchor_drif
 @pytest.mark.parametrize("angle", [0, 19])
 def test_full_support_skips_masked_ncc_and_rotated_support_keeps_mask(angle, monkeypatch):
     """Keep exact matching poses while avoiding the full-mask correlation cost."""
-    from measure_api.v2.families.templates import TemplateSearch, _scan
+    from measure.computation_types import Space
+    from measure.template_search import (
+        PreparedSupport, SearchOptions, search_support,
+    )
 
     patch = np.random.default_rng(123).integers(20, 230, (20, 60), dtype=np.uint8)
     theta = np.deg2rad(angle)
@@ -249,11 +252,21 @@ def test_full_support_skips_masked_ncc_and_rotated_support_keeps_mask(angle, mon
         return match_template(*args, **kwargs)
 
     monkeypatch.setattr(cv2, "matchTemplate", record_match)
-    matches = _scan(image, patch, TemplateSearch(score_threshold=0.9), angle, 1)
-    assert matches
-    score, _, _, pose = max(matches, key=lambda match: match[0])
-    assert score > 0.99
-    assert pose[:2, 2] == pytest.approx([100, 70], abs=0.1)
+    height, width = patch.shape[:2]
+    prepared = PreparedSupport(
+        pixels=np.ascontiguousarray(patch, dtype=np.float32),
+        valid_mask=np.ones((height, width), dtype=bool),
+        anchor_support=((width - 1) / 2.0, (height - 1) / 2.0),
+        support_to_reference=None, reference_space=None,
+        support_space=Space("support", "px"), mask=None, origin="pixel_center")
+    options = SearchOptions(score_threshold=0.9, max_matches=1,
+                            angle_list=(np.deg2rad(angle),))
+    found = search_support(image, prepared, options,
+                           image_space=Space("inspection", "px"))
+    assert found.value is not None and found.value.matches
+    match = max(found.value.matches, key=lambda item: item.score)
+    assert match.score > 0.99
+    assert np.array(match.support_to_image.matrix)[:2, 2] == pytest.approx([100, 70], abs=0.1)
     if angle == 0:
         assert masks and all(mask is None for mask in masks)
     else:
