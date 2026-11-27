@@ -56,6 +56,7 @@ from measure.measure_template import (
     TemplatePoint,
     DistanceMeasure,
     check_roi_covers_template,
+    check_support_fits_search_area,
 )
 
 # Circle location and camera-on-arm pick calibration

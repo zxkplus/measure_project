@@ -34,6 +34,7 @@ Usage:
 """
 
 import base64
+import math
 import os
 import time
 import logging
@@ -320,6 +321,86 @@ def check_roi_covers_template(roi_xyxy: Tuple[float, float, float, float],
                     f"ROI {side} clips the template: "
                     f"roi_{side} must be >= {required:.1f} (actual {actual:.1f})"
                 ),
+            })
+    return issues
+
+
+def check_support_fits_search_area(
+    search_size_hw: Tuple[float, float],
+    support_size_hw: Tuple[float, float],
+    angle_range: Tuple[float, float] = (0.0, 0.0),
+    margin: float = 0.0,
+) -> List[Dict[str, Any]]:
+    """Check that a template can actually be searched inside its search area.
+
+    A correlation can only place the support where it lies completely inside the
+    searched image; a variant that does not fit is skipped, never padded.  A
+    support the size of the frame therefore matches at zero rotation only, and a
+    frame-wide support under a +/-15 degree range silently loses almost every
+    pose it was asked to search.
+
+    The worst-case footprint of a rotated rectangle is its axis-aligned bounding
+    box, ``h*|cos| + w*|sin|`` by ``h*|sin| + w*|cos|``.  Evaluated over the
+    allowed angles that gives the size the search area must provide.
+
+    Args:
+        search_size_hw: Search area ``(height, width)`` in pixels.
+        support_size_hw: Untouched support ``(height, width)`` in pixels.
+        angle_range: Search angle range in radians, as ``(min, max)``.
+        margin: Extra pixels required on every side (0.0 checks only the fit).
+
+    Returns:
+        List of issue dicts, empty when every allowed pose fits.  Each issue has
+        ``kind`` (``"support_too_large"`` or ``"rotation_too_large"``),
+        ``limb`` (``"height"``/``"width"``), ``required``, ``actual`` and a
+        human-readable ``message``.
+    """
+    search_h, search_w = float(search_size_hw[0]), float(search_size_hw[1])
+    support_h, support_w = float(support_size_hw[0]), float(support_size_hw[1])
+    margin = max(0.0, float(margin))
+    available_h = search_h - 2.0 * margin
+    available_w = search_w - 2.0 * margin
+
+    issues: List[Dict[str, Any]] = []
+    if support_h > available_h or support_w > available_w:
+        for limb, needed, available in (("height", support_h, available_h),
+                                        ("width", support_w, available_w)):
+            if needed > available:
+                issues.append({
+                    "kind": "support_too_large",
+                    "limb": limb,
+                    "required": available,
+                    "actual": needed,
+                    "message": (
+                        f"support {limb} {needed:.1f} px exceeds the search area "
+                        f"({available:.1f} px): the template can never be placed"),
+                })
+        return issues
+
+    # Worst-case bounding box over the allowed rotations. The envelope is not
+    # monotone, so the extremes alone are not enough: a rectangle is widest at
+    # atan(h/w) and tallest at atan(w/h), which may sit inside the range.
+    limit = max(abs(float(angle_range[0])), abs(float(angle_range[1])))
+    candidates = [0.0, limit]
+    for critical in (math.atan2(support_w, support_h), math.atan2(support_h, support_w)):
+        if critical <= limit:
+            candidates.append(critical)
+    worst_h = worst_w = 0.0
+    for theta in candidates:
+        cos_a, sin_a = abs(math.cos(theta)), abs(math.sin(theta))
+        worst_h = max(worst_h, support_h * cos_a + support_w * sin_a)
+        worst_w = max(worst_w, support_h * sin_a + support_w * cos_a)
+    for limb, needed, available in (("height", worst_h, available_h),
+                                    ("width", worst_w, available_w)):
+        if needed > available + 1e-9:
+            issues.append({
+                "kind": "rotation_too_large",
+                "limb": limb,
+                "required": available,
+                "actual": needed,
+                "message": (
+                    f"the searched rotations need {needed:.1f} px of {limb} but the "
+                    f"search area offers {available:.1f} px: those angles are skipped"),
             })
     return issues
 

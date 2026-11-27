@@ -45,6 +45,7 @@ from .preprocessor_preview import PreprocessorPreviewDialog
 from .result_panel import ResultPanel
 from .template_view import TemplateTool, TemplateView
 from .tool_panel import ToolPanel
+from measure.measure_template import check_support_fits_search_area
 from measure.rectify import crop_and_straighten
 
 _SIDE_LABELS = {"left": "左侧", "right": "右侧", "top": "上侧", "bottom": "下侧"}
@@ -459,6 +460,7 @@ class MeasureApp:
             messagebox.showwarning("提示", "请先创建/加载模型")
             return
         self._warn_template_roi("保存")
+        self._warn_template_fit("保存")
 
         # Determine project directory
         if self._current_project_dir and os.path.isdir(self._current_project_dir):
@@ -490,6 +492,7 @@ class MeasureApp:
             messagebox.showwarning("提示", "请先创建/加载模型")
             return
         self._warn_template_roi("保存")
+        self._warn_template_fit("保存")
 
         project_dir = filedialog.askdirectory(
             parent=self.root,
@@ -693,6 +696,7 @@ class MeasureApp:
             return
 
         self._warn_template_roi("运行")
+        self._warn_template_fit("运行")
 
         try:
             self.tool_panel.set_progress(True)
@@ -1874,6 +1878,43 @@ class MeasureApp:
             self._get_roi_state(),
             float(point.click_col), float(point.click_row),
             float(point.template_size),
+        )
+
+    def _template_fit_warnings(self):
+        """Fit issues between the taught template and the frame it is searched on.
+
+        The search never pads: a pose whose footprint leaves the frame is
+        skipped. A template as wide as the frame therefore matches at zero
+        rotation only, which is invisible until a part arrives rotated.
+        """
+        point = self._current_template_point()
+        if point is None or self._reference_image is None:
+            return []
+        frame = self._inspection_image if self._inspection_image is not None else (
+            self._reference_image)
+        return check_support_fits_search_area(
+            (float(frame.shape[0]), float(frame.shape[1])),
+            (float(point.edge_template.shape[0]), float(point.edge_template.shape[1])),
+            (float(np.deg2rad(point.angle_range[0])),
+             float(np.deg2rad(point.angle_range[1]))),
+        )
+
+    def _warn_template_fit(self, action: str) -> None:
+        """Warn when the template cannot be searched over the requested angles."""
+        issues = self._template_fit_warnings()
+        if not issues:
+            self._fit_warning_signature = None
+            return
+        signature = tuple(sorted((issue["kind"], issue["limb"]) for issue in issues))
+        if signature == getattr(self, "_fit_warning_signature", None):
+            return
+        self._fit_warning_signature = signature
+        detail = "\n".join(f"· {issue['message']}" for issue in issues)
+        messagebox.showwarning(
+            "模板装不进图像",
+            f"{action}前检查到模板与搜索范围不匹配：\n{detail}\n\n"
+            "引擎不会对超出画面的位姿做补零匹配，这些角度会被直接跳过，"
+            "旋转件可能因此找不到。请减小模板尺寸，或缩小角度搜索范围。",
         )
 
     def _warn_template_roi(self, action: str) -> None:
