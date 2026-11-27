@@ -13,6 +13,9 @@
 
 **现有模型默认行为不变**；需要你注意的是「模板接近画面尺寸」的那几个模型，以及**两个算法的分数不可互比**。
 
+本轮下半程还有一件事：**v2 接口和 GUI 现在跑的是同一套搜索编排**（在此之前是两份实现，
+已经在窗口半径、并列峰、单趟精化上分叉）。归一过程修掉了三个引擎缺陷，见 §三-6。
+
 ---
 
 ## 二、新增参数
@@ -94,6 +97,34 @@ manifest 的 `matching` 段、v2 的 `TemplateSearch`、GUI 三处同名可用�
 
 **切换算法必须重新标定 `match_score_threshold`。**
 
+### 6. v2 与 GUI 共用一套编排；三个引擎缺陷已修
+
+以前 `measure/template_search.py`（引擎，GUI/测量工具走它）和
+`measure_api/v2/families/templates.py`（v2 接口）各写了一份「金字塔 → 粗扫 → 邻域细扫
+→ 抑制」。NCC 走 v2 那份、只有 shape 走引擎，两份已经在下面三处**实际分叉**。
+现在 v2 只做参数翻译，两种算法都调用引擎，分叉不可能再出现。
+
+这几条**不是重构，是行为修正**，会带来小幅数值变化：
+
+| # | 缺陷 | 现场表现 |
+|---|---|---|
+| 1 | 细窗口半径 `max(expand, 0.75×长边)`：两个约束取了最大值而非相加 | 32×24 模板只得 24 px（需 ~20 px 自身半对角线**加**余量），粗定位差一格就整块找不到 |
+| 2 | 单趟扫描用 `subpixel=False` 跑完就当结果 | 请求的亚像素被**静默忽略**，位置停在整像素（实测偏 0.5 px）|
+| 3 | 并列分数用非稳定排序 | 平坦分数平台（周期性件、合成图）上选中平台内任意一格，不同调用结果不同 |
+
+修法分别是：① 半径改为 `半对角线 + fine_search_expand_px` 并夹在搜索区内；
+② 单趟即最终结果，按请求精化，只有喂邻域的粗扫保持整像素；
+③ 稳定排序，并列时**左上优先**，与 `argmax` / `minMaxLoc` 一致。
+
+**对你的影响**：
+
+- 走 GUI / 测量工具的模型：8 个仓库模型实测**位置和分数逐位未变**——这条路径的模型都开启了 `coarse_fine` / 金字塔，三条缺陷在这条路径上没有触发。
+- 走 v2 的调用：命中位置可能变化 **≤ 0.5 px**，且只会出现在「之前被忽略亚像素」的
+  单趟路径上；阈值不需要重标。
+- v2 的 `fine_search.windows` / `neighborhood_radius` / `pyramid_scale` 现在报告引擎
+  **实际使用**的窗口和比例，不再由接口层按自己的公式推算——数值可能和上一版不同，
+  但它们描述的是真实行为。
+
 ---
 
 ## 四、性能实测（定位均未变）
@@ -134,6 +165,18 @@ search_plan.ignored_fields
 |---|---|
 | `support_exceeds_search_area` | 模板或全部旋转变位都装不进搜索区 |
 
+⚠️ **原因码词汇变了**：没找到目标时不再返回 `no_match`，而是引擎的
+**`no_matches`**（`support_exceeds_search_area` 仍是独立原因码）。
+
+```python
+# 旧
+if result["reason"] == "no_match": ...
+# 新：建议只判 valid，reason 只用于日志/归类
+if not result["valid"]: ...
+```
+
+如果代码里有 `reason == "no_match"` 的分支，请改成判 `valid`，或改字符串。
+
 ### shape 在 v2 的限制（显式上报，不静默）
 
 | 情况 | 行为 |
@@ -169,25 +212,14 @@ search_plan.ignored_fields
 「金字塔 → 粗扫 → 邻域细扫 → 抑制」编排，而 `measure_api/v2/families/templates.py`
 里又写了一遍（`_grid` / `_variant` / `_scan` / `_scan_grid` / `_suppress` /
 `_fine_window` / `_decimate`，约 400 行）。NCC 走 v2 自己那套，只有 shape 走引擎。
-两套实现在窗口半径、并列峰处理和单趟精化上**已经出现了实际差异**（见下面三条）。
+两套实现在窗口半径、并列峰处理和单趟精化上**已经出现了实际差异**（§三-6 有具体表现）。
 
 现在 `match_template()` 只做两件事：把 v2 参数翻译成引擎参数、把引擎结果翻译回 v2
 结构。NCC 与 shape 都调用 `search_support()`；`/control-alignments` 的控制点定位
 也改走同一入口。v2 侧只剩 `locate_support` / `_engine_support` / `_engine_options` /
 `_engine_diagnostics` 四个翻译函数，`templates.py` 从 1282 行降到 851 行。
 
-### 归一过程中修掉的三个引擎缺陷
-
-这几条**不是重构，是行为修正**，会带来小幅数值变化，已在门禁测试中确认：
-
-| # | 缺陷 | 影响 | 修法 |
-|---|---|---|---|
-| 1 | 细搜索窗口半径取 `max(expand, 0.75×长边)` | 窗口装不下「支撑 + 粗定位误差」。32×24 的模板只给了 24 px 半径（需要 20 px 自身半对角线**加上**余量），粗定位差一格就整块找不到 → `no_matches` | 改为 `半对角线 + fine_search_expand_px` |
-| 2 | 单趟扫描（`pyramid_levels=0` 且 `coarse_fine=false`）用 `subpixel=False` 跑完直接当结果 | 请求 `subpixel=true` 被**静默忽略**，位置停在整像素 | 单趟即最终结果，按请求的 `subpixel` 精化；只有喂邻域的粗扫才保持整像素 |
-| 3 | `peaks()` 对并列分数用非稳定排序 | 平坦分数平台（周期性/合成件）上选中平台内的任意一格，不同调用选到的格子不同 | 稳定排序，并列时**左上优先**，与 `argmax` / `minMaxLoc` 一致 |
-
-`v2` 的 `fine_search.windows` 与 `neighborhood_radius` 现在直接报告引擎**实际使用**的
-窗口（不再由 API 层按自己的公式推算）；`pyramid_scale` 同样来自引擎的自报值。
+三个引擎缺陷随归一暴露并已修复，属于**行为变化**，写在 §三-6（那里是必读区）。
 
 ### 仍然存在的已知红基线
 
@@ -220,6 +252,7 @@ search_plan.ignored_fields
 | 坐标可信度 | `ambiguous` 是否为 true |
 | 分数突然变低 | 是否切了算法；`metric` 是否改成反相 |
 | 变慢 | `min_verify_level` 是否为 0；线程数是否被限制 |
+| v2 与 GUI 结果不一致 | 两边 `search` 参数是否一致：**v2 默认 `coarse_fine=false`、`score_threshold=0.7`，GUI 默认 `true` / `0.5`**（实现已是同一套，差异只可能来自参数）|
 
 ---
 
