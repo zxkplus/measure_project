@@ -978,6 +978,9 @@ class TemplateMatchPointObject(MeasureObject):
         angle_range_half: float = 15.0,
         angle_step: float = 1.0,
         use_subpixel: bool = True,
+        algorithm: str = "ncc",
+        metric: str = "use_polarity",
+        min_verify_level: int = 0,
         _template_point: Any = None,  # pre-built TemplatePoint (internal)
     ):
         super().__init__(label)
@@ -991,6 +994,12 @@ class TemplateMatchPointObject(MeasureObject):
         self.angle_range_half = angle_range_half
         self.angle_step = angle_step
         self.use_subpixel = use_subpixel
+        #: Which matcher runs, and how tolerant/cheap it is. These mirror the
+        #: localization settings; a measurement tool keeps its own copy because
+        #: it has its own support, angle range and threshold.
+        self.algorithm = str(algorithm)
+        self.metric = str(metric)
+        self.min_verify_level = max(0, int(min_verify_level))
         self._rotation = (angle_range_half > 0)
         self._angle_range = (-angle_range_half, angle_range_half)
         self._template_point: Any = _template_point  # TemplatePoint instance
@@ -1058,6 +1067,9 @@ class TemplateMatchPointObject(MeasureObject):
             "angle_range_half": self.angle_range_half,
             "angle_step": self.angle_step,
             "use_subpixel": self.use_subpixel,
+            "algorithm": self.algorithm,
+            "metric": self.metric,
+            "min_verify_level": self.min_verify_level,
         }
 
     @classmethod
@@ -1072,6 +1084,9 @@ class TemplateMatchPointObject(MeasureObject):
             angle_range_half=data.get("angle_range_half", 15.0),
             angle_step=data.get("angle_step", 1.0),
             use_subpixel=data.get("use_subpixel", True),
+            algorithm=data.get("algorithm", "ncc"),
+            metric=data.get("metric", "use_polarity"),
+            min_verify_level=data.get("min_verify_level", 0),
         )
 
     def visualize(self, image: np.ndarray, **kwargs) -> np.ndarray:

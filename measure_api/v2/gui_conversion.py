@@ -757,6 +757,11 @@ class _Builder:
                     subpixel=bool(parameters.get("use_subpixel", True)),
                     pyramid_levels=0,
                     pyramid_max_template_size=_pyramid_cap(parameters, size, size),
+                    # The tool's matcher choice travels with it; an asset saved
+                    # before these keys existed converts the same as before.
+                    metric=str(parameters.get("metric", "use_polarity")),
+                    algorithm=str(parameters.get("algorithm", "ncc")),
+                    min_contrast=float(parameters.get("min_contrast", 0.0)),
                 ).model_dump(mode="json"),
             }
         calibration = self.model.config.get("calibration")

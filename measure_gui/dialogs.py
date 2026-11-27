@@ -258,6 +258,7 @@ class TemplateMatchPointDialog(BaseParamDialog):
             "decimate_exponent": 0,
             "coarse_template_side": 128,
             "metric": "use_polarity",
+            "algorithm": "ncc",
         }
         if params:
             defaults.update(params)
@@ -309,6 +310,11 @@ class TemplateMatchPointDialog(BaseParamDialog):
         self._add_combo(main, "极性 Metric", "metric",
                         ["use_polarity", "ignore_global_polarity"],
                         "use_polarity", row); row += 1
+        # Which matcher this tool runs. Both settings must reach the tool's own
+        # TemplatePoint: showing a control that nothing reads is worse than not
+        # showing it at all.
+        self._add_combo(main, "匹配算法 Algorithm", "algorithm",
+                        ["ncc", "shape"], "ncc", row); row += 1
 
         self._add_buttons(main, row + 1)
 

@@ -387,6 +387,10 @@ PARAMETERS = {
         "pyramid_max_template_size",
         "decimate_exponent",
         "coarse_template_side",
+        # Matcher selection and its two knobs, added with the Halcon alignment.
+        "algorithm",
+        "metric",
+        "min_verify_level",
     },
 }
 
@@ -907,6 +911,11 @@ def convert_normalized(
                     "pyramid_max_template_size": int(
                         _pyramid_field(p, "coarse_template_side", 128)
                     ),
+                    # Carried through so a tool taught with the tolerant polarity
+                    # or the edge matcher converts to the same behaviour.
+                    "metric": p.get("metric", "use_polarity"),
+                    "algorithm": p.get("algorithm", "ncc"),
+                    "min_contrast": float(p.get("min_contrast", 0.0)),
                 },
             }
             if _pyramid_field(p, "decimate_exponent", 0):

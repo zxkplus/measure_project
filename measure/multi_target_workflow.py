@@ -1339,6 +1339,12 @@ class MultiTargetWorkflow:
                     multi_target=False,
                     decimate_exponent=decimate_exponent,
                     coarse_template_side=_pms,
+                    # The tool's own matcher settings. Without these the tool
+                    # silently ran correlation with strict polarity no matter
+                    # what the dialog showed.
+                    algorithm=str(params.get("algorithm", "ncc")),
+                    metric=str(params.get("metric", "use_polarity")),
+                    min_verify_level=max(0, int(params.get("min_verify_level", 0))),
                 )
                 self._template_match_points[label] = tp
 

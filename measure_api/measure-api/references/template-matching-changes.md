@@ -145,6 +145,24 @@ search_plan.ignored_fields
 
 ---
 
+## 五之二、测量工具「模板匹配点」也支持这些参数
+
+`TemplateMatchPoint`（模板匹配点，点对由两个这样的点组成）**有自己的一份 `TemplatePoint`**，
+参数不再跟随主面板，而是**每个工具独立配置**（因为它有自己的模板尺寸、角度范围和阈值）。
+
+| 参数 | 是否支持 |
+|---|---|
+| `algorithm`（ncc/shape）| ✅ 对话框新增「匹配算法」|
+| `metric`（极性）| ✅ 已有，**本轮之前是存了但没生效**，现已修复 |
+| `min_verify_level` | ✅ 随 manifest 存取（对话框中暂未单列，可用默认 0）|
+| `min_contrast` | ❌ 暂未暴露（shape 自动取值）|
+
+**注意**：改动后**不需要重新教学**——参数变更会触发工具内部重建 TemplatePoint。
+
+**小模板提醒**：测量工具默认 `template_size = 40`，实测 40px 上 shape 可用且与 NCC 同位置
+（score 0.977 vs 1.000），但边缘特征更少的图案可能点数不足而返回 `template_no_texture`，
+此时该点 `valid=false` 并带原因。
+
 ## 六、迁移指南
 
 ### 现有模型
