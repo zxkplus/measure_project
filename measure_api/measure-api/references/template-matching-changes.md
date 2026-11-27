@@ -163,6 +163,42 @@ search_plan.ignored_fields
 （score 0.977 vs 1.000），但边缘特征更少的图案可能点数不足而返回 `template_no_texture`，
 此时该点 `valid=false` 并带原因。
 
+## 五之三、编排归一：v2 不再有自己的扫描实现
+
+之前的状况是**同一个算法两套实现**：`measure/template_search.py` 里有完整的
+「金字塔 → 粗扫 → 邻域细扫 → 抑制」编排，而 `measure_api/v2/families/templates.py`
+里又写了一遍（`_grid` / `_variant` / `_scan` / `_scan_grid` / `_suppress` /
+`_fine_window` / `_decimate`，约 400 行）。NCC 走 v2 自己那套，只有 shape 走引擎。
+两套实现在窗口半径、并列峰处理和单趟精化上**已经出现了实际差异**（见下面三条）。
+
+现在 `match_template()` 只做两件事：把 v2 参数翻译成引擎参数、把引擎结果翻译回 v2
+结构。NCC 与 shape 都调用 `search_support()`；`/control-alignments` 的控制点定位
+也改走同一入口。v2 侧只剩 `locate_support` / `_engine_support` / `_engine_options` /
+`_engine_diagnostics` 四个翻译函数，`templates.py` 从 1282 行降到 851 行。
+
+### 归一过程中修掉的三个引擎缺陷
+
+这几条**不是重构，是行为修正**，会带来小幅数值变化，已在门禁测试中确认：
+
+| # | 缺陷 | 影响 | 修法 |
+|---|---|---|---|
+| 1 | 细搜索窗口半径取 `max(expand, 0.75×长边)` | 窗口装不下「支撑 + 粗定位误差」。32×24 的模板只给了 24 px 半径（需要 20 px 自身半对角线**加上**余量），粗定位差一格就整块找不到 → `no_matches` | 改为 `半对角线 + fine_search_expand_px` |
+| 2 | 单趟扫描（`pyramid_levels=0` 且 `coarse_fine=false`）用 `subpixel=False` 跑完直接当结果 | 请求 `subpixel=true` 被**静默忽略**，位置停在整像素 | 单趟即最终结果，按请求的 `subpixel` 精化；只有喂邻域的粗扫才保持整像素 |
+| 3 | `peaks()` 对并列分数用非稳定排序 | 平坦分数平台（周期性/合成件）上选中平台内的任意一格，不同调用选到的格子不同 | 稳定排序，并列时**左上优先**，与 `argmax` / `minMaxLoc` 一致 |
+
+`v2` 的 `fine_search.windows` 与 `neighborhood_radius` 现在直接报告引擎**实际使用**的
+窗口（不再由 API 层按自己的公式推算）；`pyramid_scale` 同样来自引擎的自报值。
+
+### 仍然存在的已知红基线
+
+`tests/v2/test_template_precision.py::test_long_support_localization_matches_golden`
+（`whole` / `neighborhood` 两个用例）在**本次改动之前的 HEAD 上就已是失败状态**，
+差异为 3e-6 ～ 1.6e-5 px，属于 golden 记录时的 OpenCV/NumPy 版本漂移，与本轮无关。
+处理方式：要么按当前平台重新生成 golden 并用 `git archive` 对照验证，要么整体放宽到
+1e-4 px；在此之前不要把它当作回归信号。
+
+---
+
 ## 六、迁移指南
 
 ### 现有模型

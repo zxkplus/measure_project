@@ -23,7 +23,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from measure_api.v2.app import create_app
-from measure_api.v2.families.templates import TemplateSearch, _scan, _variant
 from measure_api.v2.models import ServiceSettings
 
 DATA = Path(__file__).parent / "data" / "template-precision" / "tooth"
@@ -119,6 +118,7 @@ def test_declared_scale_reaches_template_side():
         pixels = archive["pixels"]
     assert pixels.shape == tuple(GOLDEN["support_shape"])
 
+
 def _synthetic(client, tmp_path):
     """Teach a small support and place it twice, far apart, in a wide image."""
     rng = np.random.default_rng(7)
@@ -139,19 +139,31 @@ def _synthetic(client, tmp_path):
 
 
 def test_rotation_variant_larger_than_window_is_reported_not_clipped():
-    """A pose variant that cannot fit its window is skipped, never clipped into a peak."""
+    """A pose variant that cannot fit the search area is skipped, never clipped."""
+    from measure.computation_types import Space
+    from measure.template_search import (
+        PreparedSupport, SearchOptions, search_support, variant_size,
+    )
+
     rng = np.random.default_rng(7)
     patch = rng.integers(10, 240, (16, 24), dtype=np.uint8)
-    search = rng.integers(0, 255, (120, 400)).astype(np.float32)
-    options = TemplateSearch(angle_min=-40, angle_max=40, angle_step=80,
-                             fine_search_expand_px=0)
-    assert _variant(patch, 0.0, 1.0, (400, 120))[3] == (24, 16)
-    assert _variant(patch, 40.0, 1.0, (400, 120))[3] == (29, 28)
-    skipped = []
-    # A 26 px window cannot hold the 29x28 rotated variant.
-    found = _scan(search[:26, :26], patch, options, 40.0, 1.0, (0, 0), skipped=skipped)
-    assert found == []
-    assert skipped and skipped[0]["required"] == [29, 28]
-    wider = []
-    _scan(search[:31, :31], patch, options, 40.0, 1.0, (0, 0), skipped=wider)
-    assert wider == []
+    assert variant_size(patch, 0.0, 1.0, origin="pixel_center") == (24, 16)
+    assert variant_size(patch, np.deg2rad(40), 1.0, origin="pixel_center") == (29, 28)
+    prepared = PreparedSupport(
+        pixels=np.ascontiguousarray(patch, dtype=np.float32),
+        valid_mask=np.ones(patch.shape[:2], dtype=bool),
+        anchor_support=(11.5, 7.5), support_to_reference=None, reference_space=None,
+        support_space=Space("support", "px"), mask=None, origin="pixel_center")
+    options = SearchOptions(score_threshold=0.9, angle_list=(np.deg2rad(40),))
+    # A 26x26 frame cannot hold the 29x28 rotated variant: say so instead of
+    # correlating a clipped one.
+    narrow = rng.integers(0, 255, (26, 26), dtype=np.uint8)
+    found = search_support(narrow, prepared, options,
+                           image_space=Space("inspection", "px"))
+    assert not found.valid
+    assert found.reason == "support_exceeds_search_area"
+    assert found.diagnostics["unavailable_variant_count"] == 1
+    # One pixel more per side and the same pose is evaluated rather than skipped.
+    wider = search_support(rng.integers(0, 255, (31, 31), dtype=np.uint8), prepared,
+                           options, image_space=Space("inspection", "px"))
+    assert wider.diagnostics["unavailable_variant_count"] == 0

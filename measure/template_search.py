@@ -731,7 +731,13 @@ def peaks(scores: Array, threshold: float, limit: int = 0,
         if xs.size == 0:
             return []
         values = finite[ys, xs]
-        order = np.argsort(-values)
+        # A flat score plateau (periodic or synthetic parts) ties exactly, so the
+        # order must not depend on the sort algorithm: a stable sort keeps the
+        # raster order ``nonzero`` produced, which makes the top-left cell win —
+        # the same choice ``peak_argmax`` and ``minMaxLoc`` make. An unstable
+        # sort returned an arbitrary cell of the plateau and moved the reported
+        # centre by whole pixels between callers.
+        order = np.argsort(-values, kind="stable")
         if limit and order.size > limit:
             order = order[:limit]
         return [(float(xs[i]), float(ys[i]), float(values[i])) for i in order]
@@ -977,9 +983,14 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
     else:
         coarse_angles, coarse_scales = fine_angles, fine_scales
 
+    # When there is no second pass this one is the answer, so it must refine the
+    # peaks the caller asked for; a pass that only seeds neighbourhoods stays at
+    # integer peaks because the refinement below will subpixel them anyway.
+    single_pass = not decimated and not options.coarse_fine
     coarse = _scan_once(scan_gray, scan_support, SearchOptions(
         score_threshold=min(options.score_threshold, options.coarse_score_threshold),
-        max_matches=0, max_overlap=options.max_overlap, subpixel=False,
+        max_matches=0, max_overlap=options.max_overlap,
+        subpixel=bool(options.subpixel) if single_pass else False,
         coarse_fine=False, angle_list=tuple(coarse_angles),
         scale_list=tuple(coarse_scales), metric=options.metric,
     ), image_space)
@@ -999,10 +1010,10 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
                             "search_complete": True})
         return invalid(image_space, coarse.reason or "no_matches", diagnostics)
 
-    if not decimated and not options.coarse_fine:
+    if single_pass:
         # One pass already covered the whole requested grid at full resolution,
-        # so the coarse matches are final: rescanning them would repeat every
-        # correlation for a subpixel refinement that pass did not ask for.
+        # and it ran with the caller's own refinement, so its matches are final:
+        # rescanning them would repeat every correlation for nothing.
         diagnostics.update({
             "searched_variant_count": len(fine_angles) * len(fine_scales),
             "ncc_evaluations": len(fine_angles) * len(fine_scales),
@@ -1035,8 +1046,13 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
     # every neighbourhood the coarse stage kept; fine_candidates (or the
     # MEASURE_TEMPLATE_FINE_CANDIDATES environment variable) bounds it for a
     # symmetric part where near-equal peaks each cost a full rescan.
-    neighbourhoods = suppress(coarse.value.matches, options.max_overlap,
-                              options.resolved_fine_candidates() or 0)
+    # The greedy selection is order-stable, so capping the finished list and
+    # stopping the loop at the cap keep the same prefix; taking the prefix here
+    # lets the diagnostics report both the available and the refined count.
+    available = suppress(coarse.value.matches, options.max_overlap)
+    fine_limit = options.resolved_fine_candidates()
+    neighbourhoods = available[:fine_limit] if fine_limit else available
+    diagnostics["fine_neighborhoods_available"] = len(available)
 
     # Halcon's second NumLevels value: track the candidates down to this level
     # instead of all the way to full resolution. Each level skipped multiplies
@@ -1062,6 +1078,7 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
                         if options.coarse_fine else [anchor.scale])
         if not local_angles or not local_scales:
             continue
+        diagnostics["fine_poses_per_neighborhood"] = len(local_angles) * len(local_scales)
         if verify_level:
             # The candidate lives in the coarse frame; move it into the verify
             # frame, refine there, then move the result back to full resolution.
@@ -1095,6 +1112,12 @@ def _two_stage(gray: Array, prepared: PreparedSupport, options: SearchOptions,
             + int(refine_stats.get("unavailable", 0)),
         "search_complete": True,
     })
+    # Only the full-resolution refinement picks the windows, and only it can say
+    # how large they were; a verify-level rescan happens in a decimated frame.
+    if not verify_level:
+        diagnostics["fine_search_radius"] = _fine_radius_px(prepared, options)
+        diagnostics["fine_windows"] = list(refine_stats.get("windows", ()))
+        diagnostics["bounded_outside"] = bool(refine_stats.get("bounded_outside", False))
     if not selected:
         return invalid(image_space, "no_matches", diagnostics)
     return observed(image_space, MatchSet(matches=tuple(selected)), diagnostics)
@@ -1448,20 +1471,33 @@ def _decimate_pair(gray: Array, prepared: PreparedSupport, factor: float, *,
 def _fine_radius_px(prepared: PreparedSupport, options: SearchOptions) -> float:
     """Return the half-side of a full-resolution refinement window.
 
-    The window must cover the support plus whatever the coarse stage could have
-    been off by, but never more than the search area itself: past that point the
-    "refinement" is a second full-frame correlation per candidate, which costs
-    more than the coarse pass saved.
+    Two terms, because the window has to satisfy two independent constraints:
+
+    * **half the support diagonal** so the rotated support fits whole. A centred
+      box reaches ``diagonal / 2`` from its centre under *any* rotation, so this
+      is the exact requirement, not an approximation of the longest side.
+    * **``fine_search_radius_px``** for how wrong the coarse centre may be: half
+      a coarse pixel plus the rotation/translation coupling of a thinned pose
+      grid.
+
+    They add. Taking the maximum of the two instead — as this did — leaves a
+    small support unable to absorb any coarse error at all: a 32x24 support got
+    a 24 px radius where it needs 20 px of its own extent *plus* the margin, so
+    a coarse candidate one pixel early found nothing in its window.
+
+    The radius is clipped to the search area by the caller, so asking for more
+    than the frame never costs a second full-frame scan per candidate.
 
     Args:
         prepared: Immutable prepared support (full resolution).
-        options: Search policy carrying the radius floor.
+        options: Search policy carrying the coarse-error margin.
 
     Returns:
         Half-side in pixels, at least one.
     """
-    support_shape = np.asarray(prepared.pixels).shape[:2]
-    return float(max(options.fine_search_radius_px, max(support_shape) * 0.75))
+    height, width = np.asarray(prepared.pixels).shape[:2]
+    extent = 0.5 * math.hypot(float(width), float(height))
+    return float(max(1.0, extent + float(options.fine_search_radius_px)))
 
 
 def _rescale_match(match: TemplateMatch, scale: float,
@@ -1554,6 +1590,16 @@ def _rescan_neighbourhood(gray: Array, prepared: PreparedSupport,
     if stats is not None:
         stats["unavailable"] = stats.get("unavailable", 0) + int(
             local.diagnostics.get("unavailable_variant_count", 0) or 0)
+        # The window is decided here, so this is the only place that can report
+        # what the refinement actually did. Callers that publish a search plan
+        # read it rather than re-deriving a size they did not choose.
+        stats.setdefault("windows", []).append({
+            "angle": float(anchor.angle_rad),
+            "x": int(left), "y": int(top),
+            "width": int(right - left), "height": int(bottom - top),
+        })
+        if left == 0 or top == 0 or right == width or bottom == height:
+            stats["bounded_outside"] = True
     if not local.valid or local.value is None:
         return []
     shifted: List[TemplateMatch] = []
@@ -1740,8 +1786,13 @@ def _scan_once(gray: Array, prepared: PreparedSupport, options: SearchOptions,
                           limit=8 * max(options.max_matches, 8))
         matches: List[TemplateMatch] = []
         for x, y, score in found:
-            peak_x, peak_y = (refine_peak_xy(scores, x, y) if options.subpixel
-                              else (float(x), float(y)))
+            # A correlation coefficient outside [-1, 1] is float32 accumulation
+            # noise, so the refinement reads the same clipped value the peak
+            # finder would have reported. Feeding the raw sample instead shifts
+            # the quadratic vertex by milli-pixels on a near-flat peak.
+            centre = min(1.0, max(-1.0, float(score)))
+            peak_x, peak_y = (refine_peak_xy(scores, x, y, centre=centre)
+                              if options.subpixel else (float(x), float(y)))
             center_x = peak_x + rendered.center[0] - offset_x
             center_y = peak_y + rendered.center[1] - offset_y
             if not (0.0 <= center_x <= gray.shape[1] - 1

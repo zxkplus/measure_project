@@ -7,9 +7,9 @@ import os
 import threading
 import zipfile
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, List, Literal, Optional, Tuple
 
+import cv2
 import numpy as np
 from pydantic import Field, model_validator
 
@@ -19,11 +19,8 @@ from measure.computation_types import (
 from measure.geometry_mapping import similarity_scale
 from measure.rectify import ResampleOptions, patch_source_corners, warp_mapped
 from measure.template_search import (
-    SearchOptions, correlate, decimate_matrix, decimate_pixels, has_texture,
-    PreparedSupport, keep_disjoint, peaks, refine_peak_xy, render_variant,
-    rotated_box_overlap, search_support, variant_size,
+    PreparedSupport, SearchOptions, has_texture, search_support,
 )
-from measure.template_search import _pyramid_factor as engine_factor
 from measure_api.v2.errors import ServiceError
 from measure_api.v2.files import ArtifactWriter
 from measure_api.v2.models import (
@@ -34,7 +31,7 @@ from measure_api.v2.preprocessing import (
     Preprocessing, RawPreprocessing, apply_preprocessing, display_preview,
 )
 from measure_api.v2.registry import CalculationContext, Operation
-from measure_api.v2.timing import counter, current, measure, span, timed
+from measure_api.v2.timing import counter, timed
 from measure_api.v2.families.images import RotatedROI, encode_png, roi_to_patch_matrix
 
 
@@ -510,449 +507,66 @@ class TemplateMatchResult(StrictModel):
     diagnostics: dict = Field(default_factory=dict)
 
 
-def _grid(low: float, high: float, step: float) -> list:
-    values = np.arange(low, high + step * 1e-6, step).tolist()
-    if not values or abs(values[-1] - high) > 1e-6:
-        values.append(high)
-    return values
+def _engine_support(pixels: np.ndarray, metadata: TemplateMetadata) -> PreparedSupport:
+    """Express a loaded portable template as the engine's immutable support.
 
+    A template asset already holds the processed support pixels and the
+    reference-to-support mapping, so the engine takes that support directly
+    instead of re-cropping a reference image. The anchor has to move into support
+    coordinates: the asset stores it where it was taught (the reference frame),
+    while every reported pose is relative to the support.
 
-def _variant(pixels: np.ndarray, angle: float, scale: float,
-             feasible: tuple) -> Tuple[Optional[np.ndarray], Optional[np.ndarray],
-                                      Optional[np.ndarray], Tuple[float, ...]]:
-    """Render a rotated/scaled support and mask with its exact pixel mapping.
-
-    Args:
-        pixels: Rectified support pixels.
-        angle: Clockwise pose angle in degrees.
-        scale: Dimensionless pose scale.
-        feasible: Largest variant width/height the search area can accommodate.
-
-    Returns:
-        Variant, mask and support-to-search pose matrix, plus the rendered size.
-        When the rotated support would not fit the search area, all data is
-        ``None`` and only the required size is returned so callers can widen
-        their window instead of clipping the variant into false peaks.
-    """
-    angle_rad = float(np.deg2rad(angle))
-    # The shared layer owns the rotation geometry; ``pixel_center`` selects the
-    # pixel-index convention this API has always reported.
-    width, height = variant_size(pixels, angle_rad, scale, origin="pixel_center")
-    size = (width, height)
-    if width > feasible[0] or height > feasible[1]:
-        return None, None, None, size
-    with measure("variant_render"):
-        rendered = render_variant(pixels.astype(np.float32), angle_rad, scale,
-                                  origin="pixel_center")
-    mask = rendered.mask
-    if mask is None:
-        mask = np.ones(rendered.pixels.shape[:2], np.uint8)
-    return rendered.pixels, mask, rendered.matrix, size
-
-
-def _scan(search: np.ndarray, pixels: np.ndarray, options: TemplateSearch,
-          angle: float, scale: float, origin: tuple = (0, 0),
-          threshold: Optional[float] = None,
-          skipped: Optional[list] = None) -> list:
-    """Correlate one pose variant over a search area.
+    Matching runs on one intensity plane, so a colour support is reduced to luma
+    here exactly as the engine reduces the inspection image.
 
     Args:
-        search: Numeric search-area pixels.
-        pixels: Rectified support pixels.
-        options: Search controls (threshold, overlap, subpixel).
-        angle: Pose angle in degrees.
-        scale: Pose scale.
-        origin: ``(x, y)`` of the search area's top-left pixel in its parent frame.
-        threshold: Optional coarse/neighborhood threshold override.
-        skipped: Optional list receiving poses whose rotated support exceeds the
-            search area; never silently clipped.
-
-    Returns:
-        Candidates as ``(score, angle, scale, support-to-parent pose matrix)``.
-    """
-    if not _has_texture(search):
-        return []
-    variant, mask, matrix, size = _variant(
-        pixels, angle, scale, (search.shape[1], search.shape[0]))
-    if variant is None:
-        if skipped is not None:
-            skipped.append({"angle": angle, "scale": scale, "required": list(size)})
-        return []
-    h, w = variant.shape[:2]
-    if not _has_texture(variant):
-        return []
-    # A full support mask is ordinary NCC; OpenCV's masked path is much slower.
-    if np.all(mask):
-        mask = None
-    # One contiguous float32 window is reused for every pose: converting it per
-    # evaluation copied the whole window (tens of megabytes on full-resolution
-    # rescans) once for each angle in the grid.
-    area = np.ascontiguousarray(search, dtype=np.float32)
-    with measure("ncc"):
-        scores = correlate(area, variant, mask, metric=options.metric)
-    counter("ncc_evaluations")
-    counter("ncc_positions", float(scores.size))
-    counter("ncc_template_pixels", float(w * h))
-    counter("ncc_masked" if mask is not None else "ncc_unmasked")
-    settings = options.model_copy(update={"score_threshold": (
-        options.score_threshold if threshold is None else threshold
-    ), "max_matches": 1000})
-    result = []
-    # The shared primitive owns peak selection and the greedy suppression box;
-    # subpixel refinement and pose re-attachment stay here.
-    for x, y, score in peaks(scores, settings.score_threshold,
-                             limit=settings.max_matches,
-                             suppression_box=(float(w), float(h)),
-                             overlap=settings.overlap):
-        if settings.subpixel:
-            x, y = refine_peak_xy(scores, int(x), int(y), centre=score)
-        pose = matrix.copy()
-        pose[:2, 2] += [x + origin[0], y + origin[1]]
-        result.append((score, angle, scale, pose))
-    return result
-
-
-#: Upper bound on the working set a threaded pose grid may hold at once.
-_POSE_GRID_MEMORY_BYTES = 768 * 1024 * 1024
-
-
-def _scan_grid(search: np.ndarray, pixels: np.ndarray, options: TemplateSearch,
-               poses: List[Tuple[float, float]], origin: Tuple[int, int] = (0, 0),
-               threshold: Optional[float] = None) -> Tuple[list, list]:
-    """Correlate independent pose variants over one search area.
-
-    Pose variants share the search window and differ only by support rotation,
-    so they can be evaluated concurrently without changing the result: blocks
-    are merged in pose order and the final selection sorts by score.
-
-    Args:
-        search: Search-area pixels.
-        pixels: Rectified support pixels.
-        options: Search controls.
-        poses: ``(angle, scale)`` variants in output priority order.
-        origin: Search-area origin in the parent frame.
-        threshold: Optional score threshold override for every variant.
-
-    Returns:
-        ``(candidates, skipped)`` merged in pose order.
-    """
-    recorder = current()
-
-    def evaluate(target: list, misses: list, angle: float, scale: float) -> None:
-        if recorder is None:
-            target.extend(_scan(search, pixels, options, angle, scale, origin,
-                                threshold=threshold, skipped=misses))
-            return
-        # A worker thread starts with an empty context: re-install the operation
-        # recorder so pose spans and NCC counters survive the fan-out.
-        with recorder.activate():
-            target.extend(_scan(search, pixels, options, angle, scale, origin,
-                                threshold=threshold, skipped=misses))
-
-    if len(poses) > 1:
-        threads = search_threads()
-        working_set = int(search.nbytes) + int(pixels.nbytes)
-        if threads > 1 and working_set > 0:
-            threads = max(1, min(threads, _POSE_GRID_MEMORY_BYTES // working_set))
-        if threads > 1:
-            counter("pose_batches_parallel")
-            blocks: List[List] = [[] for _ in poses]
-            misses: List[List] = [[] for _ in poses]
-            with ThreadPoolExecutor(max_workers=threads, thread_name_prefix="pose-grid") as pool:
-                futures = [pool.submit(evaluate, blocks[index], misses[index], angle, scale)
-                           for index, (angle, scale) in enumerate(poses)]
-                for future in futures:
-                    future.result()
-            return ([candidate for block in blocks for candidate in block],
-                    [entry for group in misses for entry in group])
-    found: List = []
-    skipped: List = []
-    for angle, scale in poses:
-        evaluate(found, skipped, angle, scale)
-    return found, skipped
-
-
-@timed("match_suppression")
-def _suppress(candidates: list, pixels: np.ndarray, options: TemplateSearch) -> list:
-    """Select disjoint instances from pose candidates with the shared policy.
-
-    The overlap geometry is the same rotated-rectangle measure the engine uses;
-    only the record layout differs here (``(score, angle, scale, matrix)``).
-    """
-    h, w = pixels.shape[:2]
-
-    def center_of(candidate) -> list:
-        matrix = candidate[3]
-        return list(matrix @ [(w - 1) / 2, (h - 1) / 2, 1])
-
-    def overlap_of(candidate, previous) -> float:
-        _, angle, scale, _ = candidate
-        _, previous_angle, previous_scale, _ = previous
-        center = center_of(candidate)
-        previous_center = center_of(previous)
-        return rotated_box_overlap(
-            (float(center[0]), float(center[1])), (w * scale, h * scale), angle,
-            (float(previous_center[0]), float(previous_center[1])),
-            (w * previous_scale, h * previous_scale), previous_angle,
-        )
-
-    return keep_disjoint(overlap_of, candidates, options.overlap,
-                         options.max_matches or 1000)
-
-
-def _fine_radius(pixels: np.ndarray, options: TemplateSearch) -> int:
-    """Return the half-size of a coarse target's full-resolution fine window.
-
-    The radius covers the half of the support's largest centered extent (the
-    corners of a centered box reach ``diagonal / 2`` under any rotation) plus
-    ``fine_search_expand_px`` for coarse-centre quantization
-    (``0.5 / pyramid_scale`` px) and rotation/translation coupling. It depends
-    on the support, never on the whole image.
-
-    Args:
-        pixels: Rectified support pixels.
-        options: Search controls.
-
-    Returns:
-        Inclusive half-side in inspection pixels, at least one pixel.
-    """
-    h, w = pixels.shape[:2]
-    diagonal = float(np.hypot(w, h)) * options.scale_max
-    return max(1, int(np.ceil(diagonal / 2.0)) + options.fine_search_expand_px)
-
-
-def _local_window(search: np.ndarray, center: tuple, radius: int) -> np.ndarray:
-    """Clip an axis-aligned ``center +/- radius`` window to the search area.
-
-    Args:
-        search: Full search-area pixels.
-        center: Window center ``(x, y)`` in search-area coordinates.
-        radius: Inclusive half-side.
-
-    Returns:
-        Window as ``(x0, y0, x1, y1)`` with ``x1``/``y1`` exclusive; the
-        center is rounded to the nearest pixel so a side is at most
-        ``2 * radius + 1`` unless the search area clips it.
-
-    Raises:
-        ServiceError: ``template.fine_window_too_small`` when the clipped window
-            cannot hold any pose variant.
-    """
-    height, width = search.shape[:2]
-    cx = int(round(center[0]))
-    cy = int(round(center[1]))
-    x0 = max(0, min(cx - radius, width - 1))
-    y0 = max(0, min(cy - radius, height - 1))
-    x1 = min(width, cx + radius + 1)
-    y1 = min(height, cy + radius + 1)
-    if x1 - x0 < 2 or y1 - y0 < 2:
-        raise ServiceError(
-            "template.fine_window_too_small",
-            "Fine-search neighborhood cannot hold the rotated support",
-        )
-    return np.array([x0, y0, x1, y1], dtype=int)
-
-
-def _fine_window(search: np.ndarray, pixels: np.ndarray, center: tuple,
-                 angles: list, scales: list, options: TemplateSearch,
-                 skipped_poses: Optional[list] = None) -> tuple:
-    """Rescan one coarse neighborhood at full resolution.
-
-    The window is the coarse center +/- ``_fine_radius`` clipped to the search
-    area. A pose variant wider or taller than the window cannot be masked
-    faithfully, so it is not scanned and is reported through ``skipped_poses``
-    instead of being clipped into false peaks. Poses that fit are refined.
-
-    Args:
-        search: Full search-area pixels.
-        pixels: Rectified support pixels.
-        center: Coarse pose center in search-area coordinates.
-        angles: Pose angles to refine.
-        scales: Pose scales to refine.
-        options: Search controls.
-        skipped_poses: Optional list receiving poses that no window could hold.
-
-    Returns:
-        ``(candidates, window, touches_border)`` with the window as
-        ``(x0, y0, x1, y1)`` and a flag for windows clipped by the search area.
-    """
-    window = _local_window(search, center, _fine_radius(pixels, options))
-    x0, y0, x1, y1 = (int(value) for value in window)
-    area = search[y0:y1, x0:x1]
-    poses = [(angle, scale) for angle in angles for scale in scales]
-    refined, skipped = [], []
-    if options.fine_angle_policy == "hierarchical" and len(poses) > 4:
-        stride = max(2, int(round(len(poses) ** 0.5)))
-        refined, skipped = _scan_grid(area, pixels, options, poses[::stride], (x0, y0))
-        if refined:
-            best = max(refined, key=lambda item: item[0])[1]
-            step = options.angle_step * stride
-            low = max(min(angles), best - step)
-            high = min(max(angles), best + step)
-            window_poses = [(angle, scale) for angle in _grid(low, high, options.angle_step)
-                            for scale in scales]
-            counter("fine_poses_refined", float(len(window_poses)))
-            dense, dense_skipped = _scan_grid(area, pixels, options, window_poses, (x0, y0))
-            refined = refined + dense
-            skipped = skipped + dense_skipped
-    else:
-        refined, skipped = _scan_grid(area, pixels, options, poses, (x0, y0))
-    if skipped:
-        if not refined:
-            # Nothing fits this neighborhood; surface it rather than a silent no_match.
-            raise ServiceError(
-                "template.fine_window_too_small",
-                "Fine-search neighborhood cannot hold the rotated support",
-            )
-        if skipped_poses is not None:
-            skipped_poses.extend(skipped)
-    touches_border = x0 == 0 or y0 == 0 or x1 == search.shape[1] or y1 == search.shape[0]
-    return refined, (x0, y0, x1, y1), touches_border
-
-
-#: Decimated supports are pure functions of (template pixels, factor); a worker
-#: process reuses them across operations without changing a single sample.
-_COARSE_TEMPLATE_CACHE: "OrderedDict[Tuple[Any, float], np.ndarray]" = OrderedDict()
-_COARSE_TEMPLATE_LIMIT = 8
-
-
-def _coarse_template_cached(key, factor: float) -> Optional[np.ndarray]:
-    """Return a previously decimated support for ``(template key, factor)``."""
-    if key is None:
-        return None
-    entry = _COARSE_TEMPLATE_CACHE.get((key, factor))
-    if entry is not None:
-        _COARSE_TEMPLATE_CACHE.move_to_end((key, factor))
-    return entry
-
-
-def _coarse_template_store(key, factor: float, pixels: np.ndarray) -> None:
-    """Remember one decimated support inside the bounded process cache."""
-    if key is None:
-        return
-    _COARSE_TEMPLATE_CACHE[(key, factor)] = pixels
-    while len(_COARSE_TEMPLATE_CACHE) > _COARSE_TEMPLATE_LIMIT:
-        _COARSE_TEMPLATE_CACHE.popitem(last=False)
-
-
-def _decimate(pixels: np.ndarray, search: np.ndarray, factor: float,
-              template_key: Any = None) -> tuple:
-    """Downscale the support and the search area for the coarse pose scan.
-
-    Both images are low-passed with ``sigma = 0.5 / factor`` before decimation,
-    which is what keeps odd-pixel translations correlate-able.  ``INTER_AREA``
-    averaging removes this pass at a third of the cost but aliases the phase of
-    high-frequency supports: on the acceptance corpus the correlation peak fell
-    from 0.65 to 0.27 and coarse detection failed, so the anti-aliased path
-    stays.  The *support* half of the work is a pure function of the template
-    and the factor, so it is cached across calls.
-
-    Args:
-        pixels: Rectified support pixels.
-        search: Search-area pixels.
-        factor: Decimation factor in ``(0, 1)``.
-        template_key: Process-local template identity for the decimated-support
-            cache, or ``None`` to always recompute.
-
-    Returns:
-        ``(coarse_pixels, coarse_search, support_map, search_map, scheme)``
-        where each 3x3 map takes full-resolution coordinates to that coarse
-        frame.
-    """
-    sigma = 0.5 / factor
-    mapping = decimate_matrix(factor)
-    coarse_pixels = _coarse_template_cached(template_key, factor)
-    if coarse_pixels is None:
-        with measure("pyramid_blur"):
-            coarse_pixels, _ = decimate_pixels(pixels, factor, sigma=sigma)
-        _coarse_template_store(template_key, factor, coarse_pixels)
-    else:
-        counter("pyramid_template_cache_hit")
-    with measure("pyramid_blur"):
-        coarse_search, _ = decimate_pixels(search, factor, sigma=sigma)
-    return coarse_pixels, coarse_search, mapping, mapping, "blur"
-
-
-def request_pyramid_factor(pixels: np.ndarray, options: TemplateSearch) -> float:
-    """Return the decimation factor for one request, translated for the engine.
-
-    The v2 request spells these two quantities ``pyramid_levels`` and
-    ``pyramid_max_template_size`` (published names, kept for compatibility);
-    the engine calls them ``decimate_exponent`` and ``coarse_template_side``.
-    This is the only place the two spellings meet, so the formula itself keeps a
-    single owner in the engine.
-
-    Args:
-        pixels: Rectified support pixels; only its shape is read.
-        options: The request's search controls.
-
-    Returns:
-        Decimation factor in ``(0, 1]``.
-    """
-    engine_options = SearchOptions(
-        decimate_exponent=int(options.pyramid_levels),
-        coarse_template_side=int(options.pyramid_max_template_size))
-    height, width = pixels.shape[:2]
-    probe = PreparedSupport(
-        pixels=np.zeros((height, width), dtype=np.float32),
-        valid_mask=np.ones((height, width), dtype=bool),
-        anchor_support=(width / 2.0, height / 2.0),
-        support_to_reference=None, reference_space=None, support_space=None,
-        mask=None,
-    )
-    return engine_factor(probe, engine_options)
-
-
-def _shape_match(pixels: np.ndarray, metadata: TemplateMetadata, search: np.ndarray,
-                 options: TemplateSearch, region: SearchRegion,
-                 image_ref: FileReference, template: FileReference,
-                 factor: float) -> TemplateMatchResult:
-    """Locate the support with the engine's edge-direction search.
-
-    The correlation path keeps its own orchestration; the edge-direction path has
-    no equivalent here, so it delegates to the engine, which owns both the edge
-    model and the two-level search. Everything crossing the boundary is
-    translated: degrees to radians on the way in, support-to-inspection mappings
-    and pixel-centre coordinates on the way out.
-
-    Args:
-        pixels: Rectified support pixels.
+        pixels: Processed support pixels from the asset.
         metadata: Support provenance, anchor and preprocessing description.
-        search: Preprocessed search area (the request's region crop).
-        options: Request search controls, in degrees.
-        region: Region of the inspection image the search area was cut from.
-        image_ref: Inspection image reference for the result.
-        template: Template reference for the result.
-        factor: Decimation factor already implied by the pyramid controls.
 
     Returns:
-        Matches in this API's schema, or an invalid result with the engine's
-        reason when nothing was found.
+        A prepared support in pixel-centre coordinates.
     """
-    import cv2
-
-    engine_space = Space("inspection", "px")
-    engine_support_space = Space("support", "px")
-    # The shape model is built from gradient directions, which are defined on
-    # one plane; a colour support has no single answer here.
-    support_pixels = pixels if pixels.ndim == 2 else cv2.cvtColor(pixels, cv2.COLOR_BGR2GRAY)
-    search_pixels = search if search.ndim == 2 else cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
-    prepared = PreparedSupport(
-        pixels=np.ascontiguousarray(support_pixels, dtype=np.float32),
-        valid_mask=np.ones(support_pixels.shape[:2], dtype=bool),
-        anchor_support=(float(metadata.anchor.x), float(metadata.anchor.y)),
+    support = pixels if pixels.ndim == 2 else cv2.cvtColor(pixels, cv2.COLOR_BGR2GRAY)
+    height, width = support.shape[:2]
+    matrix = np.array(metadata.source_to_support.matrix, dtype=np.float64)
+    anchor = matrix @ np.array([metadata.anchor.x, metadata.anchor.y, 1.0])
+    return PreparedSupport(
+        pixels=np.ascontiguousarray(support, dtype=np.float32),
+        valid_mask=np.ones((height, width), dtype=bool),
+        anchor_support=(float(anchor[0]), float(anchor[1])),
         support_to_reference=None,
         reference_space=None,
-        support_space=engine_support_space,
+        support_space=Space("support", "px"),
         mask=None,
         origin="pixel_center",
     )
-    engine_options = SearchOptions(
+
+
+def _engine_options(options: TemplateSearch, *, algorithm: str,
+                    radius_px: float) -> SearchOptions:
+    """Translate the published search controls into the engine's policy object.
+
+    This is the only place the two vocabularies meet: degrees to radians,
+    ``pyramid_levels`` to ``decimate_exponent``, ``overlap`` to ``max_overlap``.
+    Both matchers share it, so no control can apply to one algorithm and not the
+    other.
+
+    Args:
+        options: Request search controls, in degrees.
+        algorithm: ``"ncc"`` or ``"shape"``.
+        radius_px: Half-side of a full-resolution refinement window. A value as
+            large as the search area expresses the legacy "whole" policy.
+
+    Returns:
+        The engine policy for this request.
+    """
+    return SearchOptions(
         score_threshold=float(options.score_threshold),
         max_matches=int(options.max_matches),
         max_overlap=float(options.overlap),
         subpixel=bool(options.subpixel),
         coarse_fine=bool(options.coarse_fine),
+        coarse_score_threshold=float(options.coarse_score_threshold),
         coarse_angle_step_rad=float(np.deg2rad(options.coarse_angle_step)),
         coarse_scale_step=float(options.coarse_scale_step),
         angle_min_rad=float(np.deg2rad(options.angle_min)),
@@ -963,82 +577,135 @@ def _shape_match(pixels: np.ndarray, metadata: TemplateMetadata, search: np.ndar
         scale_step=float(options.scale_step),
         decimate_exponent=int(options.pyramid_levels),
         coarse_template_side=int(options.pyramid_max_template_size),
-        fine_candidates=options.fine_candidates,
-        fine_search_radius_px=float(options.fine_search_expand_px),
-        algorithm="shape",
+        fine_search_radius_px=float(radius_px),
+        fine_candidates=options.resolved_fine_candidates(),
+        algorithm=algorithm,
         min_contrast=float(options.min_contrast),
         metric=str(options.metric),
+        search_threads=search_threads(),
     )
-    found = search_support(np.ascontiguousarray(search_pixels), prepared,
-                           engine_options, image_space=engine_space)
+
+
+def locate_support(pixels: np.ndarray, metadata: TemplateMetadata,
+                   search: np.ndarray, options: TemplateSearch):
+    """Run the shared search for either matcher and report what it planned.
+
+    Args:
+        pixels: Rectified support pixels.
+        metadata: Support provenance, anchor and preprocessing description.
+        search: Preprocessed search area (the request's region crop).
+        options: Request search controls.
+
+    Returns:
+        ``(observation, policy, ignored_fields)`` where ``policy`` is the
+        effective fine-search policy and ``ignored_fields`` lists the request
+        controls the shared orchestration cannot honour.
+    """
+    algorithm = "shape" if options.algorithm == "shape" else "ncc"
+    policy = options.resolved_fine_policy()
+    # The refinement window must still hold the support whole, so "whole" is a
+    # radius as large as the search area. The engine then reports the window it
+    # really used rather than one this layer only assumed.
+    radius = (float(max(search.shape)) if policy == "whole"
+              else float(options.fine_search_expand_px))
+    found = search_support(
+        np.ascontiguousarray(search), _engine_support(pixels, metadata),
+        _engine_options(options, algorithm=algorithm, radius_px=radius),
+        image_space=Space("inspection", "px"))
+    counter("ncc_evaluations",
+            float(found.diagnostics.get("ncc_evaluations", 0) or 0))
+    counter("fine_neighborhoods",
+            float(found.diagnostics.get("fine_neighborhoods_available", 0) or 0))
     ignored: List[str] = []
-    if options.resolved_fine_policy() != "neighborhood":
+    if policy != "neighborhood":
         ignored.append("fine_search_policy")
     if options.fine_angle_policy != "dense":
         ignored.append("fine_angle_policy")
+    return found, policy, ignored
+
+
+def _engine_diagnostics(found, options: TemplateSearch, *, algorithm: str,
+                        factor: float, policy: str, ignored: List[str],
+                        preprocessing: str) -> dict:
+    """Publish the shared orchestration's own account of the search.
+
+    The plan is translated, never re-derived: every count and every window here
+    was reported by the stage that did the work, so a diagnostic cannot claim a
+    scan that did not happen.
+
+    Args:
+        found: The engine's observation carrying its diagnostics.
+        options: Request search controls.
+        algorithm: ``"ncc"`` or ``"shape"``.
+        factor: Decimation factor implied by the pyramid controls.
+        policy: Effective fine-search policy.
+        ignored: Request controls the shared orchestration could not honour.
+        preprocessing: Preprocessing preset name from the template asset.
+
+    Returns:
+        The response diagnostics for this match.
+    """
+    report = dict(found.diagnostics)
+    decimated = factor < 1.0 - 1e-12
+    if algorithm == "shape":
+        resample = "shape"
+    else:
+        resample = "blur" if decimated else "none"
+    fine_positions = int(report.get("fine_positions", 0) or 0)
+    radius = report.get("fine_search_radius")
+    plan = {
+        "resample": resample,
+        "coarse_poses": int(report.get("coarse_poses", 0) or 0),
+        "fine_poses_per_neighborhood": int(
+            report.get("fine_poses_per_neighborhood", 0) or 0),
+        "neighborhoods_available": int(
+            report.get("fine_neighborhoods_available", fine_positions) or 0),
+        "neighborhoods_refined": int(
+            report.get("fine_neighborhoods", fine_positions) or 0),
+        "fine_candidates": options.fine_candidates,
+        "fine_angle_policy": options.fine_angle_policy,
+        "threads": search_threads(),
+        "ignored_fields": list(ignored),
+    }
     diagnostics = {
         "pyramid_scale": float(factor),
-        "preprocessing": metadata.preprocessing.type,
+        "preprocessing": preprocessing,
         "metric_frame": "inspection",
         "normalization_recovers_size": True,
-        "algorithm": "shape",
-        "search_plan": {
-            "resample": "shape",
-            "coarse_poses": int(found.diagnostics.get("coarse_poses", 0) or 0),
-            "fine_poses_per_neighborhood": 0,
-            "neighborhoods_available": int(found.diagnostics.get("fine_positions", 0) or 0),
-            "neighborhoods_refined": int(found.diagnostics.get("fine_positions", 0) or 0),
-            "fine_candidates": options.fine_candidates,
-            "fine_angle_policy": options.fine_angle_policy,
-            "threads": 1,
-            "ignored_fields": ignored,
-        },
+        "algorithm": algorithm,
+        "search_plan": plan,
         "fine_search": {
-            "policy": "neighborhood",
-            "neighborhood_radius": None,
+            "policy": policy,
+            # The "whole" policy has no neighbourhood extent to report: its
+            # radius is simply "as wide as the search area", and the windows
+            # below already say how far that reached.
+            "neighborhood_radius": (
+                None if policy == "whole" or radius is None else float(radius)),
             "expand_px": options.fine_search_expand_px,
-            "windows": [],
+            "windows": list(report.get("fine_windows", ()) or ()),
             "skipped_poses": [],
-            "bounded_outside": False,
+            "bounded_outside": bool(report.get("bounded_outside", False)),
         },
-        "verify_level": int(found.diagnostics.get("verify_level", 0) or 0),
+        "verify_level": int(report.get("verify_level", 0) or 0),
         "unavailable_variant_count": int(
-            found.diagnostics.get("unavailable_variant_count", 0) or 0),
-        "ambiguous": bool(found.diagnostics.get("ambiguous", False)),
+            report.get("unavailable_variant_count", 0) or 0),
+        "ambiguous": bool(report.get("ambiguous", False)),
     }
     for key in ("rival_count", "runner_up_score", "runner_up_distance_px",
                 "shape_scale_fallback", "shape_support_too_large"):
-        if key in found.diagnostics:
-            diagnostics[key] = found.diagnostics[key]
-    if not found.valid or found.value is None:
-        return TemplateMatchResult(
-            valid=False, reason=found.reason or "no_match", image=image_ref,
-            template=template, matches=[], diagnostics=diagnostics)
-    matches = []
-    for index, match in enumerate(found.value.matches):
-        matrix = np.array(match.support_to_image.matrix, dtype=np.float64)
-        matrix[:2, 2] += [region.x, region.y]
-        full = matrix @ np.array(metadata.source_to_support.matrix, dtype=np.float64)
-        anchor = full @ [metadata.anchor.x, metadata.anchor.y, 1.0]
-        matches.append(TemplateMatch(
-            target_id=str(index),
-            center=Point(x=float(match.center[0] + region.x),
-                         y=float(match.center[1] + region.y)),
-            anchor=Point(x=float(anchor[0]), y=float(anchor[1])),
-            angle_degrees=float(np.rad2deg(match.angle_rad)),
-            scale=float(match.scale), score=float(match.score),
-            mapping=coordinate_mapping(full, "reference", "inspection"),
-            support_mapping=coordinate_mapping(matrix, "support", "inspection"),
-        ))
-    return TemplateMatchResult(
-        valid=bool(matches), reason=None if matches else "no_match", image=image_ref,
-        template=template, matches=matches, diagnostics=diagnostics)
+        if key in report:
+            diagnostics[key] = report[key]
+    return diagnostics
 
 
 def match_template(
     request: TemplateMatchRequest, context: CalculationContext,
 ) -> TemplateMatchResult:
-    """Search poses and refine every pyramid target at full resolution.
+    """Locate the support with the engine's shared orchestration.
+
+    Both matchers and both fine-search policies go through the same call, so the
+    pose grid, the pyramid, the neighbourhood refinement and the suppression
+    policy have one implementation and cannot drift between algorithms.
 
     Args:
         request: Supplied template/image and explicit pose/search controls.
@@ -1059,134 +726,36 @@ def match_template(
     search = processed[region.y:region.y + region.height, region.x:region.x + region.width]
     if search.ndim != pixels.ndim or (search.ndim == 3 and search.shape[2] != pixels.shape[2]):
         raise ServiceError("template.channels_mismatch", "Template and image channels must agree")
-    h, w = pixels.shape[:2]
-    factor = request_pyramid_factor(pixels, options)
-    if options.algorithm == "shape":
-        return _shape_match(pixels, metadata, search, options, region,
-                            image_ref, template, factor)
-    coarse_pixels = pixels
-    coarse_search = search
-    support_map = np.eye(3)
-    search_map = np.eye(3)
-    resample = "none"
-    if factor < 1:
-        with span("pyramid_prepare"):
-            (coarse_pixels, coarse_search,
-             support_map, search_map, resample) = _decimate(
-                pixels, search, factor,
-                _template_cache_key(request.template, context)
-                if _template_cache_enabled() else None)
-    astep = options.coarse_angle_step if options.coarse_fine else options.angle_step
-    sstep = options.coarse_scale_step if options.coarse_fine else options.scale_step
-    coarse_poses = [(angle, scale)
-                    for angle in _grid(options.angle_min, options.angle_max, astep)
-                    for scale in _grid(options.scale_min, options.scale_max, sstep)]
-    counter("coarse_poses", float(len(coarse_poses)))
-    coarse_threshold = min(options.score_threshold, options.coarse_score_threshold) if (
-        factor < 1 or options.coarse_fine
-    ) else options.score_threshold
-    with span("coarse_search"):
-        candidates, _ = _scan_grid(coarse_search, coarse_pixels, options, coarse_poses,
-                                   threshold=coarse_threshold)
-    if factor < 1:
-        candidates = [(score, angle, scale,
-                       invert_matrix(search_map) @ matrix @ support_map)
-                      for score, angle, scale, matrix in candidates]
-    fine_windows = []
-    skipped_poses = []
-    bounded_outside = False
-    refined_neighborhoods = 0
-    available_neighborhoods = 0
-    fine_poses_per_neighborhood = 0
-    fine_candidates: Optional[int] = None
-    if options.coarse_fine or factor < 1:
-        # Coarse candidates locate target neighborhoods; the requested match count
-        # bounds how many of them deserve a full-resolution rescan.
-        coarse_options = options.model_copy(update={"max_matches": 0})
-        neighborhoods = _suppress(candidates, pixels, coarse_options)
-        available_neighborhoods = len(neighborhoods)
-        fine_candidates = options.resolved_fine_candidates()
-        if fine_candidates is not None and available_neighborhoods > fine_candidates:
-            neighborhoods = neighborhoods[:fine_candidates]
-        refined_neighborhoods = len(neighborhoods)
-        counter("fine_neighborhoods", float(available_neighborhoods))
-        counter("fine_neighborhoods_refined", float(refined_neighborhoods))
-        policy = options.resolved_fine_policy()
-        refined = []
-        whole_area = np.ascontiguousarray(search) if policy == "whole" else None
-        with span("fine_search"):
-            for _, angle, scale, matrix in neighborhoods:
-                center = matrix @ [(w-1)/2, (h-1)/2, 1]
-                angles = (_grid(max(options.angle_min, angle-astep),
-                                min(options.angle_max, angle+astep), options.angle_step)
-                          if options.coarse_fine else [angle])
-                scales = (_grid(max(options.scale_min, scale-sstep),
-                                min(options.scale_max, scale+sstep), options.scale_step)
-                          if options.coarse_fine else [scale])
-                poses = [(fine_angle, fine_scale)
-                         for fine_angle in angles for fine_scale in scales]
-                fine_poses_per_neighborhood = len(poses)
-                counter("fine_poses", float(len(poses)))
-                if policy == "whole":
-                    # Legacy: rescan the whole search area; the pose center only labels it.
-                    if not fine_windows:
-                        fine_windows.append({
-                            "angle": angle, "x": 0, "y": 0,
-                            "width": int(search.shape[1]), "height": int(search.shape[0]),
-                        })
-                    found, missed = _scan_grid(whole_area, pixels, options, poses, (0, 0))
-                    refined.extend(found)
-                    skipped_poses.extend(missed)
-                    # Variants larger than the search area are clipped here (legacy behaviour).
-                    bounded_outside = bounded_outside or bool(missed)
-                    continue
-                local, window, touches_border = _fine_window(
-                    search, pixels, center, angles, scales, options, skipped_poses)
-                refined.extend(local)
-                bounded_outside = bounded_outside or touches_border
-                fine_windows.append({
-                    "angle": angle, "x": window[0], "y": window[1],
-                    "width": window[2] - window[0], "height": window[3] - window[1],
-                })
-        candidates = refined
-    candidates = _suppress(candidates, pixels, options)
-    matches = []
-    for index, (score, angle, scale, matrix) in enumerate(candidates):
-        matrix = matrix.copy()
-        matrix[:2, 2] += [region.x, region.y]
-        full = matrix @ np.array(metadata.source_to_support.matrix)
-        anchor = full @ [metadata.anchor.x, metadata.anchor.y, 1]
-        center = matrix @ [(w - 1)/2, (h - 1)/2, 1]
-        matches.append(TemplateMatch(
-            target_id=str(index), center=Point(x=center[0], y=center[1]),
-            anchor=Point(x=anchor[0], y=anchor[1]), angle_degrees=angle, scale=scale, score=score,
-            mapping=coordinate_mapping(full, "reference", "inspection"),
-            support_mapping=coordinate_mapping(matrix, "support", "inspection"),
-        ))
-    fine_policy = options.resolved_fine_policy()
-    refined_locally = fine_policy == "neighborhood" and bool(fine_windows)
-    radius = _fine_radius(pixels, options) if refined_locally else None
+    found, policy, ignored = locate_support(pixels, metadata, search, options)
+    # The decimation factor is published from the engine's own report rather than
+    # recomputed here: two formulas for one quantity is exactly the drift this
+    # layer is meant to remove. No decimation means exactly 1.0.
+    factor = float(found.diagnostics.get("pyramid_factor", 1.0) or 1.0)
+    diagnostics = _engine_diagnostics(
+        found, options, algorithm=("shape" if options.algorithm == "shape" else "ncc"),
+        factor=factor, policy=policy, ignored=ignored,
+        preprocessing=metadata.preprocessing.type)
+    height, width = pixels.shape[:2]
+    matches: List[TemplateMatch] = []
+    if found.value is not None:
+        for index, match in enumerate(found.value.matches):
+            matrix = np.array(match.support_to_image.matrix, dtype=np.float64)
+            matrix[:2, 2] += [region.x, region.y]
+            full = matrix @ np.array(metadata.source_to_support.matrix, dtype=np.float64)
+            anchor = full @ [metadata.anchor.x, metadata.anchor.y, 1.0]
+            center = matrix @ [(width - 1) / 2, (height - 1) / 2, 1.0]
+            matches.append(TemplateMatch(
+                target_id=str(index),
+                center=Point(x=float(center[0]), y=float(center[1])),
+                anchor=Point(x=float(anchor[0]), y=float(anchor[1])),
+                angle_degrees=float(np.rad2deg(match.angle_rad)),
+                scale=float(match.scale), score=float(match.score),
+                mapping=coordinate_mapping(full, "reference", "inspection"),
+                support_mapping=coordinate_mapping(matrix, "support", "inspection"),
+            ))
     return TemplateMatchResult(
-        valid=bool(matches), reason=None if matches else "no_match", image=image_ref,
-        template=template, matches=matches,
-        diagnostics={"pyramid_scale": factor, "preprocessing": metadata.preprocessing.type,
-                     "metric_frame": "inspection", "normalization_recovers_size": True,
-                     "search_plan": {
-                         "resample": resample,
-                         "coarse_poses": len(coarse_poses),
-                         "fine_poses_per_neighborhood": fine_poses_per_neighborhood,
-                         "neighborhoods_available": available_neighborhoods,
-                         "neighborhoods_refined": refined_neighborhoods,
-                         "fine_candidates": fine_candidates,
-                         "fine_angle_policy": options.fine_angle_policy,
-                         "threads": search_threads(),
-                     },
-                     "fine_search": {"policy": fine_policy, "neighborhood_radius": radius,
-                                     "expand_px": options.fine_search_expand_px,
-                                     "windows": fine_windows,
-                                     "skipped_poses": skipped_poses,
-                                     "bounded_outside": bounded_outside}},
-    )
+        valid=bool(matches), reason=None if matches else (found.reason or "no_match"),
+        image=image_ref, template=template, matches=matches, diagnostics=diagnostics)
 
 
 class TemplatePointRequest(TemplateMatchRequest):
