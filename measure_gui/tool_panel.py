@@ -798,6 +798,32 @@ class ToolPanel(ttk.Frame):
         """The committed preprocessor config (what the next teach will use)."""
         return dict(self._preproc_committed)
 
+    def matching_kwargs(self) -> dict:
+        """Return every matching setting the teach call needs, as keyword args.
+
+        Teaching used to pick the widgets apart one by one at the call site, so a
+        newly added control was shown to the operator and then silently ignored:
+        a model taught with "shape" selected was saved with the default "ncc"
+        and ran correlation forever. Building the whole set in one place means a
+        new control only has to be added here.
+
+        Returns:
+            Keyword arguments accepted by
+            ``MultiTargetWorkflow.teach_template``.
+        """
+        decimate, max_side = self.pyramid_config()
+        return {
+            "match_score_threshold": float(self._score_var.get()),
+            "angle_step": float(self._angle_step_var.get()),
+            "max_matches": int(self._max_matches_var.get()),
+            "overlap": float(self._overlap_var.get()),
+            "decimate_exponent": int(decimate),
+            "coarse_template_side": int(max_side),
+            "algorithm": self.algorithm(),
+            "metric": self.metric(),
+            "min_verify_level": self.verify_level(),
+        }
+
     def algorithm(self) -> str:
         """Return the selected matcher: ``ncc`` or ``shape``."""
         value = str(self._algorithm_var.get()).strip()

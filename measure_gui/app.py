@@ -1402,14 +1402,6 @@ class MeasureApp:
             self.tool_panel.set_obb_status(
                 "模型未载入：请选择模型文件并点击「载入模型并自检」", False)
 
-    def _parse_pyramid(self) -> tuple:
-        """Return ``(decimate, max_template_size)`` from the tool panel.
-
-        The engine only treats ``decimate`` as an on/off switch; the actual
-        downsampling ratio is ``min(1, max_template_size / longest_side)``.
-        """
-        return self.tool_panel.pyramid_config()
-
     # ------------------------------------------------------------------
     # Template creation
     # ------------------------------------------------------------------
@@ -1497,22 +1489,18 @@ class MeasureApp:
             strategy = SingleBoxAlignment()
         self._workflow._alignment = strategy
 
-        decimate_exponent, pyramid_max_size = self._parse_pyramid()
         self._workflow.teach_template(
             self._reference_image,
             center=(center_row, center_col),
             size=(height, width),
             angle_deg=angle_deg,
             preprocessor=preprocessor,
-            match_score_threshold=self.tool_panel._score_var.get(),
             angle_range=angle_range,
-            angle_step=self.tool_panel._angle_step_var.get(),
-            max_matches=self.tool_panel._max_matches_var.get(),
-            overlap=self.tool_panel._overlap_var.get(),
             coarse_fine=True,
             coarse_angle_step=5.0,
-            decimate_exponent=decimate_exponent,
-            coarse_template_side=pyramid_max_size,
+            # Every matching setting comes from one source, so a control cannot
+            # be shown to the operator and then dropped on the way to the model.
+            **self.tool_panel.matching_kwargs(),
         )
         self.tool_panel.update_pyramid_factor(max(height, width))
 
@@ -1522,6 +1510,16 @@ class MeasureApp:
                 strategy.add_control_point(
                     f"cp_{i}", float(r), float(c))
             strategy.build_all_control_point_templates()
+            # Control points build their own TemplatePoints, so the matcher
+            # settings have to be applied to each of them explicitly.
+            settings = self.tool_panel.matching_kwargs()
+            for point in getattr(strategy, "_control_points", []):
+                template_point = getattr(point, "template_point", None)
+                if template_point is None:
+                    continue
+                template_point.algorithm = settings["algorithm"]
+                template_point.metric = settings["metric"]
+                template_point.min_verify_level = settings["min_verify_level"]
 
         # Update template view
         self.template_view.load_template(self._workflow.template_image)

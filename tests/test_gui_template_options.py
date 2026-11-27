@@ -225,3 +225,23 @@ def test_algorithm_round_trips(panel):
 def test_unknown_algorithm_falls_back(panel):
     panel.set_algorithm("surf")
     assert panel.algorithm() == "ncc"
+
+
+@gui_only
+def test_teach_kwargs_carry_every_matching_control(panel):
+    """A control the operator can see must reach the model.
+
+    The teach call used to read the widgets one by one, so a newly added control
+    was displayed and then dropped: a model taught with "shape" selected was
+    saved as "ncc" and ran correlation forever. Every matching control belongs
+    in this one dictionary.
+    """
+    panel.set_algorithm("shape")
+    panel.set_metric("ignore_global_polarity")
+    panel.set_verify_level(2)
+    kwargs = panel.matching_kwargs()
+    assert kwargs["algorithm"] == "shape"
+    assert kwargs["metric"] == "ignore_global_polarity"
+    assert kwargs["min_verify_level"] == 2
+    assert {"match_score_threshold", "angle_step", "max_matches", "overlap",
+            "decimate_exponent", "coarse_template_side"} <= set(kwargs)
